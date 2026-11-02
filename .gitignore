@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+tests/test_runner
+
+# Firmware binaries and packages
+*.bin
+*.efw
+
+# System & IDE files
+.DS_Store
+.vscode/
+.idea/
