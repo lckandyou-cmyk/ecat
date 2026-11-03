@@ -1,0 +1,53 @@
+/**
+ * @file ecat_foe_soes.h
+ * @brief SOES 协议栈适配层接口定义
+ */
+
+#ifndef ECAT_FOE_SOES_H
+#define ECAT_FOE_SOES_H
+
+#include "ecat_foe_core.h"
+#include "esc_foe.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    ecat_foe_core_t *core;
+    uint32_t         buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
+    bool             last_commit_failed; /**< 记录最后提交失败状态 (用于 BOOT->INIT 拦截) */
+} ecat_foe_soes_adapter_t;
+
+/**
+ * @brief 初始化 SOES 适配层
+ * @param adapter 适配层上下文
+ * @param core    核心升级状态机实例
+ * @param buffer_size SOES 配置的 fbuffer 尺寸
+ */
+void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core, uint32_t buffer_size);
+
+/**
+ * @brief SOES WRQ 检查钩子 (在主站发起 WRQ 时调用)
+ * @return 0 成功，非 0 失败 (返回 FoE 错误码)
+ */
+int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename);
+
+/**
+ * @brief SOES 写入回调函数 (绑定至 foe_file_cfg_t 的 write_function)
+ * 以 length < buffer_size 作为结束判定依据 (包含 0 长度包)。
+ * @return 0 成功；非 0 失败 (触发 SOES 下发 FOE_ERR_PROGERROR)
+ */
+uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t length);
+
+/**
+ * @brief SOES 状态迁移拦截钩子 (post_state_change_hook)
+ * 在 BOOT->INIT 迁移时，若最后提交失败，改写 *an 为 BOOT|Error 并写入错误码 0x0014
+ */
+void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as, uint8_t *an);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ECAT_FOE_SOES_H */
