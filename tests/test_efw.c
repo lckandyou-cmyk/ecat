@@ -20,12 +20,14 @@
 static int g_tests_run = 0;
 static int g_tests_passed = 0;
 static int g_tests_failed = 0;
+static bool g_efw_test_failed = false;
 
 #define TEST_ASSERT(cond, msg) do { \
     g_tests_run++; \
     if (!(cond)) { \
-        printf("  [FAIL] %s:%d: %s\n", __func__, __LINE__, msg); \
+        printf("\n    [ASSERT FAIL] %s:%d: %s", __func__, __LINE__, msg); \
         g_tests_failed++; \
+        g_efw_test_failed = true; \
         return; \
     } else { \
         g_tests_passed++; \
@@ -35,9 +37,10 @@ static int g_tests_failed = 0;
 #define TEST_ASSERT_EQ_HEX32(actual, expected, msg) do { \
     g_tests_run++; \
     if ((actual) != (expected)) { \
-        printf("  [FAIL] %s:%d: %s (实际: 0x%08X, 期望: 0x%08X)\n", \
+        printf("\n    [ASSERT FAIL] %s:%d: %s (实际: 0x%08X, 期望: 0x%08X)", \
                __func__, __LINE__, msg, (unsigned int)(actual), (unsigned int)(expected)); \
         g_tests_failed++; \
+        g_efw_test_failed = true; \
         return; \
     } else { \
         g_tests_passed++; \
@@ -47,12 +50,24 @@ static int g_tests_failed = 0;
 #define TEST_ASSERT_EQ_INT(actual, expected, msg) do { \
     g_tests_run++; \
     if ((actual) != (expected)) { \
-        printf("  [FAIL] %s:%d: %s (实际: %d, 期望: %d)\n", \
+        printf("\n    [ASSERT FAIL] %s:%d: %s (实际: %d, 期望: %d)", \
                __func__, __LINE__, msg, (int)(actual), (int)(expected)); \
         g_tests_failed++; \
+        g_efw_test_failed = true; \
         return; \
     } else { \
         g_tests_passed++; \
+    } \
+} while(0)
+
+#define RUN_TEST(fn) do { \
+    g_efw_test_failed = false; \
+    printf("  RUN   %-55s", #fn); \
+    fn(); \
+    if (!g_efw_test_failed) { \
+        printf(" [PASS]\n"); \
+    } else { \
+        printf(" [FAIL]\n"); \
     } \
 } while(0)
 
@@ -706,29 +721,29 @@ int main(void)
     printf(" 动态内存: 零 malloc / 零动态分配\n");
     printf("====================================================\n");
 
-    test_crc32_standard_vector();
-    test_spec_section8_positive_example();
-    test_negative_case1_bad_header_crc();
-    test_negative_case2_short_stream();
-    test_negative_case3_bad_flags();
-    test_negative_case4_over_receive_fuse();
-    test_edge_case_magic_err();
-    test_edge_case_format_version_err();
-    test_edge_case_header_len_min();
-    test_edge_case_header_len_max();
-    test_edge_case_header_len_align();
-    test_edge_case_reserved_nonzero();
-    test_edge_case_hw_ver_min_gt_max();
-    test_edge_case_local_hw_ver_not_supported();
-    test_edge_case_id_mismatch();
-    test_edge_case_target_not_enabled();
-    test_edge_case_payload_too_large();
-    test_edge_case_min_allow_version_invalid();
-    test_edge_case_anti_rollback();
-    test_forward_compatibility_128_byte_header();
-    test_property_512_bit_flips();
-    test_property_truncation();
-    test_vector_files_cross_check();
+    RUN_TEST(test_crc32_standard_vector);
+    RUN_TEST(test_spec_section8_positive_example);
+    RUN_TEST(test_negative_case1_bad_header_crc);
+    RUN_TEST(test_negative_case2_short_stream);
+    RUN_TEST(test_negative_case3_bad_flags);
+    RUN_TEST(test_negative_case4_over_receive_fuse);
+    RUN_TEST(test_edge_case_magic_err);
+    RUN_TEST(test_edge_case_format_version_err);
+    RUN_TEST(test_edge_case_header_len_min);
+    RUN_TEST(test_edge_case_header_len_max);
+    RUN_TEST(test_edge_case_header_len_align);
+    RUN_TEST(test_edge_case_reserved_nonzero);
+    RUN_TEST(test_edge_case_hw_ver_min_gt_max);
+    RUN_TEST(test_edge_case_local_hw_ver_not_supported);
+    RUN_TEST(test_edge_case_id_mismatch);
+    RUN_TEST(test_edge_case_target_not_enabled);
+    RUN_TEST(test_edge_case_payload_too_large);
+    RUN_TEST(test_edge_case_min_allow_version_invalid);
+    RUN_TEST(test_edge_case_anti_rollback);
+    RUN_TEST(test_forward_compatibility_128_byte_header);
+    RUN_TEST(test_property_512_bit_flips);
+    RUN_TEST(test_property_truncation);
+    RUN_TEST(test_vector_files_cross_check);
 
     printf("\n测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_tests_run, g_tests_passed, g_tests_failed);
