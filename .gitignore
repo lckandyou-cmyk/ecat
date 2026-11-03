@@ -4,11 +4,12 @@
 *.so
 *.dylib
 *.dSYM/
-tests/test_runner
+tests/test_runner*
 
 # Firmware binaries and packages
 *.bin
 *.efw
+tests/vectors/
 
 # System & IDE files
 .DS_Store

@@ -564,6 +564,135 @@ static void test_forward_compatibility_128_byte_header(void)
     TEST_ASSERT_EQ_HEX32(p_crc, hdr.payload_crc32, "跳过 64 字节扩展区后 Payload CRC 应依然吻合");
 }
 
+
+/**
+ * 测项 21: 属性测试 - 64 字节头部 512 种单比特翻转全拒绝
+ */
+static void test_property_512_bit_flips(void)
+{
+    uint8_t buf[64];
+    ecat_foe_efw_config_t cfg;
+    get_default_valid_config(&cfg);
+
+    int failed_rejections = 0;
+    for (size_t byte_idx = 0; byte_idx < 64; byte_idx++) {
+        for (int bit_idx = 0; bit_idx < 8; bit_idx++) {
+            memcpy(buf, s_spec_valid_efw, 64);
+            buf[byte_idx] ^= (uint8_t)(1U << bit_idx);
+
+            uint16_t hlen = 0;
+            ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
+            if (err1 != ECAT_FOE_EFW_OK) {
+                continue;
+            }
+
+            ecat_foe_efw_header_t hdr;
+            ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(buf, 64, &hdr);
+            if (err2 != ECAT_FOE_EFW_OK) {
+                continue;
+            }
+
+            ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+            if (err3 != ECAT_FOE_EFW_OK) {
+                continue;
+            }
+
+            failed_rejections++;
+        }
+    }
+    TEST_ASSERT_EQ_INT(failed_rejections, 0, "512 种单比特翻转必须全被解析器拒绝");
+}
+
+/**
+ * 测项 22: 属性测试 - 0 到 63 字节截断输入安全校验 (不得越界读)
+ */
+static void test_property_truncation(void)
+{
+    for (size_t len = 0; len < 64; len++) {
+        uint16_t hlen = 0;
+        ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(s_spec_valid_efw, len, 128, &hlen);
+        if (len < 8) {
+            TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 1 长度 < 8 必须返回 BUFFER_TOO_SMALL");
+        } else {
+            TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_OK, "阶段 1 长度 >= 8 探测应成功");
+        }
+
+        ecat_foe_efw_header_t hdr;
+        ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(s_spec_valid_efw, len, &hdr);
+        TEST_ASSERT_EQ_INT(err2, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 2 长度 < 64 必须返回 BUFFER_TOO_SMALL");
+    }
+}
+
+/**
+ * 辅助函数：读取并核验一个向量文件
+ */
+static void verify_vector_file(
+    const char *path,
+    uint16_t expected_target,
+    uint32_t expected_fw_ver,
+    uint32_t expected_payload_len,
+    bool check_tail_mcu_pad,
+    bool check_tail_sii_pad)
+{
+    FILE *fp = fopen(path, "rb");
+    TEST_ASSERT(fp != NULL, "打开向量文件应当成功");
+    if (fp == NULL) return;
+
+    uint8_t file_buf[1024];
+    size_t n = fread(file_buf, 1, sizeof(file_buf), fp);
+    fclose(fp);
+
+    TEST_ASSERT(n >= 64, "文件大小必须 >= 64 字节");
+    uint16_t hlen = 0;
+    ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(file_buf, 8, 128, &hlen);
+    TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_OK, "向量文件阶段 1 探测成功");
+    TEST_ASSERT_EQ_INT(hlen, 64, "向量文件头部长度应为 64");
+
+    ecat_foe_efw_header_t hdr;
+    ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(file_buf, n, &hdr);
+    TEST_ASSERT_EQ_INT(err2, ECAT_FOE_EFW_OK, "向量文件阶段 2 解析与 CRC 成功");
+
+    TEST_ASSERT_EQ_INT(hdr.target_id, expected_target, "Target ID 应与打包参数一致");
+    TEST_ASSERT_EQ_HEX32(hdr.fw_version, expected_fw_ver, "固件版本应与打包参数一致");
+    TEST_ASSERT_EQ_INT(hdr.payload_length, expected_payload_len, "有效负载长度应与期望一致");
+
+    /* 验证 Payload 数据流 CRC32 */
+    uint32_t calc_p_crc = ecat_foe_crc32_calc(file_buf + 64, hdr.payload_length);
+    TEST_ASSERT_EQ_HEX32(calc_p_crc, hdr.payload_crc32, "文件 Payload CRC 与头中记录必须一致");
+
+    if (check_tail_mcu_pad) {
+        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 1], 0xFF, "MCU 尾部填充字节必须为 0xFF");
+    }
+    if (check_tail_sii_pad) {
+        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 2], 0xFF, "SII 偶数填充字节 1 必须为 0xFF");
+        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 1], 0xFF, "SII 偶数填充字节 2 必须为 0xFF");
+    }
+}
+
+/**
+ * 测项 23: tests/vectors/ 固件向量文件解析与跨语言交叉核验
+ */
+static void test_vector_files_cross_check(void)
+{
+    /* 1. 规范正例 (MCU, 16 字节, V1.2.3.4) */
+    verify_vector_file("tests/vectors/positive_mcu.efw", 1, 0x01020304U, 16, false, false);
+
+    /* 2. MCU 尾部填充例 (448 + 1 = 449 字节) */
+    verify_vector_file("tests/vectors/padded_mcu.efw", 1, 0x01020304U, 449, true, false);
+
+    /* 3. SII 偶数填充例 (448 + 2 = 450 字节) */
+    verify_vector_file("tests/vectors/padded_sii.efw", 3, 0x01000000U, 450, false, true);
+
+    /* 4. FPGA 目标例 (Target 2, 64 字节, V2.0.0.0) */
+    verify_vector_file("tests/vectors/target_fpga.efw", 2, 0x02000000U, 64, false, false);
+
+    /* 5. SII 常规例 (Target 3, 32 字节, V1.0.0.0) */
+    verify_vector_file("tests/vectors/target_sii.efw", 3, 0x01000000U, 32, false, false);
+
+    /* 6. EEPROM 目标例 (Target 4, 48 字节, V1.0.1.0) */
+    verify_vector_file("tests/vectors/target_eeprom.efw", 4, 0x01000100U, 48, false, false);
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -597,6 +726,9 @@ int main(void)
     test_edge_case_min_allow_version_invalid();
     test_edge_case_anti_rollback();
     test_forward_compatibility_128_byte_header();
+    test_property_512_bit_flips();
+    test_property_truncation();
+    test_vector_files_cross_check();
 
     printf("\n测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_tests_run, g_tests_passed, g_tests_failed);
