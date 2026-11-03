@@ -1,0 +1,217 @@
+/**
+ * @file ecat_foe_core.h
+ * @brief EtherCAT FoE 核心升级状态机接口定义 (依据 SAD-v0.1 第 1、3、4 节)
+ *
+ * 核心状态机特性：
+ * - 纯 C99 实现，零 malloc，零动态内存分配
+ * - 严格同步阻塞执行模型
+ * - 强防变砖保证：先 invalidate，再按需 erase_to，双重 CRC 比对，成功调 finalize，失败调 abort
+ * - 细分内部错误枚举，支持映射到标准 EtherCAT FoE 错误码 (含 SOES 数据阶段 0x800B 收敛)
+ */
+
+#ifndef ECAT_FOE_CORE_H
+#define ECAT_FOE_CORE_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include "ecat_foe_efw.h"
+#include "ecat_foe_target.h"
+#include "ecat_foe_conf_template.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*                               FoE 标准错误码                               */
+/* -------------------------------------------------------------------------- */
+#define ECAT_FOE_ERRCODE_NOTDEFINED         0x8000U
+#define ECAT_FOE_ERRCODE_NOTFOUND           0x8001U  /* 文件/目标不存在或未使能 */
+#define ECAT_FOE_ERRCODE_ACCESS             0x8002U  /* 工程/硬件ID不匹配、版本超区间 */
+#define ECAT_FOE_ERRCODE_DISKFULL           0x8003U  /* 超容量、多收溢出熔断 */
+#define ECAT_FOE_ERRCODE_ILLEGAL            0x8004U  /* 魔数/版本错、非零flags、防回滚 */
+#define ECAT_FOE_ERRCODE_PACKETNO           0x8005U
+#define ECAT_FOE_ERRCODE_ALREADYEXISTS      0x8006U
+#define ECAT_FOE_ERRCODE_PROGERROR          0x800BU  /* 编程失败 (SOES 数据阶段固定收敛) */
+#define ECAT_FOE_ERRCODE_CHECKSUM           0x800CU  /* 头部/流/回读 CRC 不匹配 */
+
+/* -------------------------------------------------------------------------- */
+/*                           核心内部细分诊断错误码                           */
+/* -------------------------------------------------------------------------- */
+typedef enum {
+    ECAT_FOE_CORE_OK = 0,
+
+    /* 1. WRQ 阶段错误 */
+    ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME,        /**< 文件名语法错误或无法切分 */
+    ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH,    /**< 文件名项目字符串与本地配置不符 */
+    ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN,      /**< 目标字样未知 */
+    ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED,     /**< 目标在本地配置中被禁用 */
+
+    /* 2. 头部装配与核验错误 */
+    ECAT_FOE_CORE_ERR_HDR_PROBE,               /**< 阶段 1 探测失败 (魔数/版本/长度) */
+    ECAT_FOE_CORE_ERR_HDR_CRC,                 /**< 阶段 2 Header CRC32 校验失败 */
+    ECAT_FOE_CORE_ERR_HDR_VERIFY,              /**< 阶段 3 全量元数据安全核验失败 */
+    ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH,      /**< 文件名与文件头交叉比对失败 (target/version) */
+    ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED,  /**< payload_length 超过本地分区容量上限 */
+
+    /* 3. 目标驱动调用错误 */
+    ECAT_FOE_CORE_ERR_DRV_NOT_REGISTERED,      /**< 目标驱动未注册 */
+    ECAT_FOE_CORE_ERR_DRV_INIT,                /**< drv->init() 失败 */
+    ECAT_FOE_CORE_ERR_DRV_INVALIDATE,          /**< drv->invalidate() 失败 */
+    ECAT_FOE_CORE_ERR_DRV_ERASE,               /**< drv->erase_to() 失败 */
+    ECAT_FOE_CORE_ERR_DRV_WRITE,               /**< drv->write() 失败 */
+    ECAT_FOE_CORE_ERR_DRV_READ,                /**< drv->read() 失败 */
+    ECAT_FOE_CORE_ERR_DRV_FINALIZE,            /**< drv->finalize() 失败 */
+
+    /* 4. 流接收与校验错误 */
+    ECAT_FOE_CORE_ERR_OVER_RECEIVE,            /**< 累计偏移超过期望总长，即时熔断 */
+    ECAT_FOE_CORE_ERR_UNDER_RECEIVE,           /**< 结束时实际接收总长少于期望总长 */
+    ECAT_FOE_CORE_ERR_STREAM_CRC_MISMATCH,     /**< 数据流 CRC32 与文件头不符 */
+    ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH,   /**< 物理介质回读 CRC32 与文件头不符 */
+
+    /* 5. 协议与状态机错误 */
+    ECAT_FOE_CORE_ERR_INVALID_STATE,           /**< 状态机状态异常 */
+    ECAT_FOE_CORE_ERR_INVALID_ARG              /**< 入参非法 */
+} ecat_foe_core_err_t;
+
+/* -------------------------------------------------------------------------- */
+/*                               核心状态机状态                               */
+/* -------------------------------------------------------------------------- */
+typedef enum {
+    ECAT_FOE_STATE_IDLE = 0,                   /**< 空闲状态，等待 WRQ */
+    ECAT_FOE_STATE_WRQ_ACKED,                  /**< WRQ 通过，等待数据流并装配头部 */
+    ECAT_FOE_STATE_DATA,                       /**< 头部校验全过，进入固件擦写阶段 */
+    ECAT_FOE_STATE_SUCCESS,                    /**< 升级全流程成功，等待复位 */
+    ECAT_FOE_STATE_ERROR                       /**< 发生错误，驱动已中止清理 */
+} ecat_foe_state_t;
+
+/* -------------------------------------------------------------------------- */
+/*                             核心配置与注册结构                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief 目标驱动注册描述符
+ */
+typedef struct {
+    uint16_t target_id;                        /**< 目标 ID (1..4) */
+    bool     enabled;                          /**< 是否启用 */
+    uint32_t max_payload_size;                 /**< 分区最大允许容量 (字节) */
+    uint32_t write_unit;                       /**< 驱动物理写入对齐单位 (如 8, 256) */
+    const ecat_foe_target_driver_t *driver;    /**< 驱动操作集 */
+    void    *user_ctx;                         /**< 驱动自定义上下文 */
+} ecat_foe_target_desc_t;
+
+/**
+ * @brief 核心机全局静态配置
+ */
+typedef struct {
+    uint32_t project_id;                       /**< 本地工程 ID (0x10010001) */
+    const char *project_name;                  /**< 本地工程名 ("SERVO_DRV") */
+    uint32_t hardware_id;                      /**< 本地硬件 ID (0x00000001) */
+    uint16_t local_hw_ver;                     /**< 本地硬件版本号 (uint16) */
+    bool     anti_rollback_enable;             /**< 是否启用防回滚 */
+    ecat_foe_target_desc_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 */
+} ecat_foe_core_cfg_t;
+
+/**
+ * @brief 核心机运行上下文结构体 (纯静态内存占用)
+ */
+typedef struct {
+    ecat_foe_core_cfg_t cfg;                   /**< 本地静态配置拷贝 */
+    ecat_foe_state_t    state;                 /**< 当前状态机状态 */
+    ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
+
+    /* WRQ 解析缓存 */
+    uint16_t            req_target_id;         /**< 从文件名解析出的 target_id */
+    uint32_t            req_fw_version;        /**< 从文件名解析出的 fw_version */
+
+    /* 头部装配缓存 */
+    uint8_t             header_buf[ECAT_FOE_HEADER_BUF_MAX];
+    uint16_t            header_rx_len;         /**< 已接收头部字节数 */
+    uint16_t            header_total_len;      /**< 头部标称总长度 (>=64) */
+    bool                header_complete;       /**< 头部装配校验是否已闭环 */
+    ecat_foe_efw_header_t hdr;                 /**< 解析装配后的头部元数据 */
+
+    /* 当前会话绑定的驱动指针 */
+    const ecat_foe_target_driver_t *active_drv;
+    void               *active_user_ctx;
+    uint32_t            active_write_unit;     /**< 当前目标的 write_unit */
+
+    /* 数据流与擦写状态 */
+    uint64_t            total_rx_bytes;        /**< 累计接收总字节数 (含头部) */
+    uint32_t            payload_rx_bytes;      /**< 累计接收有效负载字节数 */
+    uint32_t            erased_watermark;      /**< 当前物理介质已擦除安全水位 */
+    uint32_t            written_offset;        /**< 物理介质已对齐写入偏移 */
+    uint32_t            stream_crc;            /**< 有效 Payload 增量流 CRC32 */
+
+    /* 残留对齐缓冲 (凑满 write_unit 再下发驱动写入) */
+    uint8_t             residual_buf[ECAT_FOE_MAX_WRITE_UNIT];
+    uint32_t            residual_len;
+} ecat_foe_core_t;
+
+/* -------------------------------------------------------------------------- */
+/*                               核心机外部接口                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief 初始化核心机上下文
+ */
+void ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
+
+/**
+ * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)
+ * 若上一次会话未闭环，主动调驱动 abort 并重置会话。
+ * @param core     核心机上下文指针
+ * @param filename 主站请求写入的文件名字符串
+ * @return 0 成功；非 0 返回标准 FoE 错误码 (0x8001, 0x8002, 0x8004 等)
+ */
+int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename);
+
+/**
+ * @brief 处理 FoE 数据块写入
+ * 包含头部流式装配、擦除前全量核验、按需覆盖擦除、write_unit 残留缓冲对齐写入与即时多收熔断。
+ * @param core 核心机上下文指针
+ * @param data 接收到的数据块指针
+ * @param len  数据块长度 (字节，len == 0 视为传输结束)
+ * @return 0 成功；非 0 失败 (SOES 适配层收敛回复 0x800B)
+ */
+int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len);
+
+/**
+ * @brief 处理传输结束通知
+ * 补齐残留 0xFF 写入、比对流 CRC、物理介质分块回读 CRC 比对并调用 finalize()/abort()。
+ * @param core 核心机上下文指针
+ * @return 0 成功；非 0 失败
+ */
+int ecat_foe_core_on_end(ecat_foe_core_t *core);
+
+/**
+ * @brief 异常中止通知 (主站取消或网络异常)
+ * 释放底层驱动并重置核心状态机。
+ */
+void ecat_foe_core_on_abort(ecat_foe_core_t *core);
+
+/**
+ * @brief 获取核心机最近一次细分错误码
+ */
+ecat_foe_core_err_t ecat_foe_core_get_last_error(const ecat_foe_core_t *core);
+
+/**
+ * @brief 将核心内部错误枚举映射为标准 FoE 错误码
+ * @param err           核心内部细分错误
+ * @param is_wrq_stage  是否为 WRQ 阶段 (true 时透传细分码；false 时 SOES 数据阶段收敛为 0x800B)
+ * @param soes_mode     是否遵循 SOES 限制 (true 时数据阶段一律回 0x800B)
+ */
+uint16_t ecat_foe_core_err_to_foe(ecat_foe_core_err_t err, bool is_wrq_stage, bool soes_mode);
+
+/**
+ * @brief 错误码转换为人类可读描述字符串
+ */
+const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ECAT_FOE_CORE_H */
