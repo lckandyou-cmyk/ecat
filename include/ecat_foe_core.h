@@ -139,6 +139,11 @@ typedef struct {
     ecat_foe_state_t    state;                 /**< 当前状态机状态 */
     ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
 
+    /* 会话生命周期与驱动调用保护标记 */
+    bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
+    bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
+    bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
+
     /* WRQ 解析缓存 */
     uint16_t            req_target_id;         /**< 从文件名解析出的 target_id */
     uint32_t            req_fw_version;        /**< 从文件名解析出的 fw_version */

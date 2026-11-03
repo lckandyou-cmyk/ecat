@@ -940,6 +940,125 @@ static void test_strict_case_sensitivity(void)
     TEST_ASSERT(test_wrq(&core, "servo_drv_MCU_V1.0.0.0.efw") != 0, "项目名小写 servo_drv 必须拒绝");
 }
 
+/* 测项 21: 避免重复 abort (失败后新 WRQ 不再重复调用 abort) */
+static void test_no_duplicate_abort_on_new_wrq(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw, efw_len - 1, 64, false); /* 故意少发 1 字节导致失败 */
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret_end != 0, "少收结束必须失败");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "失败时已调用过一次 abort");
+
+    /* 此时主站重新发起 WRQ，新会话自愈绝不重复调用 abort */
+    int ret_new_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_new_wrq, 0, "新 WRQ 必须通过");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "新 WRQ 绝不应重复调用 abort (保持为 1)");
+}
+
+/* 测项 22: 成功 finalize 后绝对不再调用 abort (即便后续更新下限失败) */
+static void test_no_abort_after_finalize_success(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+    core.cfg.anti_rollback_enable = true;
+
+    /* 模拟持久化下限失败 */
+    s_mock_set_floor_fail = true;
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x02000000U, 0x01000000U, payload, 16);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
+    feed_stream_chunks(&core, efw, efw_len, 64, false);
+    int ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret != 0, "更新下限失败返回错误");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE, "报 ANTI_ROLLBACK_UPDATE");
+
+    /* 固件已经成功 finalize，有效标记保持，绝不可调 abort */
+    TEST_ASSERT(mcu.valid_flag, "固件必须保持有效状态");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "finalize 已执行成功");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "成功 finalize 后绝对不得调用 abort");
+
+    /* 随后来新的 WRQ，也不得调用 abort */
+    test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "后续新 WRQ 也不得调用 abort");
+    s_mock_set_floor_fail = false;
+}
+
+/* 测项 23: 防回滚阶段 3 仅读取当前待升级目标 */
+static void test_anti_rollback_only_reads_current_target(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+    core.cfg.anti_rollback_enable = true;
+
+    /* 注入故障：仅让 Target 2 (FPGA) 的 floor 获取失败 */
+    s_mock_floor_fail_target_id = 2;
+
+    /* 升级 Target 1 (MCU) */
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x02000000U, 0x01000000U, payload, 16);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
+    feed_stream_chunks(&core, efw, efw_len, 64, false);
+    int ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "Target 2 异常不影响 Target 1，仅查询当前升级目标");
+
+    s_mock_floor_fail_target_id = 0;
+}
+
+/* 测项 24: 头部与多收同块时在 invalidate 前拒绝，保护旧有效标记 */
+static void test_same_block_header_over_receive_protects_valid_flag(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    /* 模拟介质中原本已经存在有效固件 */
+    mcu.valid_flag = true;
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+
+    /* 构造一个首包，其头部声明 payload_length = 16 (总长 80)
+     * 但本数据块推送了 64 字节头部 + 40 字节负载 = 104 字节 (同块多收溢出) */
+    uint8_t big_chunk[128];
+    uint8_t payload[40];
+    memset(payload, 0x55, sizeof(payload));
+    build_test_efw(big_chunk, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    /* 在末尾追加额外的多收字节，使单块总长达到 104 字节 */
+    memset(big_chunk + 80, 0xAA, 24);
+
+    /* 一次性将 104 字节推入核心 */
+    int ret = ecat_foe_core_on_data(&core, big_chunk, 104);
+    TEST_ASSERT(ret != 0, "同块多收超总长必须立即拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_OVER_RECEIVE, "报 OVER_RECEIVE 熔断");
+
+    /* 核心断言：在 invalidate 之前即刻拒绝，旧有效标记绝对没有被破坏！ */
+    TEST_ASSERT(mcu.valid_flag, "原有有效固件标记必须保持有效");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "绝对不得调用 invalidate()");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "绝对不得向物理存储写入任何数据");
+}
+
+/* -------------------------------------------------------------------------- */
+/*                               主测试入口                                   */
+/* -------------------------------------------------------------------------- */
+
 int main(void)
 {
     printf("====================================================\n");
@@ -971,6 +1090,10 @@ int main(void)
     RUN_TEST(test_config_validation_rules);
     RUN_TEST(test_bounded_wrq_parsing);
     RUN_TEST(test_strict_case_sensitivity);
+    RUN_TEST(test_no_duplicate_abort_on_new_wrq);
+    RUN_TEST(test_no_abort_after_finalize_success);
+    RUN_TEST(test_anti_rollback_only_reads_current_target);
+    RUN_TEST(test_same_block_header_over_receive_protects_valid_flag);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

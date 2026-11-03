@@ -7,6 +7,24 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
+/*                       内部会话安全与驱动中止辅助函数                       */
+/* -------------------------------------------------------------------------- */
+
+static void core_abort_driver(ecat_foe_core_t *core)
+{
+    if (core == NULL) {
+        return;
+    }
+    if (core->active_drv != NULL && core->active_drv->abort != NULL) {
+        if (core->session_active && !core->driver_abort_called && !core->driver_finalized) {
+            core->active_drv->abort(core->active_user_ctx);
+            core->driver_abort_called = true;
+        }
+    }
+    core->session_active = false;
+}
+
+/* -------------------------------------------------------------------------- */
 /*                       内部文件名逆向切分辅助函数                           */
 /* -------------------------------------------------------------------------- */
 
@@ -232,11 +250,9 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
 
-    /* 新会话自愈规则: 若上一个会话残留未闭环，主动调驱动 abort() */
+    /* 新会话自愈规则: 若上一个会话残留未闭环 (且未执行过 abort/finalize)，先调驱动 abort() */
     if (core->state != ECAT_FOE_STATE_IDLE) {
-        if (core->active_drv != NULL && core->active_drv->abort != NULL) {
-            core->active_drv->abort(core->active_user_ctx);
-        }
+        core_abort_driver(core);
         /* 重置会话上下文，保留全局 cfg */
         ecat_foe_core_cfg_t cfg_bak = core->cfg;
         ecat_foe_core_init(core, &cfg_bak);
@@ -272,6 +288,9 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
     core->req_fw_version = parsed_ver;
     core->state = ECAT_FOE_STATE_WRQ_ACKED;
     core->last_error = ECAT_FOE_CORE_OK;
+    core->session_active = false;
+    core->driver_abort_called = false;
+    core->driver_finalized = false;
     return 0;
 }
 
@@ -283,7 +302,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
 
     /* 运行时 write_unit 上限防御检查 */
     if (wunit == 0 || wunit > sizeof(core->residual_buf)) {
-        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+        core_abort_driver(core);
         core->state = ECAT_FOE_STATE_ERROR;
         core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
         return -1;
@@ -300,7 +319,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
     while (remaining > 0) {
         if (core->residual_len > 0) {
             if (core->residual_len >= wunit) {
-                if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                core_abort_driver(core);
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
                 return -1;
@@ -311,7 +330,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
             }
             /* 运行时边界保护 */
             if (core->residual_len + fill > sizeof(core->residual_buf)) {
-                if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                core_abort_driver(core);
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
                 return -1;
@@ -327,7 +346,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
                 if (write_end > core->erased_watermark) {
                     uint32_t erased_end = 0;
                     if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
-                        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                        core_abort_driver(core);
                         core->state = ECAT_FOE_STATE_ERROR;
                         core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
                         return -1;
@@ -335,7 +354,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
                     core->erased_watermark = erased_end;
                 }
                 if (drv->write(core->written_offset, core->residual_buf, wunit, ctx) != 0) {
-                    if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                    core_abort_driver(core);
                     core->state = ECAT_FOE_STATE_ERROR;
                     core->last_error = ECAT_FOE_CORE_ERR_DRV_WRITE;
                     return -1;
@@ -352,7 +371,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
                 if (write_end > core->erased_watermark) {
                     uint32_t erased_end = 0;
                     if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
-                        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                        core_abort_driver(core);
                         core->state = ECAT_FOE_STATE_ERROR;
                         core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
                         return -1;
@@ -360,7 +379,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
                     core->erased_watermark = erased_end;
                 }
                 if (drv->write(core->written_offset, p, bytes_to_write, ctx) != 0) {
-                    if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                    core_abort_driver(core);
                     core->state = ECAT_FOE_STATE_ERROR;
                     core->last_error = ECAT_FOE_CORE_ERR_DRV_WRITE;
                     return -1;
@@ -371,7 +390,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
             } else {
                 /* 运行时边界保护 */
                 if (remaining > sizeof(core->residual_buf)) {
-                    if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                    core_abort_driver(core);
                     core->state = ECAT_FOE_STATE_ERROR;
                     core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
                     return -1;
@@ -409,7 +428,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
         if (core->total_rx_bytes + (uint64_t)len > expected_total) {
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             return -1; /* 整块拒绝，不写入底层介质 */
         }
@@ -546,13 +565,17 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
 
         if (core->active_drv->invalidate != NULL) {
             if (core->active_drv->invalidate(core->active_user_ctx) != 0) {
-                if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                core_abort_driver(core);
                 core->last_error = ECAT_FOE_CORE_ERR_DRV_INVALIDATE;
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
             }
         }
 
+        /* 驱动会话激活 */
+        core->session_active = true;
+        core->driver_abort_called = false;
+        core->driver_finalized = false;
 
         /* 头部装配闭环并初始化流式写入状态 */
         core->header_complete = true;
@@ -571,7 +594,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
         if (core->total_rx_bytes + (uint64_t)p_len > expected_total) {
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             return -1;
         }
@@ -599,7 +622,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
 
     /* 1. 总长核对 */
     if (core->payload_rx_bytes != core->hdr.payload_length) {
-        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+        core_abort_driver(core);
         core->state = ECAT_FOE_STATE_ERROR;
         core->last_error = ECAT_FOE_CORE_ERR_UNDER_RECEIVE;
         return -1;
@@ -609,14 +632,14 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     if (core->residual_len > 0) {
         uint32_t wunit = core->active_write_unit;
         if (wunit > sizeof(core->residual_buf) || core->residual_len >= wunit) {
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
             return -1;
         }
         size_t pad = wunit - core->residual_len;
         if (core->residual_len + pad > sizeof(core->residual_buf)) {
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
             return -1;
@@ -627,7 +650,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         if (write_end > core->erased_watermark) {
             uint32_t erased_end = 0;
             if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
-                if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+                core_abort_driver(core);
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
                 return -1;
@@ -635,7 +658,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
             core->erased_watermark = erased_end;
         }
         if (drv->write(core->written_offset, core->residual_buf, wunit, ctx) != 0) {
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_DRV_WRITE;
             return -1;
@@ -647,7 +670,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     /* 3. 第一道防线: 流 CRC32 比对 */
     uint32_t final_stream_crc = ecat_foe_crc32_final(&core->stream_crc);
     if (final_stream_crc != core->hdr.payload_crc32) {
-        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+        core_abort_driver(core);
         core->state = ECAT_FOE_STATE_ERROR;
         core->last_error = ECAT_FOE_CORE_ERR_STREAM_CRC_MISMATCH;
         return -1;
@@ -664,7 +687,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     while (r_remaining > 0) {
         uint32_t r_chunk = (r_remaining < sizeof(read_buf)) ? r_remaining : (uint32_t)sizeof(read_buf);
         if (drv->read(r_offset, read_buf, r_chunk, ctx) != 0) {
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_DRV_READ;
             return -1;
@@ -676,7 +699,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
 
     uint32_t final_read_crc = ecat_foe_crc32_final(&read_crc);
     if (final_read_crc != core->hdr.payload_crc32) {
-        if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+        core_abort_driver(core);
         core->state = ECAT_FOE_STATE_ERROR;
         core->last_error = ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH;
         return -1;
@@ -685,12 +708,16 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     /* 5. 驱动 finalize() 提交 */
     if (drv != NULL && drv->finalize != NULL) {
         if (drv->finalize(ctx) != 0) {
-            if (core->active_drv != NULL && core->active_drv->abort != NULL) { core->active_drv->abort(core->active_user_ctx); }
+            core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_DRV_FINALIZE;
             return -1;
         }
     }
+
+    /* 成功提交后永久锁定，绝不可再调用 abort */
+    core->driver_finalized = true;
+    core->session_active = false;
 
     /* 6. 防回滚更新: finalize 成功后持久化版本下限 (失败时不调 abort，固件保持有效) */
     if (core->cfg.anti_rollback_enable) {
@@ -718,11 +745,7 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core)
     if (core == NULL) {
         return;
     }
-    if (core->active_drv != NULL && core->active_drv->abort != NULL) {
-        if (core->state == ECAT_FOE_STATE_DATA || core->state == ECAT_FOE_STATE_WRQ_ACKED) {
-            core->active_drv->abort(core->active_user_ctx);
-        }
-    }
+    core_abort_driver(core);
     core->state = ECAT_FOE_STATE_IDLE;
 }
 
