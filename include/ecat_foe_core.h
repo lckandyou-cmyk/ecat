@@ -24,6 +24,11 @@ extern "C" {
 #endif
 
 /* -------------------------------------------------------------------------- */
+/*                               常量与宏定义                                 */
+/* -------------------------------------------------------------------------- */
+#define ECAT_FOE_MAX_FILENAME_LEN           31U  /**< FoE 请求文件名最大长度 (字节) */
+
+/* -------------------------------------------------------------------------- */
 /*                               FoE 标准错误码                               */
 /* -------------------------------------------------------------------------- */
 #define ECAT_FOE_ERRCODE_NOTDEFINED         0x8000U
@@ -41,6 +46,12 @@ extern "C" {
 /* -------------------------------------------------------------------------- */
 typedef enum {
     ECAT_FOE_CORE_OK = 0,
+
+    /* 0. 核心配置与初始化错误 */
+    ECAT_FOE_CORE_ERR_CFG_INVALID,              /**< 配置参数指针为空或配置非法 */
+    ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME,         /**< project_name 为空或长度超出限制 */
+    ECAT_FOE_CORE_ERR_CFG_HEADER_BUF,           /**< 头部缓冲配置非法 (<64 或非 4 字节对齐) */
+    ECAT_FOE_CORE_ERR_CFG_TARGET,               /**< 启用目标驱动或其回调为空，或容量/对齐非法 */
 
     /* 1. WRQ 阶段错误 */
     ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME,        /**< 文件名语法错误或无法切分 */
@@ -115,6 +126,7 @@ typedef struct {
     uint32_t hardware_id;                      /**< 本地硬件 ID (0x00000001) */
     uint16_t local_hw_ver;                     /**< 本地硬件版本号 (uint16) */
     bool     anti_rollback_enable;             /**< 是否启用防回滚 */
+    uint16_t max_header_size;                  /**< 允许的头部缓冲上限 (至少 64 字节且 4 字节对齐) */
     ecat_foe_target_desc_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 */
 } ecat_foe_core_cfg_t;
 
@@ -123,6 +135,7 @@ typedef struct {
  */
 typedef struct {
     ecat_foe_core_cfg_t cfg;                   /**< 本地静态配置拷贝 */
+    bool                is_configured;         /**< 核心是否已通过合规静态配置校验 */
     ecat_foe_state_t    state;                 /**< 当前状态机状态 */
     ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
 
@@ -159,18 +172,22 @@ typedef struct {
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief 初始化核心机上下文
+ * @brief 初始化并校验核心机静态配置
+ * @param core 核心机上下文指针
+ * @param cfg  静态配置指针
+ * @return 0 成功；非 0 失败 (配置参数不合规，核心机标记不可用)
  */
-void ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
+int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
 
 /**
  * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)
  * 若上一次会话未闭环，主动调驱动 abort 并重置会话。
- * @param core     核心机上下文指针
- * @param filename 主站请求写入的文件名字符串
+ * @param core         核心机上下文指针
+ * @param filename     主站请求写入的文件名缓冲区
+ * @param filename_len 文件名长度 (字节，必须 <= FOE_FN_MAX)
  * @return 0 成功；非 0 返回标准 FoE 错误码 (0x8001, 0x8002, 0x8004 等)
  */
-int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename);
+int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t filename_len);
 
 /**
  * @brief 处理 FoE 数据块写入

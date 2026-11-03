@@ -29,9 +29,12 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
 
 /**
  * @brief SOES WRQ 检查钩子 (在主站发起 WRQ 时调用)
+ * @param adapter      适配层上下文
+ * @param filename     文件名缓冲区
+ * @param filename_len 文件名长度 (字节)
  * @return 0 成功，非 0 失败 (返回 FoE 错误码)
  */
-int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename);
+int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename, size_t filename_len);
 
 /**
  * @brief SOES 写入回调函数 (绑定至 foe_file_cfg_t 的 write_function)

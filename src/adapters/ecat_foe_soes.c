@@ -26,14 +26,14 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     s_active_adapter = adapter;
 }
 
-int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename)
+int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename, size_t filename_len)
 {
     if (adapter == NULL || adapter->core == NULL || filename == NULL) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     adapter->last_commit_failed = false;
     s_active_adapter = adapter;
-    return ecat_foe_core_on_wrq(adapter->core, filename);
+    return ecat_foe_core_on_wrq(adapter->core, filename, filename_len);
 }
 
 uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t length)
