@@ -387,7 +387,11 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             efw_cfg.targets[i].max_payload_size = core->cfg.targets[i].max_payload_size;
             if (core->cfg.anti_rollback_enable) {
                 uint32_t floor_ver = 0;
-                port_get_version_floor((uint16_t)(i + 1), &floor_ver);
+                if (port_get_version_floor((uint16_t)(i + 1), &floor_ver) != 0) {
+                    core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET;
+                    core->state = ECAT_FOE_STATE_ERROR;
+                    return -1;
+                }
                 efw_cfg.targets[i].version_floor = floor_ver;
             }
         }
@@ -574,12 +578,20 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         }
     }
 
-    /* 6. 防回滚更新: finalize 成功后持久化版本下限 */
+    /* 6. 防回滚更新: finalize 成功后持久化版本下限 (失败时不调 abort，固件保持有效) */
     if (core->cfg.anti_rollback_enable) {
         uint32_t old_floor = 0;
-        port_get_version_floor(core->hdr.target_id, &old_floor);
+        if (port_get_version_floor(core->hdr.target_id, &old_floor) != 0) {
+            core->state = ECAT_FOE_STATE_ERROR;
+            core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE;
+            return -1;
+        }
         uint32_t new_floor = (old_floor > core->hdr.min_allow_version) ? old_floor : core->hdr.min_allow_version;
-        port_set_version_floor(core->hdr.target_id, new_floor);
+        if (port_set_version_floor(core->hdr.target_id, new_floor) != 0) {
+            core->state = ECAT_FOE_STATE_ERROR;
+            core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE;
+            return -1;
+        }
     }
 
     core->state = ECAT_FOE_STATE_SUCCESS;
@@ -613,14 +625,13 @@ uint16_t ecat_foe_core_err_to_foe(ecat_foe_core_err_t err, bool is_wrq_stage, bo
 
     if (is_wrq_stage) {
         switch (err) {
+        case ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH:
         case ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN:
         case ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED:
-            return ECAT_FOE_ERRCODE_NOTFOUND;
-        case ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH:
-            return ECAT_FOE_ERRCODE_ACCESS;
+            return ECAT_FOE_ERRCODE_NOTFOUND; /* 0x8001: 项目名不符、目标不存在或未启用 */
         case ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME:
         default:
-            return ECAT_FOE_ERRCODE_ILLEGAL;
+            return ECAT_FOE_ERRCODE_ILLEGAL;  /* 0x8004: 文件名格式不对 */
         }
     }
 
@@ -651,6 +662,8 @@ const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err)
 {
     switch (err) {
     case ECAT_FOE_CORE_OK: return "OK";
+    case ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET: return "Anti-rollback get floor failed";
+    case ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE: return "Anti-rollback set floor failed";
     case ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME: return "Invalid filename format";
     case ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH: return "Project name mismatch";
     case ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN: return "Unknown target";

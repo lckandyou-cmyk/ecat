@@ -48,6 +48,10 @@ typedef enum {
     ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN,      /**< 目标字样未知 */
     ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED,     /**< 目标在本地配置中被禁用 */
 
+    /* 1.1 防回滚错误 */
+    ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET,       /**< 获取版本下限失败拒绝升级 */
+    ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE,    /**< finalize 成功后更新版本下限失败 (固件保持有效) */
+
     /* 2. 头部装配与核验错误 */
     ECAT_FOE_CORE_ERR_HDR_PROBE,               /**< 阶段 1 探测失败 (魔数/版本/长度) */
     ECAT_FOE_CORE_ERR_HDR_CRC,                 /**< 阶段 2 Header CRC32 校验失败 */
