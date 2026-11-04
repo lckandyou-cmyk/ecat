@@ -55,6 +55,13 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
 	@./$(TEST_CORE_BIN)
+	@echo "--- 运行普通测试二进制受限栈回归核验 (8MB 与 1MB 栈) ---"
+	@(ulimit -s 8192 && ./$(TEST_CORE_BIN) >/dev/null)
+	@(ulimit -s 1024 && ./$(TEST_CORE_BIN) >/dev/null)
+	@echo "  [PASS] 普通 $$(basename $(TEST_CORE_BIN)) 在 8MB 与 1MB 栈下运行正常"
+	@(ulimit -s 8192 && ./$(TEST_EFW_BIN) >/dev/null)
+	@(ulimit -s 1024 && ./$(TEST_EFW_BIN) >/dev/null)
+	@echo "  [PASS] 普通 $$(basename $(TEST_EFW_BIN)) 在 8MB 与 1MB 栈下运行正常"
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
