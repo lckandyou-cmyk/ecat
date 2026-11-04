@@ -1245,6 +1245,78 @@ static void test_padding_capacity_boundary(void)
     TEST_ASSERT_EQ_INT(mcu.count_write, 0, "补齐超限绝不得写入介质");
 }
 
+/* 28. 失败后新 WRQ 自愈成功与生命周期解耦回归测试 */
+static void test_failed_session_new_wrq_full_upgrade_recovery(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+
+    /* 验证外部临时栈字符串内存契约: init 之后外部字符串被覆写为垃圾值，核心仍安全工作 */
+    {
+        char temp_stack_project[32];
+        memset(temp_stack_project, 0, sizeof(temp_stack_project));
+        strcpy(temp_stack_project, "SERVO_DRV");
+
+        ecat_foe_core_cfg_t temp_cfg;
+        memset(&temp_cfg, 0, sizeof(temp_cfg));
+        temp_cfg.project_id = 0x10010001U;
+        temp_cfg.project_name = temp_stack_project;
+        temp_cfg.hardware_id = 0x00000001U;
+        temp_cfg.local_hw_ver = 1;
+        temp_cfg.max_header_size = 64;
+        temp_cfg.targets[0].target_id = 1;
+        temp_cfg.targets[0].enabled = true;
+        temp_cfg.targets[0].max_payload_size = 0x00010000U;
+        temp_cfg.targets[0].write_unit = 8;
+        temp_cfg.targets[0].driver = &mcu.driver;
+        temp_cfg.targets[0].user_ctx = &mcu;
+
+        int init_ret = ecat_foe_core_init(&core, &temp_cfg);
+        TEST_ASSERT_EQ_INT(init_ret, 0, "使用栈项目名初始化核心机成功");
+
+        /* 外部栈内存覆写为无意义垃圾字符 */
+        memset(temp_stack_project, 0x55, sizeof(temp_stack_project));
+    }
+
+    uint8_t payload[16] = {0x11, 0x22, 0x33, 0x44};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    /* 阶段 1: 故意诱发上一会话失败 (CRC 校验失败) */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    uint8_t bad_efw[256];
+    memcpy(bad_efw, efw, efw_len);
+    bad_efw[64] ^= 0xEE; /* 篡改有效 Payload 破坏 CRC */
+    feed_stream_chunks(&core, bad_efw, efw_len, 32, false);
+    int ret_fail = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret_fail != 0, "上一会话 CRC 损坏必须失败");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "核心状态进入 ERROR");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "驱动已执行一次 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "失败会话 finalize 为 0");
+    TEST_ASSERT(!mcu.valid_flag, "固件标记保持无效");
+
+    /* 阶段 2: 不重新调用 init，直接下发全新合法 WRQ 启动自愈升级 */
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "失败后下发新 WRQ 自愈成功");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "自愈重置不发生重复 abort 泄漏");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "WRQ 阶段尚未进入数据流，驱动 init 维持 1");
+
+    /* 阶段 3: 完整灌入正确固件流并闭环全量升级 */
+    feed_stream_chunks(&core, efw, efw_len, 32, false);
+    TEST_ASSERT_EQ_INT(mcu.count_init, 2, "解完固件头后新会话重新激活驱动 init");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 2, "新会话重新执行 invalidate");
+
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "新会话自愈后完整升级闭环成功");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_SUCCESS, "最终状态机处于 SUCCESS");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动成功执行 finalize 固件提交");
+    TEST_ASSERT(mcu.valid_flag, "固件有效标记已成功置为 true");
+
+    /* 验证介质写入内容与原始 Payload 完全一致 */
+    TEST_ASSERT(memcmp(mcu.mem, payload, 16) == 0, "烧录介质内容与原始 Payload 一致");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -1287,6 +1359,7 @@ int main(void)
     RUN_TEST(test_driver_lifecycle_init_invalidate_abort_retry);
     RUN_TEST(test_erase_to_insufficient_erased_end_fails);
     RUN_TEST(test_padding_capacity_boundary);
+    RUN_TEST(test_failed_session_new_wrq_full_upgrade_recovery);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

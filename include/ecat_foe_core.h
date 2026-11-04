@@ -122,7 +122,15 @@ typedef struct {
  */
 typedef struct {
     uint32_t project_id;                       /**< 本地工程 ID (0x10010001) */
-    const char *project_name;                  /**< 本地工程名 ("SERVO_DRV") */
+    /**
+     * @brief 本地工程名 (如 "SERVO_DRV")
+     *
+     * 【内存与生命周期契约】：
+     * - 调用者传入的 project_name 必须是以 '\0' 结尾的合法字符串，长度在 [1, ECAT_FOE_MAX_FILENAME_LEN]；
+     * - ecat_foe_core_init 会在校验通过后将其完整深拷贝至 core->local_project_name 静态数组中；
+     * - 函数返回后，调用者传入的字符串内存可立即释放或被覆写（如栈局部变量），核心不再持有外部指针引用。
+     */
+    const char *project_name;
     uint32_t hardware_id;                      /**< 本地硬件 ID (0x00000001) */
     uint16_t local_hw_ver;                     /**< 本地硬件版本号 (uint16) */
     bool     anti_rollback_enable;             /**< 是否启用防回滚 */
@@ -132,6 +140,12 @@ typedef struct {
 
 /**
  * @brief 核心机运行上下文结构体 (纯静态内存占用)
+ *
+ * 【结构体复制与移动限制 (Non-movable Contract)】：
+ * - 本结构体内部包含自引用指针（core->cfg.project_name 指向 core->local_project_name）以及当前会话上下文；
+ * - 严禁在内存中通过 memcpy 或结构体赋值进行浅拷贝/移动！
+ *   若发生浅拷贝，目标实例的 cfg.project_name 将沦为指向源实例地址的悬垂指针；
+ * - 若需在新的内存地址启用核心，必须在新地址上显式调用 ecat_foe_core_init() 进行重新初始化与绑定。
  */
 typedef struct {
     ecat_foe_core_cfg_t cfg;                   /**< 本地静态配置拷贝 */
@@ -181,6 +195,12 @@ typedef struct {
 
 /**
  * @brief 初始化并校验核心机静态配置
+ *
+ * 【内存与安全保证】：
+ * - 纯 C99 实现，零动态内存分配 (malloc)；
+ * - 会将 cfg->project_name 深拷贝到内部 local_project_name 数组中，调用完成后外部字符串即可安全释放；
+ * - 严禁浅拷贝 core 结构体实例（见 ecat_foe_core_t 的 Non-movable 契约）。
+ *
  * @param core 核心机上下文指针
  * @param cfg  静态配置指针
  * @return 0 成功；非 0 失败 (配置参数不合规，核心机标记不可用)

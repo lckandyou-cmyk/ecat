@@ -295,7 +295,7 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
     uint32_t parsed_ver = 0;
     ecat_foe_core_err_t err = ECAT_FOE_CORE_OK;
 
-    if (!parse_filename_reverse(filename, filename_len, core->cfg.project_name, &parsed_tid, &parsed_ver, &err)) {
+    if (!parse_filename_reverse(filename, filename_len, core->local_project_name, &parsed_tid, &parsed_ver, &err)) {
         core->last_error = err;
         core->state = ECAT_FOE_STATE_ERROR;
         return ecat_foe_core_err_to_foe(err, true, false);
