@@ -10,7 +10,7 @@
 - **当前阶段**：
   - **阶段 A（固件解析与核验）**：已完成。支持 64 字节 `.efw` 头部的三阶段反序列化、小端安全读写、双向元数据校验及 IEEE 802.3 CRC32 运算。
   - **阶段 B（核心升级状态机与适配）**：已完成核心机与 SOES 适配桩验证。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
-  - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（共 439 项断言无一失败）。
+  - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（共 455 项断言无一失败）。
 
 ---
 
@@ -35,11 +35,11 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层实现**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现适配薄层。
-- **原生协议栈限制与现状说明**：
-  - *动态文件名匹配*：原生 SOES（`esc_foe.c:70-73`）使用静态精确匹配（`strncmp(foe_file_name, foe_cfg->files[i].name, num_chars)`），无外部 WRQ 文件名回调钩子。动态版本文件名无法通过原生静态匹配。协议架构是否调整为固定目标文件名（如 `SERVO_DRV_MCU.efw`）或引入轻量钩子尚待最终裁定，当前代码库保持分层解耦，暂不变更现有架构；
-  - *0 长度包分支*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。适配层通过 `post_state_change_hook` 在主站尝试退出 BOOT 状态（`BOOT -> INIT`）时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`，防止错误固件被引导运行；
-  - *RRQ 读取*：原生 SOES 的 RRQ 读取直接从静态 `foe_cfg->fbuffer` 获取（`esc_foe.c:121-133`），文件配置结构体中无 `read_function`，未开启 `FOE_READ_SUPPORTED` 宏时直接返回 `0x8000 (NOTDEFINED)`。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现初步的接口转换打样与单测桩（测试短包识别与状态标志）。**真实 SOES 源码尚未集成编译，真实联调尚未开展【未核实/待开发验证】**。
+- **原生协议栈限制与技术约束**：
+  - *文件名匹配机制*：原生 SOES（`esc_foe.c:72`）采用 `strncmp(foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定**由接收到的文件名长度 `num_chars` 决定前缀匹配，而非精确匹配**。原生 SOES 无外部 WRQ 动态路由钩子，携带动态版本号的文件名若超出静态表项长度将导致匹配失败。固件协议架构是否变更为固定目标名（如 `SERVO_DRV_MCU.efw`）或引入轻量钩子尚待最终决策，当前核心库暂不变更现有协议架构；
+  - *0 长度结束包与 AL 错误*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。虽然适配方案设想通过 `post_state_change_hook` 拦截退出 BOOT 状态，但**当前适配器并没有调用 `ESC_ALerror` 设置 AL 状态错误码，且真实 SOES 接入未完成，绝不能声称已经拦截或保证防止错误固件启动**。当前系统依赖在会话初期执行 `invalidate()` 确保物理介质固件被标记为无效，作为防砖底线；
+  - *关闭 RRQ 的真实编译方式*：原生 SOES 使用 `#ifdef FOE_READ_SUPPORTED` 控制代码编译。若在编译配置中定义了 `-DFOE_READ_SUPPORTED=0`，由于宏已被定义，`#ifdef` 仍会判定为真并试图编译！**只有完全未定义（即 `#undef FOE_READ_SUPPORTED` 或不传该宏定义）时**，RRQ 才会落入 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`。
 
 ### 2. Beckhoff Slave Stack Code (SSC) 接入
 - **状态**：【未核实 / 待开发】。目前适配层仅规划了接口边界，尚未包含面向真实 SSC 协议栈的回调实现。
