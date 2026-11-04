@@ -909,6 +909,19 @@ static void test_config_validation_rules(void)
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), 0, "合规配置初始化必须成功");
     TEST_ASSERT(core.is_configured, "is_configured 必须为 true");
 
+    /* H. project_name 生命周期解耦测试 (外部临时缓冲区被覆写后核心仍能正常工作) */
+    char temp_stack_proj[32];
+    strncpy(temp_stack_proj, "TEMP_PROJ", sizeof(temp_stack_proj));
+    cfg.project_name = temp_stack_proj;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), 0, "临时项目名初始化成功");
+    /* 模拟外部临时缓冲区失效/被破坏 */
+    memset(temp_stack_proj, 0xAA, sizeof(temp_stack_proj));
+    /* 核心机依靠内部深拷贝的 local_project_name 依然能够正常处理 WRQ */
+    int ret_decouple = ecat_foe_core_on_wrq(&core, "TEMP_PROJ_MCU_V1.0.0.0.efw", 26);
+    TEST_ASSERT_EQ_INT(ret_decouple, 0, "项目名生命周期解耦: 外部缓冲失效后核心仍匹配成功");
+    cfg.project_name = "SERVO_DRV";
+    ecat_foe_core_init(&core, &cfg);
+
     memset(&core, 0, sizeof(core)); /* 模拟未初始化的野核心 */
     int ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT(ret_wrq != 0, "未配置核心必须直接拒绝 WRQ");
@@ -1130,27 +1143,62 @@ static void test_driver_lifecycle_init_invalidate_abort_retry(void)
     TEST_ASSERT(mcu.valid_flag, "固件恢复有效标记");
 }
 
-/* 测项 26: erase_to 返回成功但 erased_end < need_end 必须拦截并调 abort */
+/* 测项 26: erase_to 擦除水位不足的三条调用路径全量测试 */
 static void test_erase_to_insufficient_erased_end_fails(void)
 {
     mock_driver_t mcu;
-    mock_driver_init(&mcu);
     ecat_foe_core_t core;
-    setup_default_core(&core, &mcu, NULL, NULL);
-
-    /* 注入擦除不足故障 */
-    mcu.inject_insufficient_erase = true;
-
-    uint8_t payload[16] = {1, 2, 3};
+    uint8_t payload[32];
+    for (int i = 0; i < 32; i++) payload[i] = (uint8_t)i;
     uint8_t efw[256];
-    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
 
+    /* 路径 2: core_process_payload_bytes 中整块多块直接写入时触发 erase_to 擦除不足 */
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    mcu.inject_insufficient_erase = true;
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     int ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
-    TEST_ASSERT(ret != 0, "erased_end < need_end 必须被拒绝");
+    TEST_ASSERT(ret != 0, "路径 2: 整块写入时 erased_end < need_end 必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "报 DRV_ERASE 错误");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "擦除不足必须调用 abort 释放资源");
-    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "擦除不足绝不得向物理介质写入数据");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 2 必须调用 abort 释放资源");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 2 绝不得向物理介质写入数据");
+
+    /* 路径 1: core_process_payload_bytes 中凑满 residual_buf == write_unit 时触发 erase_to 擦除不足 */
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    /* 先正常写入前 8 字节并正常擦除前 4KB */
+    efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    /* 送 64B 头部 + 4B 负载 (residual_len = 4, 此时调用了第 1 次正常擦除) */
+    ecat_foe_core_on_data(&core, efw, 68);
+    TEST_ASSERT_EQ_INT(core.residual_len, 4, "头部完成后残留 4 字节");
+    /* 此时强行将 erased_watermark 改小到 4，使得凑满 8 字节时必须再次调 erase_to，并注入擦除不足 */
+    core.erased_watermark = 4;
+    mcu.inject_insufficient_erase = true;
+    /* 再送 4 字节，凑满 8 字节 (触发路径 1) */
+    ret = ecat_foe_core_on_data(&core, efw + 68, 4);
+    TEST_ASSERT(ret != 0, "路径 1: 凑满 write_unit 时 erased_end < need_end 必须被拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "路径 1 报 DRV_ERASE 错误");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 1 必须调用 abort 释放资源");
+
+    /* 路径 3: ecat_foe_core_on_end 中尾部补齐写入时触发 erase_to 擦除不足 */
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    /* 构造一个仅 4 字节有效负载的固件 (小于 write_unit 8) */
+    efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 4);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    /* 发送 64B 头部 + 4B 负载，全部滞留在 residual_buf 中，尚未触发写入和擦除 */
+    ecat_foe_core_on_data(&core, efw, 68);
+    TEST_ASSERT_EQ_INT(core.residual_len, 4, "4 字节滞留在 residual_buf");
+    TEST_ASSERT_EQ_INT(mcu.count_erase, 0, "此时尚未调用擦除");
+    /* 注入擦除不足，触发 on_end 补齐写入 (路径 3) */
+    mcu.inject_insufficient_erase = true;
+    ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret != 0, "路径 3: 尾部补齐时 erased_end < need_end 必须被拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "路径 3 报 DRV_ERASE 错误");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 3 必须调用 abort 释放资源");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 3 绝不得向物理介质写入数据");
 }
 
 /* 测项 27: 尾部补齐容量边界防御 (aligned_len 刚好等于分区上限及补齐超限防护) */
@@ -1179,6 +1227,22 @@ static void test_padding_capacity_boundary(void)
     TEST_ASSERT_EQ_INT(mcu.count_write, 2, "写入 2 块 8 字节 (总共 16 字节)");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "成功提交 finalize");
     TEST_ASSERT(mcu.valid_flag, "固件置为有效");
+
+    /* B. 防御性分支验证：模拟运行时异常导致补齐后的 write_end 超出目标物理限额 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    core.cfg.targets[0].write_unit = 8U;
+    /* 发送 4 字节数据滞留于 residual_buf */
+    efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 4);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw, 68);
+    /* 此时在 on_end 执行前，若分区物理限额被异常收缩为 4 字节 (补齐需要写到第 8 字节) */
+    core.cfg.targets[0].max_payload_size = 4U;
+    ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret != 0, "补齐超出分区容量限制必须被拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED, "报 PAYLOAD_LIMIT_EXCEEDED");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "补齐超限必须调用 abort 释放资源");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "补齐超限绝不得写入介质");
 }
 
 /* -------------------------------------------------------------------------- */

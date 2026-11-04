@@ -176,14 +176,33 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     if (core == NULL) {
         return -1;
     }
-    memset(core, 0, sizeof(*core));
-    core->state = ECAT_FOE_STATE_ERROR;
-    core->is_configured = false;
-
     if (cfg == NULL) {
+        memset(core, 0, sizeof(*core));
+        core->state = ECAT_FOE_STATE_ERROR;
+        core->is_configured = false;
         core->last_error = ECAT_FOE_CORE_ERR_CFG_INVALID;
         return -1;
     }
+
+    /* 安全防线：防止 cfg 或其 project_name 位于 core 内部而在 memset 时被自销毁 */
+    ecat_foe_core_cfg_t local_cfg = *cfg;
+    char temp_pname[ECAT_FOE_MAX_FILENAME_LEN + 1];
+    if (local_cfg.project_name != NULL) {
+        size_t l = 0;
+        while (l <= ECAT_FOE_MAX_FILENAME_LEN && local_cfg.project_name[l] != '\0') {
+            temp_pname[l] = local_cfg.project_name[l];
+            l++;
+        }
+        if (l <= ECAT_FOE_MAX_FILENAME_LEN) {
+            temp_pname[l] = '\0';
+            local_cfg.project_name = temp_pname;
+        }
+    }
+
+    memset(core, 0, sizeof(*core));
+    core->state = ECAT_FOE_STATE_ERROR;
+    core->is_configured = false;
+    cfg = &local_cfg;
 
     /* 1. 校验非空且长度合理的 project_name (有界安全扫描，最多探测 32 字节) */
     if (cfg->project_name == NULL) {
@@ -233,8 +252,11 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         }
     }
 
-    /* 全部静态配置校验通过，正式装载 */
+    /* 全部静态配置校验通过，正式装载并持久化项目名，解除外部指针生命周期依赖 */
     core->cfg = *cfg;
+    memcpy(core->local_project_name, cfg->project_name, plen);
+    core->local_project_name[plen] = '\0';
+    core->cfg.project_name = core->local_project_name;
     core->is_configured = true;
     core->state = ECAT_FOE_STATE_IDLE;
     core->last_error = ECAT_FOE_CORE_OK;

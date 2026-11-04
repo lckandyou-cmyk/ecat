@@ -144,6 +144,9 @@ typedef struct {
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
 
+    /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
+    char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];
+
     /* WRQ 解析缓存 */
     uint16_t            req_target_id;         /**< 从文件名解析出的 target_id */
     uint32_t            req_fw_version;        /**< 从文件名解析出的 fw_version */
