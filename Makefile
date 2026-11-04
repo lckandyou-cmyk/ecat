@@ -60,7 +60,7 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 
 test-asan:
 	$(MAKE) clean
-	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
+	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g -fno-inline"
 
 clean:
 	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw
