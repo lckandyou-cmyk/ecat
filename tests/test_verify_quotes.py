@@ -541,7 +541,7 @@ def test_fixture_suite():
         })
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
-        assert_case("Case 25: 权威文档豁免反例拦截", 1, "位于权威规范文档", manifest, repo, soes)
+        assert_case("Case 25: 权威文档豁免反例拦截", 1, "位于非归档路径", manifest, repo, soes)
 
     # Case 26: 归档豁免与统计总数一致性测试
     with tempfile.TemporaryDirectory() as td:
@@ -605,6 +605,132 @@ def test_fixture_suite():
             print(f"  [FAIL] Case 26: 期望成功且统计要素匹配，实际 exit={res.returncode}")
             print(f"         stdout:\n{res.stdout}")
             print(f"         stderr:\n{res.stderr}")
+
+    # Case 27: 豁免路径根路径前缀拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": "/docs/archive/test.md",
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": "dummy_hash",
+            "verification_status": "TEST_ABS",
+            "reason": "根路径测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 27: 豁免路径根路径前缀拦截", 1, "非法根路径前缀", manifest, repo, soes)
+
+    # Case 28: 豁免路径包含 '..' 父级跳转拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": "docs/archive/../test_doc.md",
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": "dummy_hash",
+            "verification_status": "TEST_TRAVERSAL",
+            "reason": "遍历测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 28: 豁免路径父级跳转拦截", 1, "包含非法父级跳转 '..'", manifest, repo, soes)
+
+    # Case 29: 豁免路径文件不存在拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": "docs/archive/non_existent.md",
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": "dummy_hash",
+            "verification_status": "TEST_NON_EXISTENT",
+            "reason": "不存在文件测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 29: 豁免路径文件不存在拦截", 1, "绑定的文档文件不存在或非普通文件", manifest, repo, soes)
+
+    # Case 30: 豁免路径 docs/archived.md 伪归档拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        fake_doc = os.path.join(repo, "docs/archived.md")
+        line_text = "伪归档文档引用: `esc_foe.c:100`"
+        with open(fake_doc, "w", encoding="utf-8") as f:
+            f.write(line_text + "\n")
+        l_hash = hashlib.sha256(line_text.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": "docs/archived.md",
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": l_hash,
+            "verification_status": "TEST_FAKE_ARCHIVE_FILE",
+            "reason": "伪归档文件测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 30: 伪归档文件 docs/archived.md 拦截", 1, "位于非归档路径", manifest, repo, soes)
+
+    # Case 31: 豁免路径 docs/archive_extra/test.md 伪归档拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        fake_doc = os.path.join(repo, "docs/archive_extra/test.md")
+        os.makedirs(os.path.dirname(fake_doc), exist_ok=True)
+        line_text = "伪归档目录引用: `esc_foe.c:100`"
+        with open(fake_doc, "w", encoding="utf-8") as f:
+            f.write(line_text + "\n")
+        l_hash = hashlib.sha256(line_text.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": "docs/archive_extra/test.md",
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": l_hash,
+            "verification_status": "TEST_FAKE_ARCHIVE_DIR",
+            "reason": "伪归档目录测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 31: 伪归档目录 docs/archive_extra 拦截", 1, "位于非归档路径", manifest, repo, soes)
+
+    # Case 32: 正常多级归档路径 docs/archive/sub/report.md 通过
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        sub_doc_rel = "docs/archive/sub/report.md"
+        sub_doc = os.path.join(repo, sub_doc_rel)
+        os.makedirs(os.path.dirname(sub_doc), exist_ok=True)
+        line_text = "多级归档引用: `esc_foe.c:100`"
+        with open(sub_doc, "w", encoding="utf-8") as f:
+            f.write(line_text + "\n")
+        l_hash = hashlib.sha256(line_text.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [{
+            "doc_path": sub_doc_rel,
+            "doc_line": 1,
+            "source_file": "esc_foe.c",
+            "line_reference": "100",
+            "line_text_hash": l_hash,
+            "verification_status": "TEST_SUB_ARCHIVE",
+            "reason": "多级归档通过测试"
+        }]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 32: 多级归档路径 docs/archive/sub/report.md 通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
 
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")

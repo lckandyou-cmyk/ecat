@@ -264,6 +264,54 @@ def is_line_covered_by_local_quote(
 
     return False
 
+def is_valid_archive_doc_path(raw_path: str) -> bool:
+    """按路径分段校验是否为合法的 docs/archive/ 归档路径"""
+    if not raw_path or not isinstance(raw_path, str):
+        return False
+    if os.path.isabs(raw_path) or raw_path.startswith("/") or raw_path.startswith("\\"):
+        return False
+    if ".." in raw_path.replace("\\", "/").split("/"):
+        return False
+    norm = os.path.normpath(raw_path).replace("\\", "/")
+    parts = norm.split("/")
+    if ".." in parts or norm.startswith("../"):
+        return False
+    return (len(parts) >= 3 and parts[0] == "docs" and parts[1] == "archive")
+
+def validate_exemption_path_and_archive(ex_idx: int, raw_path: str, repo_root: str) -> Tuple[bool, List[str]]:
+    """校验豁免项路径，拒绝根路径前缀、.. 跳转、不存在路径及非 docs/archive/ 路径"""
+    errs = []
+    if not raw_path or not isinstance(raw_path, str):
+        errs.append(f"豁免项 #{ex_idx} doc_path 为空或类型错误")
+        return False, errs
+
+    if os.path.isabs(raw_path) or raw_path.startswith("/") or raw_path.startswith("\\"):
+        errs.append(f"豁免项 #{ex_idx} 文档路径为非法根路径前缀 '{raw_path}'，必须使用相对仓库根目录的相对路径")
+        return False, errs
+
+    if ".." in raw_path.replace("\\", "/").split("/"):
+        errs.append(f"豁免项 #{ex_idx} 文档路径包含非法父级跳转 '..'：'{raw_path}'")
+        return False, errs
+
+    norm = os.path.normpath(raw_path).replace("\\", "/")
+    parts = norm.split("/")
+    if ".." in parts or norm.startswith("../"):
+        errs.append(f"豁免项 #{ex_idx} 规范化路径包含非法父级跳转 '..'：'{raw_path}'")
+        return False, errs
+
+    full_path = os.path.join(repo_root, norm)
+    if not os.path.isfile(full_path):
+        errs.append(f"豁免项 #{ex_idx} 绑定的文档文件不存在或非普通文件: '{raw_path}'")
+        return False, errs
+
+    if not (len(parts) >= 3 and parts[0] == "docs" and parts[1] == "archive"):
+        errs.append(
+            f"豁免项 #{ex_idx} 位于非归档路径 '{norm}'：正文行号豁免仅允许用于 docs/archive/ 目录下的归档历史文档，权威文档中引用源码必须在 quotes 中注册正式 Quote 块"
+        )
+        return False, errs
+
+    return True, []
+
 def scan_unregistered_prose_lines(
     repo_root: str,
     quotes_map: Dict[str, Dict[str, Any]],
@@ -350,13 +398,11 @@ def scan_unregistered_prose_lines(
             except Exception as e:
                 errors.append(f"读取文档失败: {doc_rel} ({e})")
 
-    # 规则核验：权威规范文档 (非 docs/archive) 严格禁止使用行号豁免，源码引用必须通过 quotes 注册正式引文块
+    # 规则核验：严格路径分段校验，拒绝非相对路径、.. 跳转、不存在文件及非 docs/archive/ 目录豁免
     for idx, ex in enumerate(exemptions):
-        doc_p = os.path.normpath(ex.get("doc_path", "")).replace("\\", "/")
-        if not doc_p.startswith("docs/archive"):
-            errors.append(
-                f"豁免项 #{idx} 位于权威规范文档 '{doc_p}'：正文行号豁免仅允许用于归档历史文档 (docs/archive/)，权威文档中引用源码必须在 quotes 中注册正式 Quote 块"
-            )
+        p_ok, p_errs = validate_exemption_path_and_archive(idx, ex.get("doc_path", ""), repo_root)
+        if not p_ok:
+            errors.extend(p_errs)
 
     # 反向检查：豁免清单中的条目必须真实命中，杜绝悬垂或幽灵豁免
     for idx, ex in enumerate(exemptions):
@@ -365,14 +411,8 @@ def scan_unregistered_prose_lines(
                 f"豁免项 #{idx} 未在实际文档中命中或文本哈希不符: {ex.get('doc_path')}:{ex.get('doc_line')} -> {ex.get('source_file')}:{ex.get('line_reference')}"
             )
 
-    authoritative_count = len([
-        ex for ex in exemptions
-        if not os.path.normpath(ex.get("doc_path", "")).replace("\\", "/").startswith("docs/archive")
-    ])
-    archive_count = len([
-        ex for ex in exemptions
-        if os.path.normpath(ex.get("doc_path", "")).replace("\\", "/").startswith("docs/archive")
-    ])
+    archive_count = sum(1 for ex in exemptions if is_valid_archive_doc_path(ex.get("doc_path", "")))
+    authoritative_count = len(exemptions) - archive_count
 
     stats: Dict[str, Any] = {
         "local_quote_adjacent": local_quote_adjacent_count,
