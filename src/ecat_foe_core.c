@@ -661,6 +661,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
             }
+            core->driver_invalidated = true;
         }
 
         /* 头部装配闭环并初始化流式写入状态 */
@@ -811,6 +812,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
 
     /* 成功提交后永久锁定，绝不可再调用 abort */
     core->driver_finalized = true;
+    core->driver_invalidated = false;
     core->session_active = false;
 
     /* 6. 防回滚更新: finalize 成功后持久化版本下限 (失败时不调 abort，固件保持有效) */

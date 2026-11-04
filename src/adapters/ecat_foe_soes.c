@@ -105,6 +105,14 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * - *as 匹配 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)
      * - *an 改写为 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)
      *
+     * 会话状态与固件有效性双重防御：
+     * 1. 显式记录的提交失败 (adapter->last_commit_failed 为 true)；
+     * 2. 核心状态防御：若主站超时、断线或协议栈静默中止导致 write_cb 从未触发，
+     *    但底层已被 invalidate (core->driver_invalidated) 或会话未正常闭环 (core->session_active)，
+     *    只要未成功执行 finalize (core->driver_finalized == false)，固件即处于残缺/不可用状态；
+     * 3. 核心机处于 ECAT_FOE_STATE_ERROR 错误状态。
+     * 上述任一情况均判定固件不可用于正常运行，必须强行拦截 BOOT->INIT 迁移。
+     *
      * 时序与物理限制明确说明：
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
      * 2. 若在此处改写 *an 为 BOOT|Error 并调用注入的 al_error_fn(0x0014) (在真实 SOES 中对应 ESC_ALerror)，
@@ -112,7 +120,17 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * 3. 局限性说明：当前为测试桩仿真验证，真实 SOES 源码尚未集成编译，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
      *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
      */
-    if (*as == ECAT_TRANSITION_BOOT_TO_INIT && adapter->last_commit_failed) {
+    bool should_block_init = adapter->last_commit_failed;
+    if (adapter->core != NULL) {
+        if (!adapter->core->driver_finalized) {
+            if (adapter->core->driver_invalidated || adapter->core->session_active ||
+                adapter->core->state == ECAT_FOE_STATE_ERROR) {
+                should_block_init = true;
+            }
+        }
+    }
+
+    if (*as == ECAT_TRANSITION_BOOT_TO_INIT && should_block_init) {
         /* 改写目标状态为 BOOT + Error (0x03 | 0x10 = 0x13) */
         *an = ECAT_AL_STATUS_BOOT_ERROR;
         adapter->last_al_error = ECAT_AL_STATUS_CODE_NO_VALID_FW;

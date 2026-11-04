@@ -162,6 +162,7 @@ typedef struct {
     bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
+    bool                driver_invalidated;    /**< 底层驱动 invalidate() 是否已成功执行 (固件有效标记已失效) */
 
     /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
     char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];
@@ -216,18 +217,25 @@ typedef struct {
 int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
 
 /**
- * @brief 反初始化核心升级状态机并安全释放活跃会话资源
+ * @brief 反初始化核心升级状态机并安全释放活跃会话底层硬件资源
  *
- * 【生命周期与资源释放契约】：
- * 1. 若 core 为 NULL 或尚未成功初始化 (!core->is_configured)，直接安全返回 0 (No-op)。
- * 2. 若 core 当前处于活跃会话中 (core->session_active 为 true)：
- *    - 若底层驱动已初始化且尚未调用 abort 或 finalize，显式调用目标驱动的 abort 回调释放底层硬件/闪存资源；
- *    - 标记 driver_abort_called 为 true。
- * 3. 清空 core 全部内存 (memset 为 0)，显式将 is_configured 置为 false，状态重置为 ECAT_FOE_STATE_IDLE。
- * 4. 【重新初始化规范】：ecat_foe_core_init() 严禁前置读取未初始化 core 的任何字段以防未定义行为；若需要
- *    重新初始化一个处于活跃会话的 core 实例，调用方必须先显式调用 ecat_foe_core_deinit(core)，然后再执行 ecat_foe_core_init()。
+ * 【调用契约与入参安全边界 (Lifecycle & Safety Contract)】：
+ * - 仅接受以下两类合法入参指针：
+ *   1. NULL (安全无操作，直接返回 0)；
+ *   2. 经 ecat_foe_core_init() 成功初始化的有效 core 实例；或已显式执行零初始化（如 ecat_foe_core_t core = {0} 或 memset(&core, 0, sizeof(core))）的实例。
+ * - 【严禁传入未显式初始化的脏栈内存】：
+ *   本函数绝不可被声称亦不支持直接在未初始化的脏栈内存上调用。在 C 语言规范及 UBSan 检查下，
+ *   读取包含未初始化垃圾数据的布尔字段（如 !core->is_configured）属于未定义行为 (UB)。
  *
- * @param core 核心状态机实例指针
+ * 【资源释放与状态机重置】：
+ * - 若 core 当前处于活跃会话中 (core->session_active 为 true)：
+ *   若底层驱动已初始化且尚未调用 abort 或 finalize，显式调用目标驱动的 abort 回调释放底层硬件/闪存资源；
+ *   标记 driver_abort_called 为 true。
+ * - 清空 core 全部内存 (memset 为 0)，显式将 is_configured 置为 false，状态重置为 ECAT_FOE_STATE_IDLE。
+ * - 【重新初始化规范】：ecat_foe_core_init() 严禁前置读取未初始化 core 的任何字段以防未定义行为；若需要
+ *   重新初始化一个处于活跃会话的 core 实例，调用方必须先显式调用 ecat_foe_core_deinit(core)，然后再执行 ecat_foe_core_init()。
+ *
+ * @param core 核心状态机实例指针 (必须为 NULL、有效已初始化或经显式零初始化的实例)
  * @return 0 成功
  */
 int ecat_foe_core_deinit(ecat_foe_core_t *core);

@@ -920,6 +920,51 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     ecat_foe_soes_post_state_hook(&adapter, &as, NULL);
     ecat_foe_soes_set_al_error_fn(NULL, mock_al_error_cb);
     ecat_foe_soes_reset(NULL);
+
+    /* 验证场景: 主站超时/断线等协议栈中止未触发写回调，但驱动已被 invalidate */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    /* 设置 buffer_size 为 64，发送 64 字节整包不触发短包结束，仅完成头部装配与驱动 invalidate */
+    ecat_foe_soes_init(&adapter, &core, 64);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    /* 主站发起 WRQ 并发送 64 字节头部 */
+    ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, 64);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "头部写入成功");
+    TEST_ASSERT(core.session_active, "会话处于活跃状态");
+    TEST_ASSERT(core.driver_invalidated, "驱动已成功执行 invalidate (固件标记已失效)");
+    TEST_ASSERT(!core.driver_finalized, "驱动尚未 finalize");
+    TEST_ASSERT(!adapter.last_commit_failed, "此时尚未发生写回调错误 (last_commit_failed 仍为 false)");
+
+    /* 此时模拟主站通信超时/断线：后续写回调从未被触发！直接发起 BOOT->INIT 状态切换 */
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "即便 last_commit_failed 为 false，只要未 finalize 且已 invalidate，必须拦截 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, ECAT_AL_STATUS_CODE_NO_VALID_FW, "记录 0x0014 ALERR_NOVALIDFIRMWARE");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发 al_error_fn 注入回调");
+
+    /* 模拟主站重试成功闭环：新升级完成后恢复允许切入 INIT */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    ecat_foe_soes_init(&adapter, &core, 512);
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+    ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "新会话完整写入成功");
+    TEST_ASSERT(core.driver_finalized, "新会话成功 finalize");
+    TEST_ASSERT(!core.driver_invalidated, "新会话已恢复固件有效");
+
+    s_mock_al_error_calls = 0;
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "新会话成功后允许正常迁移至 INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "成功时不触发 al_error_fn");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1534,11 +1579,19 @@ static void test_core_deinit_lifecycle(void)
     int ret = ecat_foe_core_deinit(NULL);
     TEST_ASSERT_EQ_INT(ret, 0, "deinit(NULL) 必须安全返回 0");
 
-    /* 2. 未配置的核心机 (is_configured == false) 安全返回 0 (No-op) */
+    /* 2. 显式零初始化的核心机 (如 ecat_foe_core_t zero_core = {0}) 安全返回 0 (No-op)
+     * 【契约边界警告】：本函数仅接受 NULL、已成功 init 的实例、或已显式零初始化的实例；
+     * 严禁直接传入未初始化的脏栈内存 (ecat_foe_core_t uninit)，在 C/UBSan 下读取未初始化布尔值是未定义行为 (UB)。
+     */
+    ecat_foe_core_t zero_core = {0};
+    ret = ecat_foe_core_deinit(&zero_core);
+    TEST_ASSERT_EQ_INT(ret, 0, "deinit 显式零初始化核心机安全返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "零初始化核心机绝不得触发 abort");
+
     memset(&core, 0, sizeof(core));
     ret = ecat_foe_core_deinit(&core);
-    TEST_ASSERT_EQ_INT(ret, 0, "deinit 未配置核心机返回 0");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "未配置核心机绝不得触发 abort");
+    TEST_ASSERT_EQ_INT(ret, 0, "deinit memset 零初始化核心机返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "memset 零初始化核心机绝不得触发 abort");
 
     /* 3. 已配置但处于空闲态 (IDLE，无活跃会话) 的核心机 deinit */
     setup_default_core(&core, &mcu, NULL, NULL);
