@@ -59,9 +59,12 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
 # ASan 内存与未定义行为核验目标
-# 历史说明: 早期测试夹具 mock_driver_t 内部包含 1MB 模拟内存缓冲区，在测试用例作为局部变量定义时，
-# Clang -O2 将数十个测试用例内联至 main()，叠加 ASan 栈红色区导致主线程栈帧超过 macOS 默认 8MB 限制引发 stack-overflow (退出码 134)。
-# 本库核心代码本身为零动态分配且各函数栈帧极小。测试套件已将 1MB 模拟硬件缓冲区置入静态存储区 (BSS)，不再依赖 -fno-inline。
+# 历史构建与环境条件观察说明:
+# 早期测试在特定组合下（如 Apple Clang 配合 -O1/-O2 将多个包含 1MB 模拟缓冲区的测试函数内联至 main()，
+# 叠加 AddressSanitizer 栈红色区 redzones，且处于 macOS 默认 ~8MB 栈空间限制时）观察到过 stack-overflow (退出码 134)。
+# 实测核实：在 -O0 (无跨函数内联膨胀)、未开启 ASan 栈插桩、或调大栈上限 (如 ulimit -s 65520) 环境下该现象均未出现。
+# 本库核心代码本身为零动态分配且各函数栈帧极小 (最大 240 字节)。测试套件统一将 1MB 模拟硬件缓冲区置入静态存储区 (BSS)，
+# 以保证无论编译器优化决策与操作系统栈限制如何变化，测试运行期栈帧均处于安全区间。
 test-asan:
 	$(MAKE) clean
 	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"

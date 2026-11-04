@@ -2,12 +2,15 @@
  * @file test_core.c
  * @brief EtherCAT FoE 核心状态机与 SOES 适配层测试套件 (阶段 B)
  *
- * 测试夹具内存说明:
- * mock_driver_t 内部包含 1MB 模拟闪存缓冲区 (MOCK_DRIVER_MEM_SIZE)。
- * 早期测试若将 mock_driver_t 作为栈局部变量分配，在 Clang -O2 内联数十个测试函数到 main() 时，
- * 叠加 AddressSanitizer 栈红区 (redzones)，会导致 main 栈帧膨胀至 50MB 以上，击穿 macOS 默认 8MB 栈上限
- * 触发 ASan stack-overflow (退出码 134)。此现象属于测试夹具局部变量体积过大，而非核心库自身缺陷
- * (核心库为零动态分配且函数最大栈帧极小)。测试套件统一采用静态存储区 (BSS) 的 s_driver 模拟夹具。
+ * 测试夹具内存与环境条件观察说明:
+ * 1. 历史栈溢出 (退出码 134) 为特定条件下的环境观察现象：
+ *    在 Apple Clang 配合 -O1/-O2 优化时，数十个包含 1MB 模拟闪存缓冲区 (MOCK_DRIVER_MEM_SIZE) 的测试函数
+ *    被内联至 main()，叠加 AddressSanitizer 栈红色区 (redzones)，且处于系统默认 ~8MB 栈空间限制下时，
+ *    观察到 main 栈帧膨胀并触发 ASan stack-overflow。
+ * 2. 差异性核实：在 -O0 编译、未开启 ASan 栈插桩、或调大系统栈限制 (如 ulimit -s 65520) 时该溢出均未出现，
+ *    因此在不同构建参数或环境栈限制下可能表现不同。
+ * 3. 核心库代码本身零动态内存分配且函数最大栈帧极小 (最大 240 字节)。测试套件统一采用静态存储区 (BSS)
+ *    的 s_driver 模拟夹具，确保无论编译器内联策略或环境栈限制如何均稳定运行。
  */
 
 #include <stdio.h>
