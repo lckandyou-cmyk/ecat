@@ -256,7 +256,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     core->cfg = *cfg;
     memcpy(core->local_project_name, cfg->project_name, plen);
     core->local_project_name[plen] = '\0';
-    core->cfg.project_name = core->local_project_name;
+    core->cfg.project_name = NULL; /* 消除自身指针: 内部以 local_project_name 数组作为唯一持久化真相源 */
     core->is_configured = true;
     core->state = ECAT_FOE_STATE_IDLE;
     core->last_error = ECAT_FOE_CORE_OK;
@@ -278,8 +278,9 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
     /* 新会话自愈规则: 若上一个会话残留未闭环 (且未执行过 abort/finalize)，先调驱动 abort() */
     if (core->state != ECAT_FOE_STATE_IDLE) {
         core_abort_driver(core);
-        /* 重置会话上下文，保留全局 cfg */
+        /* 重置会话上下文，使用内部持久化的 local_project_name 重新初始化保持项目名 */
         ecat_foe_core_cfg_t cfg_bak = core->cfg;
+        cfg_bak.project_name = core->local_project_name;
         ecat_foe_core_init(core, &cfg_bak);
     }
 
@@ -862,4 +863,12 @@ const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err)
     case ECAT_FOE_CORE_ERR_INVALID_ARG: return "Invalid argument";
     default: return "Unknown error";
     }
+}
+
+const char *ecat_foe_core_get_project_name(const ecat_foe_core_t *core)
+{
+    if (core == NULL || !core->is_configured) {
+        return NULL;
+    }
+    return core->local_project_name;
 }

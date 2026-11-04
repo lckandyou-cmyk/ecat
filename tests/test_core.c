@@ -1317,6 +1317,44 @@ static void test_failed_session_new_wrq_full_upgrade_recovery(void)
     TEST_ASSERT(memcmp(mcu.mem, payload, 16) == 0, "烧录介质内容与原始 Payload 一致");
 }
 
+/* 29. 消除自身指针与非活跃状态结构体复制测试 */
+static void test_self_referential_pointer_elimination_and_idle_copy(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    /* 1. 验证自身指针被彻底消除: cfg.project_name 不指向内部 local_project_name */
+    TEST_ASSERT(core.cfg.project_name == NULL, "init 后 cfg.project_name 设为 NULL 消除自指针");
+    TEST_ASSERT((const void *)core.cfg.project_name != (const void *)core.local_project_name, "杜绝内部自身指针指向");
+    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "安全接口返回正确内部项目名");
+
+    /* 2. 验证非活跃状态下结构体支持按值复制/模板分发 */
+    ecat_foe_core_t core_copy = core;
+
+    /* 彻底覆写并销毁原 core 实例内存 */
+    memset(&core, 0xEE, sizeof(core));
+
+    /* 验证深拷贝后的副本 project_name 依然独立存在且完好 */
+    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core_copy), "SERVO_DRV") == 0, "副本内部项目名依然独立完好");
+
+    uint8_t payload[16] = {0xAA, 0xBB, 0xCC, 0xDD};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    /* 3. 在原实例彻底销毁的情况下，副本 core_copy 独立完成全流程升级 */
+    int ret_wrq = test_wrq(&core_copy, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "副本 WRQ 处理成功");
+
+    feed_stream_chunks(&core_copy, efw, efw_len, 32, false);
+    int ret_end = ecat_foe_core_on_end(&core_copy);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "副本升级流程闭环成功");
+    TEST_ASSERT_EQ_INT(core_copy.state, ECAT_FOE_STATE_SUCCESS, "副本状态机到达 SUCCESS");
+    TEST_ASSERT(mcu.valid_flag, "固件置为有效");
+    TEST_ASSERT(memcmp(mcu.mem, payload, 16) == 0, "副本写入数据完全正确");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -1360,6 +1398,7 @@ int main(void)
     RUN_TEST(test_erase_to_insufficient_erased_end_fails);
     RUN_TEST(test_padding_capacity_boundary);
     RUN_TEST(test_failed_session_new_wrq_full_upgrade_recovery);
+    RUN_TEST(test_self_referential_pointer_elimination_and_idle_copy);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

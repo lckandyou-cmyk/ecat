@@ -141,11 +141,10 @@ typedef struct {
 /**
  * @brief 核心机运行上下文结构体 (纯静态内存占用)
  *
- * 【结构体复制与移动限制 (Non-movable Contract)】：
- * - 本结构体内部包含自引用指针（core->cfg.project_name 指向 core->local_project_name）以及当前会话上下文；
- * - 严禁在内存中通过 memcpy 或结构体赋值进行浅拷贝/移动！
- *   若发生浅拷贝，目标实例的 cfg.project_name 将沦为指向源实例地址的悬垂指针；
- * - 若需在新的内存地址启用核心，必须在新地址上显式调用 ecat_foe_core_init() 进行重新初始化与绑定。
+ * 【内存布局与复制契约 (Lifecycle & Copy Contract)】：
+ * - 内部项目名通过 local_project_name 静态数组持久化存储，cfg.project_name 设为 NULL，消除了结构体内部的自身指针自引用；
+ * - 【非活跃状态 (IDLE)】：在尚未开始升级会话或已完全复位状态下，结构体不包含悬垂指针，支持按值复制/赋值；
+ * - 【活动会话状态 (WRQ_ACKED / DATA / 升级进行中)】：严禁浅拷贝或移动！由于底层驱动会话状态（物理扇区擦除水位、会话独占锁、增量 CRC）具有硬件唯一性，复制活动会话会导致多实例状态撕裂与物理硬件破坏。
  */
 typedef struct {
     ecat_foe_core_cfg_t cfg;                   /**< 本地静态配置拷贝 */
@@ -258,6 +257,13 @@ uint16_t ecat_foe_core_err_to_foe(ecat_foe_core_err_t err, bool is_wrq_stage, bo
  * @brief 错误码转换为人类可读描述字符串
  */
 const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err);
+
+/**
+ * @brief 获取核心机内部持久化存储的项目名
+ * @param core 核心机上下文指针
+ * @return 指向内部持久化以 '\0' 结尾项目名字符串的指针，若 core 为空返回 NULL
+ */
+const char *ecat_foe_core_get_project_name(const ecat_foe_core_t *core);
 
 #ifdef __cplusplus
 }
