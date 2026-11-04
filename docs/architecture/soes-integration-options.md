@@ -255,35 +255,36 @@ void ESC_ALerror (uint16_t errornumber);
 - 官方来源: Microchip 官网 `https://ww1.microchip.com/downloads/en/DeviceDoc/00001909A.pdf`
 - 本地下载文件: `/tmp/vendor_docs/00001909A.pdf` (SHA-256: `f9b73097c21a1ad5e9b1a23ba10002c6bbeb7836422376c646e84313294e96c6`)
 - 文本转换文件: `/tmp/vendor_docs/lan9252.txt` (40,871 行, SHA-256: `e9839ad1bbd0ee4fe725584b0d2fa8fd545693a6f974ff4f9e193f698790b2e1`)
-- 核验比对说明：本表此前记录的历史行号源于早期不同工具转换生成的文本；经对照官方原版 DS00001909A PDF 及其文本核实，文档章节、寄存器名称与位定义语义完全吻合，最新转换行号微幅偏移（见下表核对说明）。
+- 核验比对说明：本表对照 Microchip 官方原版 DS00001909A PDF 及其文本转换文件进行核验。经逐项比对，技术内容、寄存器名与位定义与官方原版完全一致；关于历史文档中的行号与当前转换文本行号差异，因缺乏确凿转换版本记录，成因未作主观推测，下表客观对比各项出处（不假定同号即正确）。
 
-| 文档行号出处 | 手册章节与描述内容 | 官方原版核对实况说明 |
-| :--- | :--- | :--- |
-| 第 4758 行 | 表 6-1: EEPROM Loader Run 对应 RST# Pin 列为 YES | **【官方 PDF 已核对】** 对应官方原版第 48 页 Table 6-1 (最新文本第 4718 行) |
-| 第 4874, 4875 行 | 第 6.2.1.2 节: RST# 引脚拉低触发芯片级复位 | **【官方 PDF 已核对】** 对应官方原版第 49 页 6.2.1.2 节 (最新文本第 4869 行) |
-| 第 31434 行 | Note 11: Enhanced Link 限制说明 | **【官方 PDF 已核对】** 对应官方原版第 201 页 Note 11 (最新文本第 31430 行) |
-| 第 33481, 33485 行 | 0502h-0503h EEPROM CONTROL/STATUS REGISTER | **【官方 PDF 已核对】** 对应官方原版第 260 页 12.14.49 节 (最新文本第 33483 行) |
-| 第 33496, 33498 行 | Bit 15: EEPROM Busy 状态位 | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 15 (最新文本第 33506 行) |
-| 第 33504 行 | Bit 14: Error Write Enable | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 14 (最新文本第 33518 行) |
-| 第 33518 行 | Bit 13: Error Acknowledge/Command | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 13 (最新文本第 33531 行) |
-| 第 33532 行 | Bit 12: EEPROM Loading Status | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bit 12 (最新文本第 33550 行) |
-| 第 33544 行 | Bit 11: Checksum Error in ESC Config Area | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bit 11 (最新文本第 33563 行) |
-| 第 33568, 33574, 33575 行 | Bits 10:8: Command (Write 010, Reload 100) | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bits 10:8 (最新文本第 33593-33599 行) |
-| 第 33698, 33702, 33717 行 | 0504h-0507h EEPROM ADDRESS REGISTER | **【官方 PDF 已核对】** 对应官方原版第 262 页 12.14.50 节 (最新文本第 33698 行) |
-| 第 33744, 33748, 33769 行 | 0508h-050Bh EEPROM DATA REGISTER | **【官方 PDF 已核对】** 对应官方原版第 263 页 12.14.51 节 (最新文本第 33751 行) |
-| 第 33980 行 | Note 27: MI link 限制说明 | **【官方 PDF 已核对】** 对应官方原版第 265 页 Note 27 (最新文本第 33978 行) |
+| 官方章节 (Section) | 官方页码 (Page) | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) |
+| :--- | :--- | :--- | :--- | :--- |
+| Table 6-1 | Page 48 | `EEPROM Loader Run` | 第 4718 行 | 第 4758 行 |
+| Section 6.2.1.2 | Page 49 | `Driving the RST# input pin low initiates a chip-level reset.` | 第 4869 行 | 第 4874, 4875 行 |
+| Section 12.8 (Note 11) | Page 201 | `Note 11: The default value of this field can be configured via EEPROM.` | 第 31430 行 | 第 31434 行 |
+| Section 12.14.49 | Page 260 | `12.14.49 EEPROM CONTROL/STATUS REGISTER` | 第 33483 行 | 第 33481, 33485 行 |
+| Section 12.14.49 (Bit 15) | Page 260 | `Busy` | 第 33506 行 | 第 33496, 33498 行 |
+| Section 12.14.49 (Bit 14) | Page 260 | `Error Write Enable` | 第 33518 行 | 第 33504 行 |
+| Section 12.14.49 (Bit 13) | Page 260 | `Error Acknowledge/Command` | 第 33531 行 | 第 33518 行 |
+| Section 12.14.49 (Bit 12) | Page 261 | `EEPROM Loading Status` | 第 33550 行 | 第 33532 行 |
+| Section 12.14.49 (Bit 11) | Page 261 | `Checksum Error in ESC Configuration Area` | 第 33563 行 | 第 33544 行 |
+| Section 12.14.49 (Bits 10:8) | Page 261 | `Command Register` (Write 010, Reload 100) | 第 33593-33599 行 | 第 33568, 33574, 33575 行 |
+| Section 12.14.50 | Page 262 | `12.14.50 EEPROM ADDRESS REGISTER` | 第 33698 行 | 第 33698, 33702, 33717 行 |
+| Section 12.14.51 | Page 263 | `12.14.51 EEPROM DATA REGISTER` | 第 33751 行 | 第 33744, 33748, 33769 行 |
+| Section 12.14.51 (Note 27) | Page 265 | `Note 27: The default value of this field can be configured via EEPROM.` | 第 33978 行 | 第 33980 行 |
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
 
 **官方文档获取实况说明**：
-- 厂商官方地址: `https://download.beckhoff.com/download/document/Application_Notes/an_et9300_v1i10.pdf`
-- 访问实测状态: Beckhoff 官方 CloudFront CDN 返回 HTTP 403 / 404 (Access Denied / Not Found)，受厂商权限与下载限制保护，外部无法匿名只读下载；
-- 状态判定: 本地无源文件，未核验。严格保留为未验证项，绝不伪造核验结论。
+- 官方下载路径测试: `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i10.pdf`
+- 抓取实测结果: 虽然 HEAD 请求返回 HTTP 200，但实际 GET 请求下载时被 CloudFront 阻断并返回 HTTP 403 Forbidden（返回 CloudFront WAF 拦截页面：`403 ERROR: The request could not be satisfied. Request blocked.`）；
+- 访问控制策略: Beckhoff 官方 CDN 实施了反爬与访问控制策略，禁止外部自动化脚本公开匿名下载；
+- 状态判定: 本地无源文件，未核验。严格保留为未核验状态，绝不伪造核验结论或宽泛宣称已核验。
 
 | 文档行号出处 | 章节与描述内容 | 核验状态与说明 |
 | :--- | :--- | :--- |
-| 第 9725 行 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制下载，本地无 `an_et9300.txt`，属历史记录) |
-| 第 9728 行 | 第 15 章 第 129 页 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** |
+| 第 9725 行 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无 `an_et9300.txt`，属历史记录) |
+| 第 9728 行 | 第 15 章 第 129 页 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无源文件) |
 
 ### 6.4 ETG 官方规范引用
 | 规范编号 | 引用主题 | 核验状态与说明 |
