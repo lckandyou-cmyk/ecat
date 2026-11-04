@@ -185,12 +185,15 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         return -1;
     }
 
-    /* 1. 校验非空且长度合理的 project_name */
+    /* 1. 校验非空且长度合理的 project_name (有界安全扫描，最多探测 32 字节) */
     if (cfg->project_name == NULL) {
         core->last_error = ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME;
         return -1;
     }
-    size_t plen = strlen(cfg->project_name);
+    size_t plen = 0;
+    while (plen <= ECAT_FOE_MAX_FILENAME_LEN && cfg->project_name[plen] != '\0') {
+        plen++;
+    }
     if (plen == 0 || plen > ECAT_FOE_MAX_FILENAME_LEN) {
         core->last_error = ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME;
         return -1;
@@ -345,7 +348,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
                 uint32_t write_end = core->written_offset + wunit;
                 if (write_end > core->erased_watermark) {
                     uint32_t erased_end = 0;
-                    if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
+                    if (drv->erase_to(write_end, &erased_end, ctx) != 0 || erased_end < write_end) {
                         core_abort_driver(core);
                         core->state = ECAT_FOE_STATE_ERROR;
                         core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
@@ -370,7 +373,7 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
 
                 if (write_end > core->erased_watermark) {
                     uint32_t erased_end = 0;
-                    if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
+                    if (drv->erase_to(write_end, &erased_end, ctx) != 0 || erased_end < write_end) {
                         core_abort_driver(core);
                         core->state = ECAT_FOE_STATE_ERROR;
                         core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
@@ -647,9 +650,17 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         memset(core->residual_buf + core->residual_len, 0xFF, pad);
 
         uint32_t write_end = core->written_offset + wunit;
+        const ecat_foe_target_desc_t *tdesc = &core->cfg.targets[core->hdr.target_id - 1];
+        if (write_end > tdesc->max_payload_size) {
+            core_abort_driver(core);
+            core->state = ECAT_FOE_STATE_ERROR;
+            core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+            return -1;
+        }
+
         if (write_end > core->erased_watermark) {
             uint32_t erased_end = 0;
-            if (drv->erase_to(write_end, &erased_end, ctx) != 0) {
+            if (drv->erase_to(write_end, &erased_end, ctx) != 0 || erased_end < write_end) {
                 core_abort_driver(core);
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;

@@ -36,6 +36,7 @@ typedef struct {
     bool     inject_fail_init;
     bool     inject_fail_invalidate;
     bool     inject_fail_erase;
+    bool     inject_insufficient_erase;          /**< 擦除返回成功但 erased_end < need_end */
     bool     inject_fail_write;
     bool     inject_fail_read;
     bool     inject_fail_finalize;

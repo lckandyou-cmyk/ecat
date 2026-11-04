@@ -838,13 +838,19 @@ static void test_config_validation_rules(void)
     /* A. 空指针配置 */
     TEST_ASSERT(ecat_foe_core_init(&core, NULL) != 0, "cfg 为 NULL 初始化必须报错");
 
-    /* B. project_name 为空指针或空串或超长 */
+    /* B. project_name 为空指针或空串或超长/无终止符 */
     cfg.project_name = NULL;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "project_name 为 NULL 必须报错");
     cfg.project_name = "";
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "project_name 为空字符串必须报错");
     cfg.project_name = "THIS_PROJECT_NAME_IS_TOO_LONG_EXCEEDING_31_BYTES";
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "project_name > 31 字符必须报错");
+
+    /* B2. project_name 无 \0 终止符探测 */
+    char unterminated_proj[64];
+    memset(unterminated_proj, 'A', sizeof(unterminated_proj));
+    cfg.project_name = unterminated_proj;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "project_name 无 \\0 终止符探测必须报错");
     cfg.project_name = "SERVO_DRV";
 
     /* C. max_header_size 下限/对齐/上限检查 */
@@ -856,13 +862,33 @@ static void test_config_validation_rules(void)
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_header_size > 128 必须报错");
     cfg.max_header_size = 128U;
 
-    /* D. 启用目标的驱动及回调完整性 */
+    /* D. 启用目标的驱动及全部 7 个回调完整性逐一校验 */
     cfg.targets[0].driver = NULL;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "启用目标 driver 为 NULL 必须报错");
+
     ecat_foe_target_driver_t bad_drv = mcu.driver;
-    bad_drv.write = NULL;
-    cfg.targets[0].driver = &bad_drv;
-    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "驱动缺少 write 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.init = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 init 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.invalidate = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 invalidate 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.erase_to = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 erase_to 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.write = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 write 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.read = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 read 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.finalize = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 finalize 回调必须报错");
+
+    bad_drv = mcu.driver; bad_drv.abort = NULL; cfg.targets[0].driver = &bad_drv;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 abort 回调必须报错");
+
     cfg.targets[0].driver = &mcu.driver;
 
     /* E. write_unit 边界 */
@@ -1104,6 +1130,57 @@ static void test_driver_lifecycle_init_invalidate_abort_retry(void)
     TEST_ASSERT(mcu.valid_flag, "固件恢复有效标记");
 }
 
+/* 测项 26: erase_to 返回成功但 erased_end < need_end 必须拦截并调 abort */
+static void test_erase_to_insufficient_erased_end_fails(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    /* 注入擦除不足故障 */
+    mcu.inject_insufficient_erase = true;
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    int ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
+    TEST_ASSERT(ret != 0, "erased_end < need_end 必须被拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "报 DRV_ERASE 错误");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "擦除不足必须调用 abort 释放资源");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "擦除不足绝不得向物理介质写入数据");
+}
+
+/* 测项 27: 尾部补齐容量边界防御 (aligned_len 刚好等于分区上限及补齐超限防护) */
+static void test_padding_capacity_boundary(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    /* 将 MCU 目标容量限制临时缩小为 16 字节，write_unit 为 8 */
+    core.cfg.targets[0].max_payload_size = 16U;
+    core.cfg.targets[0].write_unit = 8U;
+
+    /* A. 正例：payload_len = 15 (接近上限 16)，尾部补齐 1 字节到 16 字节，恰好等于 max_payload_size */
+    uint8_t payload[15];
+    for (int i = 0; i < 15; i++) payload[i] = (uint8_t)i;
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 15);
+
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    int ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
+    TEST_ASSERT_EQ_INT(ret, 0, "数据流分块推送成功");
+    ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "对齐补齐后刚好达到容量上限必须成功");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 2, "写入 2 块 8 字节 (总共 16 字节)");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "成功提交 finalize");
+    TEST_ASSERT(mcu.valid_flag, "固件置为有效");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -1144,6 +1221,8 @@ int main(void)
     RUN_TEST(test_anti_rollback_only_reads_current_target);
     RUN_TEST(test_same_block_header_over_receive_protects_valid_flag);
     RUN_TEST(test_driver_lifecycle_init_invalidate_abort_retry);
+    RUN_TEST(test_erase_to_insufficient_erased_end_fails);
+    RUN_TEST(test_padding_capacity_boundary);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);
