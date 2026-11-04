@@ -60,16 +60,23 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 
 # ASan 内存与未定义行为核验目标
 # 历史构建与环境条件复核说明:
-# 1. 历史复核 (commit 9c78bc2): 在 macOS 环境下通过 GNU Make 执行 `make test-asan` 时，Make 为子进程赋予了较大栈上限
-#    (实测为 65520KB)，测试退出码为 0；但生成的同一 ASan 二进制在脱离 make 时，以 ulimit -s 8192 或 1024 独立执行，
-#    均因多个测试用例将 1MB 模拟缓冲区分配于栈上且被 Clang -O2 内联至 main()，导致 stack-overflow (退出码 134)。
-# 2. 夹具修复验证：已将 tests/test_core.c 内测试夹具统一调整为静态存储 (static/BSS)。修复后实测在 ulimit -s 8192 与 1024
-#    下独立执行 tests/test_runner_core 均顺利通过 (退出码 0)。
+# 1. 历史复核事实 (commit 9c78bc2 与 c1792c4):
+#    - 在 macOS 下通过 GNU Make 执行 `make test-asan` 时，Make 为子进程赋予了较大栈上限 (实测为 65520KB)，测试退出码为 0；
+#    - 但生成的同一 ASan 二进制脱离 make 时，在 commit c1792c4 实测：以 ulimit -s 8192 (8MB) 或 1024 (1MB) 独立执行，
+#      均因多个测试用例将 1MB 模拟缓冲区分配于栈上且被 Clang -O2 内联至 main()，导致 stack-overflow 退出码 134，堆栈指向 main 入口。
+# 2. 夹具修复与回归验证 (commit e31190d 起):
+#    已将 tests/test_core.c 内测试夹具统一调整为静态存储 (static/BSS)。
+#    回归核验：同一 ASan 二进制在 ulimit -s 8192 与 1024 下独立执行均顺利通过 (退出码 0)。
 # 3. 栈帧尺寸限定：核心库代码 (src/ecat_foe_core.c) 为零动态分配，内部函数最大栈帧约 240 字节系在当前所测宿主环境
 #    (macOS arm64 / Apple Clang) 下的静态测量值，而非全平台通用常量。
 test-asan:
 	$(MAKE) clean
 	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
+	@echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---"
+	@(ulimit -s 8192 && ./$(TEST_CORE_BIN) >/dev/null)
+	@echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)"
+	@(ulimit -s 1024 && ./$(TEST_CORE_BIN) >/dev/null)
+	@echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
 
 clean:
 	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw

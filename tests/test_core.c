@@ -4,12 +4,12 @@
  *
  * 测试夹具内存与环境条件复核说明:
  * 1. 历史栈溢出 (退出码 134) 复核与夹具修复：
- *    - 历史复核 (commit 9c78bc2): 早期测试夹具中数十个测试函数将 1MB 模拟硬件缓冲区 (mock_driver_t)
- *      作为局部变量在栈上分配；在 Apple Clang -O2 下大量测试函数被内联至 main()，叠加 AddressSanitizer
- *      栈红区导致 main 栈帧膨胀。脱离 GNU Make (Make 会默认设置 65520KB 栈上限) 在独立 shell 中以
- *      ulimit -s 8192 (8MB) 或 ulimit -s 1024 (1MB) 执行时，均触发 ASan stack-overflow (退出码 134)。
- *    - 夹具修复与重测：现已将所有测试函数的 mock_driver_t 夹具统一调整为静态存储 (static/BSS)，避免
- *      在调用栈帧上累积大数组。实测核验：修复后同一 ASan 二进制在 ulimit -s 8192 与 1024 下均全部正常通过 (退出码 0)。
+ *    - 独立复核实测 (commit 9c78bc2 及 c1792c4): 早期测试夹具中 40 多个测试函数将 1MB 模拟硬件缓冲区 (mock_driver_t)
+ *      作为局部变量在栈上分配；在 Apple Clang -O2 下大量测试函数被内联至 main()，叠加 AddressSanitizer 栈红区导致
+ *      main 栈帧超过 40MB。脱离 GNU Make (Make 默认赋予 65520KB 栈上限) 在独立 shell 中以 ulimit -s 8192 (8MB)
+ *      及 ulimit -s 1024 (1MB) 执行时，均触发 ASan stack-overflow (退出码 134)，堆栈指向 test_core.c:2634 的 main 入口。
+ *    - 夹具修复与回归验证 (commit e31190d 起): 现已将所有测试函数的 mock_driver_t 夹具统一调整为静态存储 (static/BSS)，
+ *      避免在调用栈帧上累积大数组。回归核验：同一 ASan 二进制在 ulimit -s 8192 与 1024 下直接执行均顺利通过 (退出码 0)。
  * 2. 栈帧尺寸限定于所测宿主环境：
  *    核心库代码 (src/ecat_foe_core.c) 本身为零动态分配；其内部函数最大栈帧约 240 字节系在当前所测宿主环境
  *    (macOS arm64 / Apple Clang) 下的静态度量测量值，而非跨所有平台、硬件架构与编译器的通用常数。
