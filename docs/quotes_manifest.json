@@ -153,7 +153,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 32,
-      "source_file": "esc.c",
+      "source_file": "soes/esc.c",
       "line_reference": "1155",
       "line_text_hash": "7ebca7a3030b3d7ecdd4bb10ca7864cce6f51fc1238ed724f4f99d7f1e7a11ba",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -162,7 +162,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 34,
-      "source_file": "esc.c",
+      "source_file": "soes/esc.c",
       "line_reference": "1160",
       "line_text_hash": "d0916b790ac2be1307c1859a83cc79fb07ab7e46e0b53e2ad43f91dd5818ab8f",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -171,7 +171,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 36,
-      "source_file": "esc.c",
+      "source_file": "soes/esc.c",
       "line_reference": "1197",
       "line_text_hash": "ac547dd56247f9142240fea4b09dfa5fd0210776012c75907f966c6ac09b6117",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -180,7 +180,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 38,
-      "source_file": "esc.c",
+      "source_file": "soes/esc.c",
       "line_reference": "1202",
       "line_text_hash": "085b0addf6667c6b5687eb6677f59597208a8e8870a05cb5c5e33396acd97c43",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -189,7 +189,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 40,
-      "source_file": "esc.c",
+      "source_file": "soes/esc.c",
       "line_reference": "388",
       "line_text_hash": "d080f702ea82612d925d1925b19956e097d6d3feac08f6d0a1c6ea713d6beee3",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -198,7 +198,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 42,
-      "source_file": "esc_foe.h",
+      "source_file": "soes/esc_foe.h",
       "line_reference": "48",
       "line_text_hash": "933f777e191628ed5f008b0e8efb9fa37b29ac4b22152d594d1f04f0f7708b09",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
@@ -207,7 +207,7 @@
     {
       "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 44,
-      "source_file": "esc_foe.c",
+      "source_file": "soes/esc_foe.c",
       "line_reference": "83",
       "line_text_hash": "ed1d58164f53682f84d11d938baad5e94e762ced39142f2446926f77bfd7fe5c",
       "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",

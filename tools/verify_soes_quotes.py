@@ -217,14 +217,13 @@ def is_line_covered_by_local_quote(
     doc_rel: str,
     doc_line: int,
     raw_src_path: str,
-    src_basename: str,
     line_ref: str,
     quotes_map: Dict[str, Dict[str, Any]],
     doc_tags_map: Dict[str, Dict[str, Any]],
 ) -> bool:
     """
     检查一个正文行号引用是否被同一文档且位置相邻 (<=3 行) 的 Quote 块覆盖。
-    严格防范跨文档借用与同名跨文件路径混淆。
+    严格防范跨文档借用与裸文件名/子目录路径二义性混淆。
     """
     parts = line_ref.split("-")
     try:
@@ -236,7 +235,7 @@ def is_line_covered_by_local_quote(
         return False
 
     norm_doc = os.path.normpath(doc_rel)
-    norm_raw_dir = os.path.dirname(os.path.normpath(raw_src_path))
+    norm_raw_src = os.path.normpath(raw_src_path)
 
     for qid, q in quotes_map.items():
         if qid not in doc_tags_map:
@@ -252,15 +251,9 @@ def is_line_covered_by_local_quote(
         if abs(doc_line - tag_lno) > 3:
             continue
 
-        # 3. 源码文件及路径匹配 (防同名 basename 跨目录混淆)
-        q_src_raw = q.get("source_file", "")
-        q_src_base = os.path.basename(q_src_raw)
-        if q_src_base != src_basename:
-            continue
-
-        q_src_dir = os.path.dirname(os.path.normpath(q_src_raw))
-        if norm_raw_dir != "" and q_src_dir != "" and norm_raw_dir != q_src_dir:
-            # 路径存在二义性冲突，严禁放行借用
+        # 3. 源码文件及路径必须完全一致 (杜绝裸文件名与子目录路径二义性混淆)
+        norm_q_src = os.path.normpath(q.get("source_file", ""))
+        if norm_raw_src != norm_q_src:
             continue
 
         # 4. 行号范围必须完整包含
@@ -310,24 +303,26 @@ def scan_unregistered_prose_lines(
                         trimmed_line = raw_line.rstrip("\r\n").strip()
                         line_hash = compute_line_text_hash(trimmed_line)
 
-                        found_refs: List[Tuple[str, str, str]] = []
+                        found_refs: List[Tuple[str, str]] = []
                         for m in p1.findall(raw_line):
-                            found_refs.append((m[0], os.path.basename(m[0]), m[1]))
+                            found_refs.append((m[0], m[1]))
                         for m in p2.findall(raw_line):
-                            found_refs.append((m[0], os.path.basename(m[0]), m[1]))
+                            found_refs.append((m[0], m[1]))
 
-                        for raw_path, src_base, lref in found_refs:
-                            # 1. 检查是否为同文档相邻 (<=3 行) Quote 块覆盖
-                            if is_line_covered_by_local_quote(doc_rel, lno, raw_path, src_base, lref, quotes_map, doc_tags_map):
+                        for raw_path, lref in found_refs:
+                            # 1. 检查是否为同文档相邻 (<=3 行) 且路径严格一致的 Quote 块覆盖
+                            if is_line_covered_by_local_quote(doc_rel, lno, raw_path, lref, quotes_map, doc_tags_map):
                                 status_counts["LOCAL_QUOTE_ADJACENT"] = status_counts.get("LOCAL_QUOTE_ADJACENT", 0) + 1
                                 continue
 
-                            # 2. 检查精确豁免清单匹配
+                            # 2. 检查精确豁免清单匹配 (路径必须严格一致，杜绝裸文件名与子目录二义性模糊放行)
                             key = (os.path.normpath(doc_rel), lno)
                             matched = False
+                            norm_doc_src = os.path.normpath(raw_path)
                             if key in ex_index:
                                 for ex_idx, ex in ex_index[key]:
-                                    if ex.get("source_file") == src_base and ex.get("line_reference") == lref:
+                                    norm_ex_src = os.path.normpath(ex.get("source_file", ""))
+                                    if norm_ex_src == norm_doc_src and ex.get("line_reference") == lref:
                                         # 校验行文本哈希防篡改
                                         if ex.get("line_text_hash") != line_hash:
                                             errors.append(
@@ -346,10 +341,10 @@ def scan_unregistered_prose_lines(
 
                             if not matched:
                                 errors.append(
-                                    f"文档 {doc_rel}:{lno} 发现未登记的正文行号引用: '{src_base}:{lref}'\n"
+                                    f"文档 {doc_rel}:{lno} 发现未登记的正文行号引用: '{raw_path}:{lref}'\n"
                                     f"  行内容: {repr(trimmed_line)}\n"
                                     f"  行哈希: {line_hash}\n"
-                                    f"  (必须在清单 quotes 中注册或在 exemptions 中逐项绑定 doc_line、文本哈希精确豁免)"
+                                    f"  (必须在清单 quotes 中注册或在 exemptions 中逐项绑定 doc_line、精准 source_file 路径及文本哈希)"
                                 )
             except Exception as e:
                 errors.append(f"读取文档失败: {doc_rel} ({e})")

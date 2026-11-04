@@ -442,7 +442,76 @@ def test_fixture_suite():
         doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
         with open(doc_path, "w", encoding="utf-8") as f:
             f.write(doc_text)
-        assert_case("Case 21: 同名 basename 但不同目录混淆拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:10-13'", manifest, repo, soes)
+        assert_case("Case 21: 同名 basename 但不同目录混淆拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
+
+    # Case 22: 裸文件名 Quote 覆盖被带目录同名路径引用渗透反例拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        # 清单中为裸文件名 "esc_foe.c"，但文档中写 "sub/esc_foe.c:10-13" (距离仅 1 行)
+        doc_text = "带目录借用裸文件名引用: `sub/esc_foe.c:10-13`\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 22: 裸文件名 Quote 覆盖被带目录同名路径引用渗透拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
+
+    # Case 23: 裸文件名豁免项被带目录同名路径引用渗透反例拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        # 增加裸文件名豁免
+        ex_line = "正文豁免行: `fake_dir/esc.c:1155`"
+        ex_hash = hashlib.sha256(ex_line.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [
+            {
+                "doc_path": "docs/test_doc.md",
+                "doc_line": 1,
+                "source_file": "esc.c",  # 清单写裸文件名
+                "line_reference": "1155",
+                "line_text_hash": ex_hash,
+                "verification_status": "TEST_EXEMPT",
+                "reason": "测试豁免"
+            }
+        ]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "r", encoding="utf-8") as f:
+            old_c = f.read()
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(ex_line + "\n" + old_c)
+        assert_case("Case 23: 裸文件名豁免项被带目录同名路径引用渗透拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
+
+    # Case 24: 带目录豁免项被裸文件名同名引用渗透反例拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        # 增加带目录豁免
+        ex_line = "正文裸文件名行: `esc.c:1155`"
+        ex_hash = hashlib.sha256(ex_line.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [
+            {
+                "doc_path": "docs/test_doc.md",
+                "doc_line": 1,
+                "source_file": "soes/esc.c",  # 清单写带目录路径
+                "line_reference": "1155",
+                "line_text_hash": ex_hash,
+                "verification_status": "TEST_EXEMPT",
+                "reason": "测试豁免"
+            }
+        ]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "r", encoding="utf-8") as f:
+            old_c = f.read()
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(ex_line + "\n" + old_c)
+        assert_case("Case 24: 带目录豁免项被裸文件名同名引用渗透拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
 
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")
