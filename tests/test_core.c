@@ -2,20 +2,17 @@
  * @file test_core.c
  * @brief EtherCAT FoE 核心状态机与 SOES 适配层测试套件 (阶段 B)
  *
- * 测试夹具内存与环境条件复核说明 (基于 commit 9c78bc2 复核事实):
- * 1. 历史栈溢出 (退出码 134) 与宿主环境因素：
- *    - 在 macOS 下通过 GNU Make 运行 `make test-asan` 时，Make 会自动为执行环境赋予较大栈限制 (通常为 65520KB)，
- *      此时测试套件正常完成且退出码为 0。
- *    - 但同一 ASan 构建生成的测试二进制 (tests/test_runner_core)，若脱离 make 在独立终端下直接执行，
- *      在系统默认栈限制 (ulimit -s 8192) 或受限栈限制 (如 ulimit -s 1024) 下，均会因 Apple Clang 在 -O2
- *      下将数十个包含 1MB 模拟缓冲区的测试函数内联至 main()，叠加 AddressSanitizer 栈红色区 (redzones) 导致 main 栈帧膨胀，
- *      进而触发 stack-overflow (退出码 134)。
- *    - 在 -O0 编译 (禁用跨函数内联)、未开启 ASan 栈插桩、或在独立终端中调大栈限制至 65520KB 时，该溢出均未出现。
+ * 测试夹具内存与环境条件复核说明:
+ * 1. 历史栈溢出 (退出码 134) 复核与夹具修复：
+ *    - 历史复核 (commit 9c78bc2): 早期测试夹具中数十个测试函数将 1MB 模拟硬件缓冲区 (mock_driver_t)
+ *      作为局部变量在栈上分配；在 Apple Clang -O2 下大量测试函数被内联至 main()，叠加 AddressSanitizer
+ *      栈红区导致 main 栈帧膨胀。脱离 GNU Make (Make 会默认设置 65520KB 栈上限) 在独立 shell 中以
+ *      ulimit -s 8192 (8MB) 或 ulimit -s 1024 (1MB) 执行时，均触发 ASan stack-overflow (退出码 134)。
+ *    - 夹具修复与重测：现已将所有测试函数的 mock_driver_t 夹具统一调整为静态存储 (static/BSS)，避免
+ *      在调用栈帧上累积大数组。实测核验：修复后同一 ASan 二进制在 ulimit -s 8192 与 1024 下均全部正常通过 (退出码 0)。
  * 2. 栈帧尺寸限定于所测宿主环境：
- *    核心库代码 (src/ecat_foe_core.c) 本身为零动态分配；其内部函数最大栈帧约 240 字节仅为在当前所测宿主环境
+ *    核心库代码 (src/ecat_foe_core.c) 本身为零动态分配；其内部函数最大栈帧约 240 字节系在当前所测宿主环境
  *    (macOS arm64 / Apple Clang) 下的静态度量测量值，而非跨所有平台、硬件架构与编译器的通用常数。
- * 3. 运行前提说明：
- *    测试套件运行依赖测试宿主环境提供合理的栈空间配额 (如 GNU Make 赋予的栈上限)，不声称在任意狭小栈限制下均能稳定运行。
  */
 
 #include <stdio.h>
@@ -273,7 +270,7 @@ static int feed_stream_chunks(
 /* 1. 正常升级 MCU */
 static void test_normal_upgrade_mcu(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -297,7 +294,7 @@ static void test_normal_upgrade_mcu(void)
 /* 2. 正常升级 SII (偶数长度) */
 static void test_normal_upgrade_sii(void)
 {
-    mock_driver_t sii;
+    static mock_driver_t sii;
     mock_driver_init(&sii);
     ecat_foe_core_t core;
     setup_default_core(&core, NULL, &sii, NULL);
@@ -320,7 +317,7 @@ static void test_normal_upgrade_sii(void)
 /* 3. 正常升级 EEPROM */
 static void test_normal_upgrade_eeprom(void)
 {
-    mock_driver_t eeprom;
+    static mock_driver_t eeprom;
     mock_driver_init(&eeprom);
     ecat_foe_core_t core;
     setup_default_core(&core, NULL, NULL, &eeprom);
@@ -343,7 +340,7 @@ static void test_normal_upgrade_eeprom(void)
 /* 4. buffer_size 16 头跨块 */
 static void test_buffer_size_16_header_cross_chunks(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -362,7 +359,7 @@ static void test_buffer_size_16_header_cross_chunks(void)
 /* 5. buffer_size 32 头跨块 */
 static void test_buffer_size_32_header_cross_chunks(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -381,7 +378,7 @@ static void test_buffer_size_32_header_cross_chunks(void)
 /* 6. 0 长度结束包与整除情形 */
 static void test_zero_length_chunk_and_exact_division(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -402,7 +399,7 @@ static void test_zero_length_chunk_and_exact_division(void)
 /* 7. 头阶段各拒绝场景驱动调用为 0 */
 static void test_header_rejections_driver_zero_calls(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -451,7 +448,7 @@ static void test_header_rejections_driver_zero_calls(void)
 /* 8. 文件名拒绝驱动调用为 0 (授权改动 3.a 验证: 格式错回 0x8004，项目不符/目标禁用回 0x8001) */
 static void test_filename_rejection_driver_zero_calls(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -486,7 +483,7 @@ static void test_filename_rejection_driver_zero_calls(void)
 /* 9. 调用顺序断言与 finalize / abort 互斥 */
 static void test_call_sequence_and_mutex(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -516,7 +513,7 @@ static void test_call_sequence_and_mutex(void)
 /* 10. 少收与多收整块拒绝不写 */
 static void test_stream_length_under_and_over_receive(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -553,7 +550,7 @@ static void test_stream_length_under_and_over_receive(void)
 /* 11. 流 CRC 错与 readback 损坏 */
 static void test_crc_and_readback_errors(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -586,7 +583,7 @@ static void test_crc_and_readback_errors(void)
 /* 12. 驱动操作失败 (erase/write/finalize) */
 static void test_driver_operation_failures(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     ecat_foe_core_t core;
     uint8_t payload[16] = {1, 2, 3};
     uint8_t efw[256];
@@ -625,7 +622,7 @@ static void test_driver_operation_failures(void)
 /* 13. on_abort 与栈中止后直接新 on_wrq (自愈) */
 static void test_on_abort_and_stack_abort_self_healing(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -655,7 +652,7 @@ static void test_on_abort_and_stack_abort_self_healing(void)
 /* 14. 容量边界 (恰好等于容量 vs 超 1 字节) */
 static void test_capacity_boundary_exact_and_plus_one(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -685,7 +682,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
 /* 15. write_unit 8 和 256 错位残留写入、回读数据一致性与 readback CRC 不含 0xFF 填充 */
 static void test_write_unit_8_and_256_residual_and_readback_crc_excludes_padding(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -725,7 +722,7 @@ static void test_write_unit_8_and_256_residual_and_readback_crc_excludes_padding
 /* 16. 防回滚行为全量覆盖 (授权改动 3.b 验证) */
 static void test_anti_rollback_full_behavior(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     uint8_t payload[16] = {0};
@@ -797,7 +794,7 @@ static void mock_al_error_cb(uint16_t errornumber)
 
 static void test_soes_adapter_short_packet_and_post_hook(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -975,7 +972,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 static void test_config_validation_rules(void)
 {
     ecat_foe_core_t core;
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     ecat_foe_core_cfg_t cfg;
@@ -1133,7 +1130,7 @@ static void test_config_validation_rules(void)
 /* 测项 19: 有界 WRQ 解析与文件名长度边界防御 */
 static void test_bounded_wrq_parsing(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1160,7 +1157,7 @@ static void test_bounded_wrq_parsing(void)
 /* 测项 20: 严格区分大小写 (.efw 小写、V 大写、目标名大写、项目名一致匹配) */
 static void test_strict_case_sensitivity(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1185,7 +1182,7 @@ static void test_strict_case_sensitivity(void)
 /* 测项 21: 避免重复 abort (失败后新 WRQ 不再重复调用 abort) */
 static void test_no_duplicate_abort_on_new_wrq(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1209,7 +1206,7 @@ static void test_no_duplicate_abort_on_new_wrq(void)
 /* 测项 22: 成功 finalize 后不再调用 abort (即便后续更新下限失败) */
 static void test_no_abort_after_finalize_success(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1242,7 +1239,7 @@ static void test_no_abort_after_finalize_success(void)
 /* 测项 23: 防回滚阶段 3 仅读取当前待升级目标 */
 static void test_anti_rollback_only_reads_current_target(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1267,7 +1264,7 @@ static void test_anti_rollback_only_reads_current_target(void)
 /* 测项 24: 头部与多收同块时在 invalidate 前拒绝，保护旧有效标记 */
 static void test_same_block_header_over_receive_protects_valid_flag(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     /* 模拟介质中原本已经存在有效固件 */
     mcu.valid_flag = true;
@@ -1300,7 +1297,7 @@ static void test_same_block_header_over_receive_protects_valid_flag(void)
 /* 测项 25: 驱动生命周期契约 (init 失败不调 abort；init 成功后 invalidate 失败必调 abort；新 WRQ 重试不重复 abort) */
 static void test_driver_lifecycle_init_invalidate_abort_retry(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     ecat_foe_core_t core;
     uint8_t payload[16] = {1, 2, 3};
     uint8_t efw[256];
@@ -1349,7 +1346,7 @@ static void test_driver_lifecycle_init_invalidate_abort_retry(void)
 /* 测项 26: erase_to 擦除水位不足的三条调用路径全量测试 */
 static void test_erase_to_insufficient_erased_end_fails(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     ecat_foe_core_t core;
     uint8_t payload[32];
     for (int i = 0; i < 32; i++) payload[i] = (uint8_t)i;
@@ -1407,7 +1404,7 @@ static void test_erase_to_insufficient_erased_end_fails(void)
 /* 测项 27: 尾部补齐容量边界防御 (aligned_len 刚好等于分区上限及补齐超限防护) */
 static void test_padding_capacity_boundary(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1451,7 +1448,7 @@ static void test_padding_capacity_boundary(void)
 /* 28. 失败后新 WRQ 自愈成功与生命周期解耦回归测试 */
 static void test_failed_session_new_wrq_full_upgrade_recovery(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -1523,7 +1520,7 @@ static void test_failed_session_new_wrq_full_upgrade_recovery(void)
 /* 29. 消除自身指针与非活跃状态结构体复制测试 */
 static void test_self_referential_pointer_elimination_and_idle_copy(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1571,7 +1568,7 @@ static void test_self_referential_pointer_elimination_and_idle_copy(void)
 /* 30. 核心机反初始化 deinit 与活跃会话 abort 契约测试 */
 static void test_core_deinit_lifecycle(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -1663,7 +1660,7 @@ static void test_core_deinit_lifecycle(void)
 
 static void test_mid_session_drop_same_core_recovery(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     ecat_foe_core_t core;
     ecat_foe_soes_adapter_t adapter;
     uint8_t payload[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
@@ -1734,7 +1731,7 @@ typedef struct {
 
 static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
 {
-    caller_custom_ctx_t caller_obj;
+    static caller_custom_ctx_t caller_obj;
     memset(&caller_obj, 0, sizeof(caller_obj));
     caller_obj.magic = 0xCAFE1234U;
     mock_driver_init(&caller_obj.drv_impl);
@@ -1786,7 +1783,7 @@ static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
 /* 需求对应 C2: 100 次失败/自愈循环 (同一个 core 实例，不重建 core) */
 static void test_100_failed_self_healing_cycles(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1828,7 +1825,7 @@ static void test_100_failed_self_healing_cycles(void)
 /* 需求对应 C2: 0xA5 与 0x02 脏内存 core 初始化 (UBSan 下无非法 bool 读取) */
 static void test_dirty_memory_initialization_a5_and_02(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     /* 1. 0xA5 脏内存测试 */
@@ -1864,7 +1861,7 @@ static void test_dirty_memory_initialization_a5_and_02(void)
 /* 需求对应 C2: NULL 项目名一律拒绝，失败后 core 不可用且不能发起 WRQ；不支持 &core.cfg */
 static void test_null_project_name_rejection(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
@@ -1914,7 +1911,7 @@ static void test_null_project_name_rejection(void)
  * 断言结果并贴输出，说明首块数据进来时核心返回什么。只写测试和文档，不改适配层逻辑 */
 static void test_reproduce_soes_data_callback_without_wrq_stream_rejection(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1992,7 +1989,7 @@ static void test_reproduce_soes_data_callback_without_wrq_stream_rejection(void)
 /* P3-a. 文件名被拒（未碰驱动）→ 不拦 */
 static void test_hook_filename_rejected_not_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -2013,7 +2010,7 @@ static void test_hook_filename_rejected_not_blocked(void)
 /* P3-b. 头校验失败（未 init）→ 不拦 */
 static void test_hook_header_invalid_not_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -2040,7 +2037,7 @@ static void test_hook_header_invalid_not_blocked(void)
 /* P3-c. init 成功、invalidate 失败 → 拦 */
 static void test_hook_init_ok_invalidate_failed_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
     mcu.inject_fail_invalidate = true;
 
@@ -2076,7 +2073,7 @@ static void test_hook_init_ok_invalidate_failed_blocked(void)
 /* P3-d. invalidate 成功后停止来数据（不调 on_abort）→ 拦 */
 static void test_hook_invalidate_ok_stream_stops_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     ecat_foe_core_t core;
@@ -2111,7 +2108,7 @@ static void test_hook_invalidate_ok_stream_stops_blocked(void)
 /* P3-e. finalize 成功后 set_floor 失败 → 不拦 */
 static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     ecat_foe_core_t core;
@@ -2152,7 +2149,7 @@ static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
 /* P3-f. 成功升级 → 不拦 */
 static void test_hook_upgrade_success_not_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     ecat_foe_core_t core;
@@ -2189,7 +2186,7 @@ static void test_hook_upgrade_success_not_blocked(void)
 /* P3-g. 先 d，再在同一个 core 实例上走新的成功升级 → 不拦 */
 static void test_hook_stream_stops_then_new_upgrade_success_not_blocked(void)
 {
-    mock_driver_t mcu;
+    static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
     ecat_foe_core_t core;
