@@ -94,7 +94,7 @@
    - 现状事实：查阅 SOES 源码 `esc_foe.c` 第 459-465 行，在独立 0 长度包触发完成的分支中，`FOE_fclose()` 的返回值未被检查，SOES 直接向主站回复最终成功 ACK。
    - 触发条件澄清：空包路径出现条件是传输总长度（`header_length + payload_length`）恰为底层 FoE 单包数据容量（`ESC_FOE_DATA_SIZE`）的整数倍，与应用层 `foe_cfg->buffer_size` 无关；TwinCAT 实际分包行为标记为 **【未核实】**。
    - 已确定决策：v1 架构完全接受此原生限制，不打源码补丁。
-   - 安全底线：`drv->invalidate()` 已提前清除固件就绪/有效标记，失败时设备重启停在 Bootloader，可重新升级，绝不会变砖。
+   - 安全底线：`drv->invalidate()` 已提前清除固件就绪/有效标记，失败时设备重启设计目标为停留在 Bootloader 等待重新升级（取决于 Bootloader 引导前置校验完备性及介质掉电写入原子性）。
    - 缓解措施 1：打包工具新增可选参数 `--foe-packet-size N`，必要时在 payload 末尾填充 `0xFF` 规避空包路径（SII 目标补 2 字节整倍数），填充计入 `payload_length` 与 `payload_crc32`。此为尽力而为缓解，主站实际分包大小标记为 **【未核实】**。
    - 缓解措施 2：适配层记录“最后提交失败”状态，在主站发起 `BOOT -> INIT` 状态切换时通过 `post_state_change_hook`（`esc.c` 第 1307 行）拒绝迁移（`*an = ESCboot | ESCerror`）并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`（`0x0014`）设置 AL 状态码拦截。（SSC 侧状态迁移拒绝与设置 AL Status Code 机制标记为 **【未核实】**）。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 1.2 节、第 3.2 节、第 5.1 节第 15 条。

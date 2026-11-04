@@ -193,8 +193,8 @@ void ESC_ALerror (uint16_t errornumber);
    - **技术影响分析**：当进入 post 钩子时，`ESC_stopmbx()` 已经完成，邮箱已被停用。若在此处将 `*an` 改写回 `ESCboot | ESCerror` 并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`，虽然可以在 AL 状态寄存器中呈现错误并阻断进入 INIT，但**邮箱已停，主站无法在该状态下通过邮箱继续交互，必须先重新走状态机恢复流程**。
 
 ### 4.2 现有实现状态界定 (区分设计与实现)
-- **【尚未实现】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 仅为本地单测桩，**未引入 SOES 真实头文件，未实现真实的钩子挂载与 `ESC_ALerror` 桥接**；
-- **设计建议**：上述基于 `post_state_change_hook` 或 `pre_state_change_hook` 的拦截逻辑目前属于**设计建议与理论分析，绝不能宣称已实现，尚未在真实 SOES 源码和主站联调中验证【未核实/待开发与真机验证】**。
+- **【单测桩仿真与局限性】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 实现了双参数 `ecat_foe_soes_post_state_hook(adapter, as, an)` 的单测桩，能够在 `*as == 0x13U` 且 `last_commit_failed == true` 时改写 `*an = 0x13U` (BOOT|Error) 并记录 `last_al_error = 0x0014U` (ALERR_NOVALIDFIRMWARE)；
+- **局限性与待验证项**：当前仍为单测桩，**未引入 SOES 真实头文件，未在真实硬件上集成编译，未进行真实主站动态联调【未核实/待开发与真机动态验证】**。真实硬件环境下由于邮箱已在 switch 内部通过 `ESC_stopmbx()` 停止，主站无法在该状态下通过 FoE 邮箱继续交互，必须先按 EtherCAT 规范走状态机复位恢复流程。
 
 ---
 
@@ -214,3 +214,49 @@ void ESC_ALerror (uint16_t errornumber);
 | `Q8_ESC_C_POST_HOOK_INVOCATION` | `esc.c` | 1304 - 1308 | `post_state_change_hook` 调用点位于停邮箱之后 |
 
 *说明：校验脚本通过读取 `docs/quotes_manifest.json`，同时提取本文档中的 `<!-- quote-begin: <ID> -->` 块与本地 SOES 源码对应行进行三方严格核验。本工具仅对上述明确登记的 8 处引用条目作出真实性承诺，不涵盖未登记引文。*
+
+---
+
+## 6. 全局行号与外部规范引用盘点表 (Reference Inventory)
+
+为落实严谨客观的工程标准，本项目对文档中所有涉及具体行号或外部规范的出处引用进行全量盘点，明确区分【本地源码已核验】与【本地无源文件/无法核验】：
+
+### 6.1 SOES 协议栈源码引用 (本地 `/tmp/soes_src/soes/` 存在且核查)
+| 源码文件与行号 | 引用内容或用途 | 核验状态 |
+| :--- | :--- | :--- |
+| `esc_foe.c:70-73` | WRQ 文件名匹配判定 (`0 == strncmp`) | **【已三方逐行严格核验 (Q1)】** |
+| `esc_foe.c:459-465` | 0 长度包结束分支 (`FOE_fclose` 返回值被忽略) | **【已三方逐行严格核验 (Q2)】** |
+| `esc_foe.c:493-506` | 短包结束分支 (`FOE_fclose` 严格返回值检查) | **【已三方逐行严格核验 (Q3)】** |
+| `esc.h:317-318` | `pre/post_state_change_hook` 钩子函数指针声明 | **【已三方逐行严格核验 (Q4)】** |
+| `esc.h:712` | `ESC_ALerror` 错误码设置函数原型声明 | **【已三方逐行严格核验 (Q5)】** |
+| `esc.c:1128-1135` | `pre_state_change_hook` 调用时机与迁移码合成 | **【已三方逐行严格核验 (Q6)】** |
+| `esc.c:1191-1196` | `BOOT_TO_INIT` 停用邮箱及赋值 `an = ESCinit` | **【已三方逐行严格核验 (Q7)】** |
+| `esc.c:1304-1308` | `post_state_change_hook` 触发时机（停邮箱之后） | **【已三方逐行严格核验 (Q8)】** |
+| `esc_foe.h:17` | `#define FOE_FN_MAX 31` 文件名长度上限 | **【已核验本地源码】** |
+| `esc_foe.c:158-163` | 接收缓冲区满调用 `write_function` 及地址累加 | **【已核验本地源码】** |
+| `esc_foe.c:187-195` | `FOE_fclose` 关闭文件时写入剩余缓冲区 | **【已核验本地源码】** |
+| `esc.c:1155-1160` | `INIT_TO_BOOT` 启动 Bootstrap 邮箱 | **【已核验本地源码】** |
+| `esc.c:1197-1202` | 非 INIT 状态切入 BOOT 直接报错设置 | **【已核验本地源码】** |
+
+### 6.2 LAN9252 数据手册引用 (`lan9252.txt`)
+| 文档行号出处 | 手册章节与描述内容 | 核验状态与说明 |
+| :--- | :--- | :--- |
+| 第 9725, 9728 行 | 第 15 章寄存器说明 | **【本地无源文件 / 无法核验】** (本地工作区及 `/tmp` 均无 `lan9252.txt`，属历史调研记录) |
+| 第 4758, 4874, 4875 行 | 第 6.2.1.2 节 表 6-1 引导时序说明 | **【本地无源文件 / 无法核验】** |
+| 第 31434 行 | Note 11 (Enhanced Link 限制说明) | **【本地无源文件 / 无法核验】** |
+| 第 33481, 33485 行 | 0502h-0503h EEPROM CONTROL/STATUS REGISTER | **【本地无源文件 / 无法核验】** |
+| 第 33496, 33498 行 | Bit 15: EEPROM Busy 状态位 | **【本地无源文件 / 无法核验】** |
+| 第 33504 行 | Bit 14: Error Write Enable | **【本地无源文件 / 无法核验】** |
+| 第 33518 行 | Bit 13: Error Acknowledge/Command | **【本地无源文件 / 无法核验】** |
+| 第 33532 行 | Bit 12: EEPROM Loading Status | **【本地无源文件 / 无法核验】** |
+| 第 33544 行 | Bit 11: Checksum Error in ESC Config Area | **【本地无源文件 / 无法核验】** |
+| 第 33568, 33574, 33575 行 | Bits 10:8: Command (Write 010, Reload 100) | **【本地无源文件 / 无法核验】** |
+| 第 33698, 33702, 33717 行 | 0504h-0507h EEPROM ADDRESS REGISTER | **【本地无源文件 / 无法核验】** |
+| 第 33744, 33748, 33769 行 | 0508h-050Bh EEPROM DATA REGISTER | **【本地无源文件 / 无法核验】** |
+| 第 33980 行 | Note 27 (MI link 限制说明) | **【本地无源文件 / 无法核验】** |
+
+### 6.3 ETG 官方规范引用
+| 规范编号 | 引用主题 | 核验状态与说明 |
+| :--- | :--- | :--- |
+| `ETG.1000.6` | EtherCAT 应用层服务规范 (FoE 传输机制) | **【本地无源文件 / 无法核验】** (外部标准，本地无官方 PDF) |
+| `ETG.2010` | EtherCAT 从站架构与 ID 识别要求 | **【本地无源文件 / 无法核验】** (外部标准，本地无官方 PDF) |

@@ -10,7 +10,7 @@
 - **当前阶段**：
   - **阶段 A（固件解析与核验）**：已完成。支持 64 字节 `.efw` 头部的三阶段反序列化、小端安全读写、双向元数据校验及 IEEE 802.3 CRC32 运算。
   - **阶段 B（核心升级状态机与适配）**：已完成核心机与 SOES 适配桩验证。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
-  - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（共 464 项断言无一失败）。
+  - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（共 486 项断言无一失败：阶段 A 249 项 + 阶段 B 226 项 + 校验夹具 11 项）。
 
 ---
 
@@ -38,13 +38,14 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现初步的接口转换打样与单测桩（测试短包识别与状态标志）。**状态机钩子与 `ESC_ALerror` 桥接尚未实现，真实 SOES 源码尚未集成编译，真实联调尚未开展【未核实/待开发与真机动态验证】**。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现初步的接口转换打样与单测桩（验证短包识别、0 长度包结束判定，以及双参数 `post_state_change_hook` 拦截与 AL 状态错误码 `0x0014` 记录仿真）。**真实 SOES 源码尚未集成编译，现场硬件与真实主站动态联调尚未开展【未核实/待开发与真机动态验证】**。
 - **原生协议栈限制与技术约束 (静态推断与动态验证界定)**：
   - *【静态推断】文件名匹配机制与空名/短前缀风险*：原生 SOES（`esc_foe.c:72`）采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定**由接收长度 `num_chars` 决定前缀匹配，而非精确匹配**。基于静态代码分析得出两项潜在风险（【待动态实测确认】）：
     1. **空文件名风险**：若主站发来空名（`num_chars == 0`），`strncmp(..., 0)` 恒等于 0，将无条件误命中首条配置（`files[0]` 对应 MCU 固件）；
     2. **短前缀误绑定**：若主站发送公共前缀，会命中首个具有该前缀的表项，引发跨目标误绑定。
-  - *【静态推断】0 长度结束包与 AL 错误*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。虽然适配方案在理论上规划了通过 `post_state_change_hook` 拦截退出 BOOT 状态，但**当前适配器并没有实现该钩子，也没有调用 `ESC_ALerror` 设置 AL 状态错误码，真实接入尚未完成，绝不能声称已经拦截或保证防止错误固件启动**。
+  - *【静态推断】0 长度结束包与 AL 错误*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。适配层目前在单测桩中验证了通过 `post_state_change_hook`（`*as == 0x13U`）改写目标状态为 `0x13 (BOOT|Error)` 并记录错误码 `0x0014`，**但在真实物理环境下，进入 post hook 时物理邮箱已通过 `ESC_stopmbx()` 停止，能否防止错误固件被引导仍取决于 Bootloader 前置校验和硬件原子性，绝不能宣称真机已验证拦截**。
   - *【静态推断】关闭 RRQ 的真实编译方式（不可定义为 0）*：原生 SOES 使用 `#ifdef FOE_READ_SUPPORTED` 控制代码编译。**不可通过定义为 0（如 `-DFOE_READ_SUPPORTED=0`）来禁用**！因 C 预处理器 `#ifdef` 仅判断宏是否存在，定义为 0 仍会被判定为真而编入 RRQ 逻辑并引发缓冲区越界读 (Buffer Over-read) 风险。**必须保持该宏完全未定义或显式 `#undef`**，方可走 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`。
+- **源码与规范引用清单**：关于 SOES、LAN9252 手册及 ETG 规范的全局行号引用与核验状态，详见 [soes-integration-options.md 第 6 节](docs/architecture/soes-integration-options.md#6-全局行号与外部规范引用盘点表-reference-inventory)。
 
 ### 2. Beckhoff Slave Stack Code (SSC) 接入
 - **状态**：【未核实 / 待开发】。目前适配层仅规划了接口边界，尚未包含面向真实 SSC 协议栈的回调实现。
