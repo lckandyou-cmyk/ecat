@@ -28,13 +28,19 @@ $(TEST_CORE_BIN): $(SRC_CORE) $(TEST_CORE_SRC) include/ecat_foe_core.h include/e
 	$(CC) $(CFLAGS) -o $@ $(SRC_CORE) $(TEST_CORE_SRC)
 
 check-quotes:
+	@echo ">>> 执行 SOES 源码引文三方核验 (来源目录: $(SOES_DIR)) <<<"
+	@if [ ! -d "$(SOES_DIR)" ]; then \
+		echo "[FATAL] SOES 源码目录不存在: $(SOES_DIR)"; \
+		echo "可通过传递参数指定: make check-quotes SOES_DIR=/path/to/soes"; \
+		exit 1; \
+	fi
 	@$(PYTHON) tools/verify_soes_quotes.py --soes-dir $(SOES_DIR)
 
 test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
 	@./$(TEST_CORE_BIN)
-	@if [ -d "$(SOES_DIR)" ]; then $(PYTHON) tools/verify_soes_quotes.py --soes-dir $(SOES_DIR); fi
+	@$(PYTHON) tests/test_verify_quotes.py
 
 test-asan:
 	$(MAKE) clean

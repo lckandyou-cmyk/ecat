@@ -9,22 +9,27 @@
 
 ### 1.1 原生源码逐字核验 (esc_foe.c:70-73)
 在本地真实 `/tmp/soes_src/soes/esc_foe.c` 第 70~73 行，原生 SOES 处理 WRQ 文件名匹配的代码逐字如下：
+
+<!-- quote-begin: Q1_ESC_FOE_STRNCMP -->
 ```c
    for (i = 0; i < foe_cfg->n_files; i++)
    {
       if (0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars))
       {
 ```
+<!-- quote-end: Q1_ESC_FOE_STRNCMP -->
+
 *(注：第 72 行源码实为 `0 == strncmp (...)`，此前报告改写为 `strncmp (...) == 0` 属表述不严谨，现已严格纠正为逐字原文)*
 
-### 1.2 匹配机理与潜在隐患分析
+### 1.2 匹配机理与潜在隐患分析 (静态推断与动态验证界定)
+以下分析基于对 SOES 原生源码第 70~73 行的**静态代码推断 (Static Code Inspection)**，尚未在主站物理环境下完成全流程动态验证：
 1. **由接收长度决定的前缀匹配**：
    - 比较长度参数为 `num_chars`（即主站发送的文件名长度）。这属于前缀匹配，绝非严格的全名精确匹配；
-2. **空文件名命中首条配置隐患**：
+2. **【静态推断】空文件名命中首条配置隐患**：
    - 当主站发来的 WRQ 报文未携带文件名或文件名长度为 0 时，`num_chars == 0`；
    - 根据 C99 标准，`strncmp(s1, s2, 0)` 恒等于 0，`0 == 0` 条件在循环的第 1 次迭代（`i = 0`）即无条件成立；
-   - **后果**：主站发出的任何空文件名写请求，都会被原生 SOES 默认误路由并绑定到首条文件配置（通常为 `files[0]` 对应的 MCU 固件）；
-3. **短前缀误绑定多目标隐患**：
+   - **推断后果**：主站发出的任何空文件名写请求，都会被原生 SOES 默认误路由并绑定到首条文件配置（通常为 `files[0]` 对应的 MCU 固件）；此现象属于静态逻辑推断，【待真机动态验证】；
+3. **【静态推断】短前缀误绑定多目标隐患**：
    - 若从站配置中包含多个文件表项（如 `files[0].name = "SERVO_DRV_MCU.efw"`，`files[1].name = "SERVO_DRV_FPGA.efw"`）；
    - 若主站下发了通用前缀（如 `"SERVO_DRV"`，`num_chars == 9`），`strncmp` 将在前 9 个字节匹配成功，直接命中 `files[0]`；
    - 即使用户本意是升级 FPGA，若前缀通用，也会被不可抗拒地绑定到首个匹配项上；
@@ -44,6 +49,8 @@
 
 ### 2.1 原生源码逐字核验 (esc_foe.c:459-465 与 493-506)
 在 `/tmp/soes_src/soes/esc_foe.c` 中：
+
+<!-- quote-begin: Q2_ESC_FOE_ZERO_LEN_CLOSE -->
 ```c
    else if (data_len == 0)
    {
@@ -53,7 +60,11 @@
       FOE_init ();
    }
 ```
+<!-- quote-end: Q2_ESC_FOE_ZERO_LEN_CLOSE -->
+
 对比第 493~506 行短包分支：
+
+<!-- quote-begin: Q3_ESC_FOE_SHORT_PACKET_CLOSE -->
 ```c
       else
       {
@@ -70,13 +81,15 @@
          }
       }
 ```
+<!-- quote-end: Q3_ESC_FOE_SHORT_PACKET_CLOSE -->
+
 - **源码事实**：在 `data_len == 0` 分支，`FOE_fclose()` 的返回值确实被直接丢弃，即使底层提交返回错误，SOES 依然会发出成功 ACK 并重置状态。
 
 ### 2.2 防砖能力与可靠性客观边界 (消除绝对化保证)
 此前文档中关于“绝不会变砖”、“必然无法启动”等断言不够客观严谨。设备在异常中断或校验失败后能否可靠停留在 Bootloader，**高度依赖以下系统与工程边界条件，不存在绝对保证**：
 1. **驱动有效标记的非易失性持久化**：
    - 核心机在解完固件头后调用 `invalidate()`，要求清除固件有效标记；
-   - **关键依赖**：此操作必须在非易失介质（Flash 扇区或特定标志位）上实现掉电原子性持久化。若硬件仅在 RAM 中修改标记、或擦写期间发生断电造成状态未定义，设备重启后可能误跳入损坏固件；
+   - **关键依赖**：此操作必须在非易失介质（Flash 扇区或特定标志位）上实现掉电原子性持久化。若硬件仅在 RAM 中修改标记、或标记擦写期间发生断电造成状态未定义，设备重启后可能误跳入损坏固件；
 2. **Bootloader 启动逻辑引导契约**：
    - 依赖物理 Bootloader 在系统上电复位时，严格先行检查该有效标记。若标记非法或已擦除，才强制停留在 Bootloader 等待重新升级；
 3. **finalize 成功后的版本下限持久化非原子性**：
@@ -90,7 +103,7 @@
 ### 3.1 预编译宏机制核查
 原生 SOES 采用 `#ifdef FOE_READ_SUPPORTED`（`esc_foe.c:110, 510, 598`）控制读逻辑编译。
 - **未定义（唯一正确关闭方式）**：不定义 `FOE_READ_SUPPORTED`，代码中无 RRQ 分支，收到 RRQ 报文落入 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`；
-- **定义为 0 的配置陷阱**：若传入 `-DFOE_READ_SUPPORTED=0`，因 `#ifdef` 仅判定宏是否存在，宏依然生效，会错误编译 RRQ 逻辑。
+- **【不可定义为 0】定义为 0 的配置陷阱**：若传入 `-DFOE_READ_SUPPORTED=0`，因 C 预处理器 `#ifdef` 仅判定宏是否存在，宏依然生效，会错误编译包含 RRQ 逻辑。
 
 ### 3.2 启用 RRQ 时的越界读 (Buffer Over-read) 风险分析
 在 `esc_foe.c` 中：
@@ -113,10 +126,27 @@
 
 ## 4. BOOT 状态机钩子、时序与错误码桥接
 
-### 4.1 SOES esc.c 状态迁移调用时序逐行证据
+### 4.1 SOES 钩子定义与 esc.c 调用时序逐行证据
+在 `/tmp/soes_src/soes/esc.h` 第 317~318 行与第 712 行：
+
+<!-- quote-begin: Q4_ESC_H_STATE_HOOKS -->
+```c
+   void (*pre_state_change_hook) (uint8_t * as, uint8_t * an);
+   void (*post_state_change_hook) (uint8_t * as, uint8_t * an);
+```
+<!-- quote-end: Q4_ESC_H_STATE_HOOKS -->
+
+<!-- quote-begin: Q5_ESC_H_ALERROR_FUNC -->
+```c
+void ESC_ALerror (uint16_t errornumber);
+```
+<!-- quote-end: Q5_ESC_H_ALERROR_FUNC -->
+
 在 `/tmp/soes_src/soes/esc.c` 中：
 
 1. **迁移码合成与 pre 钩子** (第 1128~1135 行)：
+
+<!-- quote-begin: Q6_ESC_C_PRE_HOOK_INVOCATION -->
 ```c
    /* Mask high bits ALcommand, low bits ALstatus */
    as = (uint8_t)((ac << 4) | (as & 0x0f));
@@ -127,10 +157,14 @@
       ESCvar.pre_state_change_hook (&as, &an);
    }
 ```
+<!-- quote-end: Q6_ESC_C_PRE_HOOK_INVOCATION -->
+
    - `as` 的语义：传入前高 4 位为请求的 `ALcontrol` 命令，低 4 位为当前 `ALstatus`。对于 `BOOT -> INIT` 迁移，`ac = 0x01 (ESCinit)`，`as & 0x0f = 0x03 (ESCboot)`，组合值为 `0x13`；
    - `an` 的语义：目标状态变量指针（初始与当前状态相同）。
 
 2. **状态迁移处理与邮箱关闭时序** (第 1191~1196 行)：
+
+<!-- quote-begin: Q7_ESC_C_BOOT_TO_INIT -->
 ```c
       case BOOT_TO_INIT:
       {
@@ -139,9 +173,13 @@
          break;
       }
 ```
+<!-- quote-end: Q7_ESC_C_BOOT_TO_INIT -->
+
    - **关键时序事实**：当 `as == BOOT_TO_INIT` 时，`ESC_stopmbx()` 在此处**直接执行，从站邮箱已被停用关闭**。
 
 3. **post 钩子调用点** (第 1304~1308 行)：
+
+<!-- quote-begin: Q8_ESC_C_POST_HOOK_INVOCATION -->
 ```c
    /* Call post state change hook case it have been configured  */
    if (ESCvar.post_state_change_hook != NULL)
@@ -149,18 +187,20 @@
       ESCvar.post_state_change_hook (&as, &an);
    }
 ```
+<!-- quote-end: Q8_ESC_C_POST_HOOK_INVOCATION -->
+
    - **执行时机**：`post_state_change_hook` 在 `switch(as)` 退出后被调用。
    - **技术影响分析**：当进入 post 钩子时，`ESC_stopmbx()` 已经完成，邮箱已被停用。若在此处将 `*an` 改写回 `ESCboot | ESCerror` 并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`，虽然可以在 AL 状态寄存器中呈现错误并阻断进入 INIT，但**邮箱已停，主站无法在该状态下通过邮箱继续交互，必须先重新走状态机恢复流程**。
 
 ### 4.2 现有实现状态界定 (区分设计与实现)
-- **现有实现**：目前适配层桩代码 `src/adapters/ecat_foe_soes.c` 仅为接口适配单测桩，**未引入 SOES 真实头文件，未调用 `ESC_ALerror`，未包含真实邮箱状态判定**；
-- **设计建议**：上述基于 `post_state_change_hook` 或 `pre_state_change_hook` 的拦截逻辑目前属于**设计建议与理论分析，尚未在真实 SOES 源码和主站联调中验证【未核实/待开发与真机验证】**。
+- **【尚未实现】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 仅为本地单测桩，**未引入 SOES 真实头文件，未实现真实的钩子挂载与 `ESC_ALerror` 桥接**；
+- **设计建议**：上述基于 `post_state_change_hook` 或 `pre_state_change_hook` 的拦截逻辑目前属于**设计建议与理论分析，绝不能宣称已实现，尚未在真实 SOES 源码和主站联调中验证【未核实/待开发与真机验证】**。
 
 ---
 
 ## 5. 源码引用自动化校验清单 (Registered Quotes)
 
-为了保证本文档引用的每一处 SOES 源码绝对真实，项目提供了校验脚本 `tools/verify_soes_quotes.py`，针对以下明确登记的源码条目进行全量行号与文本比对：
+为了保证本文档引用的每一处 SOES 源码绝对真实，项目提供了三方校验脚本 `tools/verify_soes_quotes.py` 与外部清单 `docs/quotes_manifest.json`，针对以下明确登记的源码条目进行全量行号与文本三方比对：
 
 | 引用编号 | 文件路径 | 行号范围 | 校验内容描述 |
 | :--- | :--- | :--- | :--- |
@@ -173,4 +213,4 @@
 | `Q7_ESC_C_BOOT_TO_INIT` | `esc.c` | 1191 - 1196 | `BOOT_TO_INIT` 分支执行 `ESC_stopmbx` 时机 |
 | `Q8_ESC_C_POST_HOOK_INVOCATION` | `esc.c` | 1304 - 1308 | `post_state_change_hook` 调用点位于停邮箱之后 |
 
-*说明：校验脚本可通过 `python3 tools/verify_soes_quotes.py --soes-dir /tmp/soes_src/soes` 执行比对。超出此登记清单之外的文字内容不作为机器比对范畴。*
+*说明：校验脚本通过读取 `docs/quotes_manifest.json`，同时提取本文档中的 `<!-- quote-begin: <ID> -->` 块与本地 SOES 源码对应行进行三方严格核验。本工具仅对上述明确登记的 8 处引用条目作出真实性承诺，不涵盖未登记引文。*

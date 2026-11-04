@@ -2,238 +2,204 @@
 """
 tools/verify_soes_quotes.py
 
-轻量 SOES 源码引用校验工具。
-用于自动化核验工程文档中标记为“源码原文”并标注具体行号的引用条目，
-确保文档引用与本地真实 SOES 源码逐字完全一致，杜绝记忆概括或笔误改写。
+三方严格核验 SOES 源码引用工具 (Three-way Quote Verification Tool)。
+比对三方数据源：
+1. 外部清单文件 (docs/quotes_manifest.json)；
+2. 项目技术文档内标记代码块 (<!-- quote-begin: ID --> ... <!-- quote-end: ID -->)；
+3. 本地真实 SOES 源码文件 (按照行号范围提取的逐字源码)。
 
-【边界声明】：
-本工具仅针对 REGISTERED_QUOTES 列表中明确登记的引用条目进行比对，
-不声称亦不覆盖任何未登记的文本或引文。
+【覆盖范围与承诺边界】：
+本工具仅针对外部清单文件显式登记的条目执行核验并作出真实性承诺，
+不声称亦不覆盖任何未登记的文本段落。
+若任何一方缺失、标记不匹配、行号越界或文本字符不一致，均非零退出。
 """
 
 import os
 import sys
+import json
+import re
 import argparse
+from typing import List, Dict, Any, Tuple
 
-# 登记的 SOES 源码引用清单
-REGISTERED_QUOTES = [
-    {
-        "id": "Q1_ESC_FOE_STRNCMP",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc_foe.c",
-        "start_line": 70,
-        "end_line": 73,
-        "expected_lines": [
-            "   for (i = 0; i < foe_cfg->n_files; i++)",
-            "   {",
-            "      if (0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars))",
-            "      {",
-        ],
-        "description": "WRQ 文件名匹配判定 (0 == strncmp 前缀匹配)",
-    },
-    {
-        "id": "Q2_ESC_FOE_ZERO_LEN_CLOSE",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc_foe.c",
-        "start_line": 459,
-        "end_line": 465,
-        "expected_lines": [
-            "   else if (data_len == 0)",
-            "   {",
-            "      DPRINT(\"FOE_data completed\\n\");",
-            "      FOE_fclose ();",
-            "      res = FOE_send_ack ();",
-            "      FOE_init ();",
-            "   }",
-        ],
-        "description": "0 长度结束包分支 (FOE_fclose 无参且返回值未检查)",
-    },
-    {
-        "id": "Q3_ESC_FOE_SHORT_PACKET_CLOSE",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc_foe.c",
-        "start_line": 493,
-        "end_line": 506,
-        "expected_lines": [
-            "      else",
-            "      {",
-            "         if ((ncopied != data_len) || FOE_fclose ())",
-            "         {",
-            "            DPRINT(\"FOE_fclose failed to write extra buffer\\n\");",
-            "            FOE_abort (FOE_ERR_PROGERROR);",
-            "         }",
-            "         else",
-            "         {",
-            "            DPRINT(\"FOE_data completed\\n\");",
-            "            res = FOE_send_ack ();",
-            "            FOE_init ();",
-            "         }",
-            "      }",
-        ],
-        "description": "短包结束分支 (检查 FOE_fclose 返回值)",
-    },
-    {
-        "id": "Q4_ESC_H_STATE_HOOKS",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc.h",
-        "start_line": 317,
-        "end_line": 318,
-        "expected_lines": [
-            "   void (*pre_state_change_hook) (uint8_t * as, uint8_t * an);",
-            "   void (*post_state_change_hook) (uint8_t * as, uint8_t * an);",
-        ],
-        "description": "pre/post 状态迁移钩子函数指针定义 (双指针参数)",
-    },
-    {
-        "id": "Q5_ESC_H_ALERROR_FUNC",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc.h",
-        "start_line": 712,
-        "end_line": 712,
-        "expected_lines": [
-            "void ESC_ALerror (uint16_t errornumber);",
-        ],
-        "description": "ESC_ALerror 函数声明",
-    },
-    {
-        "id": "Q6_ESC_C_PRE_HOOK_INVOCATION",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc.c",
-        "start_line": 1128,
-        "end_line": 1135,
-        "expected_lines": [
-            "   /* Mask high bits ALcommand, low bits ALstatus */",
-            "   as = (uint8_t)((ac << 4) | (as & 0x0f));",
-            "",
-            "   /* Call post state change hook case it have been configured  */",
-            "   if (ESCvar.pre_state_change_hook != NULL)",
-            "   {",
-            "      ESCvar.pre_state_change_hook (&as, &an);",
-            "   }",
-        ],
-        "description": "pre_state_change_hook 调用点及 as 组合迁移码合成时机",
-    },
-    {
-        "id": "Q7_ESC_C_BOOT_TO_INIT",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc.c",
-        "start_line": 1191,
-        "end_line": 1196,
-        "expected_lines": [
-            "      case BOOT_TO_INIT:",
-            "      {",
-            "         ESC_stopmbx ();",
-            "         an = ESCinit;",
-            "         break;",
-            "      }",
-        ],
-        "description": "BOOT_TO_INIT 迁移处理 (停邮箱并设置 an=ESCinit)",
-    },
-    {
-        "id": "Q8_ESC_C_POST_HOOK_INVOCATION",
-        "doc": "docs/architecture/soes-integration-options.md",
-        "file": "esc.c",
-        "start_line": 1304,
-        "end_line": 1308,
-        "expected_lines": [
-            "   /* Call post state change hook case it have been configured  */",
-            "   if (ESCvar.post_state_change_hook != NULL)",
-            "   {",
-            "      ESCvar.post_state_change_hook (&as, &an);",
-            "   }",
-        ],
-        "description": "post_state_change_hook 调用点 (在 stopmbx 之后)",
-    },
-]
+def extract_quote_from_doc(doc_path: str, qid: str) -> Tuple[bool, List[str], str]:
+    """从 markdown 文档中根据 HTML 注释标记提取代码块中的引文字符串列表"""
+    if not os.path.isfile(doc_path):
+        return False, [], f"文档文件不存在: {doc_path}"
 
-def verify_quotes(soes_dir: str, tamper: bool = False) -> int:
-    print(f"============================================================")
-    print(f" SOES 源码原文引用校验工具 (Quote Verification Tool)")
-    print(f" SOES 目标源码目录: {soes_dir}")
-    print(f" 登记核验条目数: {len(REGISTERED_QUOTES)}")
-    print(f" 模式: {'【故意篡改注入模式 - 测试报警机制】' if tamper else '【正常核验模式】'}")
-    print(f"============================================================")
+    with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
 
-    if not os.path.isdir(soes_dir):
-        print(f"[FATAL] SOES 目录不存在: {soes_dir}")
+    begin_tag = f"<!-- quote-begin: {qid} -->"
+    end_tag = f"<!-- quote-end: {qid} -->"
+
+    begin_pos = content.find(begin_tag)
+    if begin_pos == -1:
+        return False, [], f"文档中未找到起始标记: {begin_tag}"
+
+    end_pos = content.find(end_tag, begin_pos + len(begin_tag))
+    if end_pos == -1:
+        return False, [], f"文档中未找到结束标记: {end_tag}"
+
+    block = content[begin_pos + len(begin_tag) : end_pos].strip()
+
+    # 提取 fenced code block 内部内容
+    lines = block.splitlines()
+    snippet_lines = []
+    in_code = False
+    for line in lines:
+        line_clean = line.rstrip("\r\n")
+        if line_clean.startswith("```"):
+            if not in_code:
+                in_code = True
+                continue
+            else:
+                in_code = False
+                break
+        if in_code:
+            snippet_lines.append(line_clean)
+
+    if not snippet_lines:
+        return False, [], f"标记 {qid} 内部未找到有效的代码块内容"
+
+    return True, snippet_lines, ""
+
+def extract_quote_from_source(source_path: str, start_line: int, end_line: int) -> Tuple[bool, List[str], str]:
+    """从真实 SOES 源码中提取指定行号范围的文本"""
+    if not os.path.isfile(source_path):
+        return False, [], f"源码文件不存在: {source_path}"
+
+    with open(source_path, "r", encoding="utf-8", errors="replace") as f:
+        all_lines = [l.rstrip("\r\n") for l in f]
+
+    if start_line < 1 or end_line > len(all_lines) or start_line > end_line:
+        return False, [], f"行号范围越界: {start_line}-{end_line} (源文件总行数: {len(all_lines)})"
+
+    snippet = all_lines[start_line - 1 : end_line]
+    return True, snippet, ""
+
+def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
+    print("============================================================")
+    print(" SOES 源码引用三方严格核验工具 (Three-way Quote Verifier)")
+    print(f" 外部清单路径: {manifest_path}")
+    print(f" 仓库根目录:   {repo_root}")
+    print(f" SOES 源码目录: {soes_dir}")
+    print("============================================================")
+
+    if not os.path.isfile(manifest_path):
+        print(f"[FATAL] 外部清单文件不存在: {manifest_path}")
         return 2
 
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+    except Exception as e:
+        print(f"[FATAL] 解析清单 JSON 失败: {e}")
+        return 2
+
+    if not isinstance(manifest_data, list):
+        print(f"[FATAL] 清单根结构必须为 JSON Array")
+        return 2
+
+    seen_ids = set()
     failures = 0
     checked_count = 0
 
-    for item in REGISTERED_QUOTES:
+    print(f"【登记清单核验范围说明】：仅对清单中登记的 {len(manifest_data)} 处引用进行三方比对。")
+    print("------------------------------------------------------------")
+
+    for item in manifest_data:
         checked_count += 1
-        rel_path = item["file"]
-        full_path = os.path.join(soes_dir, rel_path)
-        qid = item["id"]
-        start_line = item["start_line"]
-        end_line = item["end_line"]
-        expected = list(item["expected_lines"])
+        qid = item.get("id")
+        doc_rel = item.get("doc_path")
+        source_rel = item.get("source_file")
+        start_line = item.get("start_line")
+        end_line = item.get("end_line")
+        expected_snippet = item.get("expected_snippet")
+        desc = item.get("description", "")
 
-        if tamper and qid == "Q1_ESC_FOE_STRNCMP":
-            # 故意篡改第一条引用，验证校验器能否报错截断
-            expected[2] = "      if (strncmp (foe_file_name, foe_cfg->files[i].name, num_chars) == 0)"
-
-        if not os.path.isfile(full_path):
-            print(f"[{qid}] [MISSING] 源文件缺失: {full_path}")
+        # 1. 清单条目完整性与 ID 唯一性检查
+        if not qid or not doc_rel or not source_rel or start_line is None or end_line is None or expected_snippet is None:
+            print(f"[{qid or 'UNKNOWN'}] [FAIL] 清单字段缺失或非法")
             failures += 1
             continue
 
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = [l.rstrip("\r\n") for l in f]
-        except Exception as e:
-            print(f"[{qid}] [ERROR] 读取文件失败: {e}")
+        if qid in seen_ids:
+            print(f"[{qid}] [FAIL] 清单中存在重复的引用 ID")
+            failures += 1
+            continue
+        seen_ids.add(qid)
+
+        # 2. 从文档中提取引文 (Party 2)
+        doc_full = os.path.join(repo_root, doc_rel)
+        doc_ok, doc_lines, doc_err = extract_quote_from_doc(doc_full, qid)
+        if not doc_ok:
+            print(f"[{qid}] [FAIL] 文档引文提取失败: {doc_err}")
             failures += 1
             continue
 
-        if start_line < 1 or end_line > len(all_lines) or start_line > end_line:
-            print(f"[{qid}] [OUT_OF_BOUNDS] 行号范围非法: {start_line}-{end_line} (文件总行数: {len(all_lines)})")
+        # 3. 从 SOES 源码中提取引文 (Party 3)
+        src_full = os.path.join(soes_dir, source_rel)
+        src_ok, src_lines, src_err = extract_quote_from_source(src_full, start_line, end_line)
+        if not src_ok:
+            print(f"[{qid}] [FAIL] 源码引文提取失败: {src_err}")
             failures += 1
             continue
 
-        actual = all_lines[start_line - 1 : end_line]
+        # 4. 三方逐行一致性严格核验 (Manifest vs Doc vs Source)
+        manifest_vs_doc = (expected_snippet == doc_lines)
+        manifest_vs_src = (expected_snippet == src_lines)
 
-        if actual == expected:
-            print(f"  [PASS] {qid:26s} -> {rel_path}:{start_line}-{end_line} ({item['description']})")
+        if manifest_vs_doc and manifest_vs_src:
+            print(f"  [PASS] {qid:28s} -> {source_rel}:{start_line}-{end_line} ({desc})")
         else:
             failures += 1
-            print(f"  [FAIL] {qid:26s} -> {rel_path}:{start_line}-{end_line} 不匹配！")
-            print(f"         来源文档: {item['doc']}")
-            print(f"         差异对比 (期望行 vs 实际行):")
-            max_len = max(len(expected), len(actual))
-            for i in range(max_len):
-                exp_l = expected[i] if i < len(expected) else "<EOF>"
-                act_l = actual[i] if i < len(actual) else "<EOF>"
-                if exp_l != act_l:
-                    line_no = start_line + i
-                    print(f"           Line {line_no:4d}:")
-                    print(f"             - 期望: {repr(exp_l)}")
-                    print(f"             + 实际: {repr(act_l)}")
+            print(f"  [FAIL] {qid:28s} -> 三方比对不一致！")
+            if not manifest_vs_doc:
+                print(f"         [差异: 清单 vs 文档]")
+                print(f"           - 清单行数: {len(expected_snippet)} | 文档行数: {len(doc_lines)}")
+                for i in range(max(len(expected_snippet), len(doc_lines))):
+                    e_l = expected_snippet[i] if i < len(expected_snippet) else "<EOF>"
+                    d_l = doc_lines[i] if i < len(doc_lines) else "<EOF>"
+                    if e_l != d_l:
+                        print(f"           Line +{i}: 清单: {repr(e_l)} vs 文档: {repr(d_l)}")
+            if not manifest_vs_src:
+                print(f"         [差异: 清单 vs 源码]")
+                print(f"           - 清单行数: {len(expected_snippet)} | 源码行数: {len(src_lines)}")
+                for i in range(max(len(expected_snippet), len(src_lines))):
+                    e_l = expected_snippet[i] if i < len(expected_snippet) else "<EOF>"
+                    s_l = src_lines[i] if i < len(src_lines) else "<EOF>"
+                    if e_l != s_l:
+                        line_no = start_line + i
+                        print(f"           Line {line_no}: 清单: {repr(e_l)} vs 源码: {repr(s_l)}")
 
-    print(f"------------------------------------------------------------")
-    print(f" 核验统计: 检查 {checked_count} 条 | 通过: {checked_count - failures} 条 | 失败: {failures} 条")
+    print("------------------------------------------------------------")
+    print(f" 三方核验统计: 检查 {checked_count} 条 | 通过: {checked_count - failures} 条 | 失败: {failures} 条")
     if failures == 0:
-        print(f">>> 校验全部通过！登记的 SOES 源码原文引用 100% 吻合！<<<")
+        print(">>> 全部三方比对 100% 吻合！清单、文档与 SOES 源码逐字一致！<<<")
         return 0
     else:
-        print(f">>> 存在引用不匹配条目，核验失败！<<<")
+        print(">>> 存在比对不一致项，三方核验失败！<<<")
         return 1
 
 def main():
-    parser = argparse.ArgumentParser(description="SOES 源码引用校验工具")
+    parser = argparse.ArgumentParser(description="SOES 源码引用三方严格核验工具")
+    parser.add_argument(
+        "--manifest",
+        default="docs/quotes_manifest.json",
+        help="外部清单 JSON 路径 (默认: docs/quotes_manifest.json)",
+    )
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        help="仓库根目录 (默认: .)",
+    )
     parser.add_argument(
         "--soes-dir",
         default="/tmp/soes_src/soes",
         help="SOES 源码本地路径 (默认: /tmp/soes_src/soes)",
     )
-    parser.add_argument(
-        "--tamper-test",
-        action="store_true",
-        help="故意篡改用例，测试工具报警与非零退出码机制",
-    )
     args = parser.parse_args()
-    ret = verify_quotes(args.soes_dir, args.tamper_test)
+    ret = verify_three_way(args.manifest, args.repo_root, args.soes_dir)
     sys.exit(ret)
 
 if __name__ == "__main__":
