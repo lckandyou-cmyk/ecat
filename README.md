@@ -1,136 +1,108 @@
 # ecat (Universal EtherCAT FoE Upgrade Library)
 
-面向嵌入式从站设备的轻量、通用、高安全 **EtherCAT FoE (File over EtherCAT)** 固件升级核心库。
+面向嵌入式 EtherCAT 从站的高安全、零 malloc、可移植 **FoE (File over EtherCAT)** 固件升级通用核心库。
 
 ---
 
-## 🌟 设计目标与核心原则
+## 📌 当前开发阶段与研发状态
 
-1. **即插即用**：只需将核心文件加入现有工程即可编译使用。
-2. **标准合规**：所有升级流程严格走 EtherCAT 标准 `BOOT` 状态机与 `FoE` 协议（ETG.1000.6），**不自造私有协议，不改动 EtherCAT 标准状态机**。
-3. **独立 Bootloader 架构**：由独立 MCU Bootloader 执行固件接收与烧录，即使应用固件损坏依然可无缝恢复。
-4. **统一 `.efw` 容器格式**：文件名与 84 字节二进制文件头双重识别匹配，校验工程 ID、硬件 ID、目标 ID 与版本。
-5. **绝对物理分区信任**：写入地址仅采信 Bootloader 本地静态配置，绝不信任文件中携带的任意地址，彻底杜绝越界写与 Bootloader 踩踏。
-6. **多目标灵活支持**：APP、FPGA、EEPROM 升级全部可选，大多数场景可仅开启 APP。
-7. **芯片与协议栈完全解耦**：核心为纯 C99 实现（无动态内存分配 `malloc`），提供两层极简接口：
-   - **FoE 协议栈适配层**：已包含针对 Beckhoff SSC 与 SOES 的薄转接层。
-   - **目标驱动层**：擦除、写入、校验、提交抽象为函数指针，用户按自己芯片的 Flash/SPI 控制器注册即可。
+- **规范版本**：遵循 `docs/spec/efw-format-v0.1.md` 固件容器格式规范与 `docs/architecture/SAD-v0.1.md` 系统架构设计。
+- **当前阶段**：
+  - **阶段 A（固件解析与核验）**：已完成。支持 64 字节 `.efw` 头部的三阶段反序列化、小端安全读写、双向元数据校验及 IEEE 802.3 CRC32 运算。
+  - **阶段 B（核心升级状态机与适配）**：已完成核心机与 SOES 适配桩验证。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
+  - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（共 439 项断言无一失败）。
 
 ---
 
-## 📂 目录结构
+## 🛡️ 核心架构与安全保证
+
+1. **零动态内存分配 (Zero malloc)**：
+   - 全流程纯 C99 实现，严禁调用 `malloc`/`free`，所有缓冲与上下文均由静态或局部内存分配，内存占用确定可控。
+2. **绝对物理分区信任**：
+   - 物理存储基地址与容量上限完全由从站本地静态配置管理，绝不信任固件容器携带的物理地址，杜绝越界踩踏 Bootloader。
+3. **防变砖生命周期契约 (Strict Driver Contract)**：
+   - **`init()` 失败**：驱动自身初始化未完成，由驱动内部自行清理未初始化半成品，核心机不调用 `abort()`；
+   - **`init()` 成功**：驱动资源进入活跃期。此后任何阶段失败（`invalidate` 失败、擦除失败、写入失败、CRC 不匹配、回读校验错误、主站中止），核心机严格保证**调用且仅调用一次** `abort()` 恢复硬件安全状态；
+   - **`finalize()` 成功**：固件有效标记置位，升级生命周期正常闭环。核心状态机永久锁定，此后**绝不调用** `abort()`。
+4. **失效标记先行 (Invalidate First)**：
+   - 头部校验全部通过后，在执行物理扇区擦除前，必须先调用 `invalidate()` 清除原有有效标记。若后续发生断电事故，设备冷启动时强制停留在 Bootloader 等待重新升级。
+5. **按需覆盖擦除与物理回读双重防线**：
+   - 流式接收时根据写入边界按需调用 `erase_to()`，并严格校验 `erased_end >= need_end`；
+   - 升级提交前执行“流 CRC 比对（捕获传输损坏）+ 物理介质 read 回读增量比对（捕获存储坏块）”，双重校验一致方可 `finalize()`。
+
+---
+
+## 🔌 协议栈接入与约束说明
+
+### 1. Simple Open EtherCAT Slave (SOES) 接入
+- **适配层实现**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现适配薄层。
+- **原生协议栈限制与现状说明**：
+  - *动态文件名匹配*：原生 SOES（`esc_foe.c:70-73`）使用静态精确匹配（`strncmp(foe_file_name, foe_cfg->files[i].name, num_chars)`），无外部 WRQ 文件名回调钩子。动态版本文件名无法通过原生静态匹配。协议架构是否调整为固定目标文件名（如 `SERVO_DRV_MCU.efw`）或引入轻量钩子尚待最终裁定，当前代码库保持分层解耦，暂不变更现有架构；
+  - *0 长度包分支*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。适配层通过 `post_state_change_hook` 在主站尝试退出 BOOT 状态（`BOOT -> INIT`）时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`，防止错误固件被引导运行；
+  - *RRQ 读取*：原生 SOES 的 RRQ 读取直接从静态 `foe_cfg->fbuffer` 获取（`esc_foe.c:121-133`），文件配置结构体中无 `read_function`，未开启 `FOE_READ_SUPPORTED` 宏时直接返回 `0x8000 (NOTDEFINED)`。
+
+### 2. Beckhoff Slave Stack Code (SSC) 接入
+- **状态**：【未核实 / 待开发】。目前适配层仅规划了接口边界，尚未包含面向真实 SSC 协议栈的回调实现。
+
+---
+
+## ⚠️ 硬件验证限制 (Limitations)
+
+目前全部代码、状态机及适配层均在 **macOS 宿主机环境** 下通过 GCC/Clang 编译器结合 RAM 模拟驱动（`mock_driver`）完成仿真测试与 ASan/UBSan 内存安全性检验。
+以下事项受限于当前开发阶段，**尚未在物理硬件上完成实机测试**：
+1. **【待真机验证】MCU 片内 Flash 擦写总线冻结 (Bus Stall)**：片内 Flash 擦除时可能导致 CPU 停止响应中断或协议栈丢包，需实测确认主站超时时间与单步擦除粒度；
+2. **【待真机验证】外部低速 SPI Flash 物理全量回读耗时**：大容量固件（如 2MB~4MB FPGA 镜像）在最后一次回调中同步回读并计算 CRC32 的总耗时是否会突破 TwinCAT 单包超时阈值；
+3. **【待真机验证】真实 ESC 芯片与主站联调**：如 Beckhoff ET1100、AX58100 或 LAN9252 芯片与 TwinCAT/EtherCAT 运动控制器之间的现场升级。
+
+---
+
+## 🛠️ 构建与测试
+
+### 环境依赖
+- C99 兼容编译器：`clang` 或 `gcc` (推荐 GCC 10+)
+- Python 3.8+ (用于固件打包与测试向量生成)
+- `make`
+
+### 运行单元测试
+```bash
+# 默认使用 clang 构建并运行全量测试
+make clean && make test
+
+# 使用 GNU GCC 构建并运行全量测试
+make clean && make test CC=gcc-16
+
+# 启用 AddressSanitizer 与 UndefinedBehaviorSanitizer 内存安全检查
+make test-asan CC=clang
+```
+
+---
+
+## 📂 源码目录结构
 
 ```text
-ecat/
+.
 ├── include/
-│   ├── ecat_foe.h               # 核心库主头文件与 API 声明
-│   ├── ecat_foe_def.h           # 标准 FoE 错误码、目标 ID 与 .efw 头部结构
-│   ├── ecat_foe_target.h        # 目标存储驱动抽象操作接口
-│   └── ecat_foe_conf_template.h # 全局工程与分区配置头模板
+│   ├── ecat_foe_conf_template.h # 静态工程配置模板
+│   ├── ecat_foe_core.h          # 核心状态机与 API 接口定义
+│   ├── ecat_foe_efw.h           # .efw 容器格式解析接口
+│   ├── ecat_foe_soes.h          # SOES 协议栈适配层接口
+│   └── ecat_foe_target.h        # 目标存储介质抽象驱动接口
 ├── src/
-│   └── ecat_foe_core.c          # 纯 C99 核心状态机、头部解析与流式校验
-├── adapters/
-│   ├── ecat_foe_ssc.h / .c      # Beckhoff Slave Stack Code (SSC) 薄适配层
-│   └── ecat_foe_soes.h / .c     # Simple Open EtherCAT Slave (SOES) 薄适配层
+│   ├── adapters/
+│   │   └── ecat_foe_soes.c      # SOES 适配层实现
+│   ├── ecat_foe_core.c          # 核心升级状态机实现 (纯 C99, 零 malloc)
+│   └── ecat_foe_efw.c           # .efw 容器头反序列化与 CRC32 实现
 ├── tools/
-│   └── efw_pack.py              # .efw 标准固件容器打包脚本 (Python)
+│   └── efw_pack.py              # .efw 固件容器打包与对齐填充工具
 ├── tests/
-│   └── test_ecat_foe.c          # 全覆盖单元测试与模拟用例
-├── Makefile                     # 编译构建与测试驱动
-└── README.md
+│   ├── mock_driver.c / .h       # 具备扇区擦除语义与故障注入的 RAM 驱动
+│   ├── test_core.c              # 核心状态机全量功能测试套件
+│   ├── test_efw.c               # .efw 容器解析单元测试套件
+│   └── generate_vectors.py      # 二进制测试固件生成器
+├── docs/
+│   ├── architecture/SAD-v0.1.md # 系统架构设计说明书
+│   ├── spec/efw-format-v0.1.md  # 固件容器格式规范
+│   └── open-issues.md           # 待决事项与跟踪记录
+├── Makefile                     # 自动化构建与测试脚本
+└── README.md                    # 本文件
 ```
-
----
-
-## 📦 `.efw` 固件容器格式规范
-
-升级文件统一部署为 `.efw` 格式，由 **84 字节固定头部** 与 **原始固件 Payload** 组成：
-
-| 偏移 (Byte) | 字段 | 类型 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `0x00 ~ 0x03` | `magic` | `uint32_t` | 固定为 `0x31574645` ("EFW1") |
-| `0x04 ~ 0x05` | `header_version` | `uint16_t` | 头部版本，当前为 `1` |
-| `0x06 ~ 0x07` | `header_size` | `uint16_t` | 头部尺寸 = `84` |
-| `0x08 ~ 0x0B` | `project_id` | `uint32_t` | 唯一数字工程 ID (如 `0x10010001`) |
-| `0x0C ~ 0x0F` | `hardware_id` | `uint32_t` | 目标硬件版本 ID (如 `0x00000001`) |
-| `0x10 ~ 0x11` | `target_id` | `uint16_t` | 1: APP, 2: FPGA, 3: EEPROM |
-| `0x12 ~ 0x13` | `flags` | `uint16_t` | 扩展标志位 (保留置 0) |
-| `0x14 ~ 0x17` | `version_raw` | `uint32_t` | 32 位原始版本号 |
-| `0x18 ~ 0x37` | `project_name` | `char[32]` | 工程名称字符串 (如 `"SERVO_DRV"`) |
-| `0x38 ~ 0x47` | `version_str` | `char[16]` | 版本号字符串 (如 `"1.0.0"`) |
-| `0x48 ~ 0x4B` | `raw_payload_size`| `uint32_t` | 原始固件二进制字节数 |
-| `0x4C ~ 0x4F` | `raw_payload_crc` | `uint32_t` | 原始固件 IEEE 802.3 CRC32 校验和 |
-| `0x50 ~ 0x53` | `header_crc` | `uint32_t` | 头部自身的 CRC32 (计算时此字段填 0) |
-
-### 双重识别规则
-1. **文件名规则**：必须形如 `<PROJECT>_<TARGET>_<VERSION>.efw`（例如 `SERVO_DRV_APP_1.0.0.efw`）。
-2. **内容校验**：文件首包解析后，核心库核对文件头中的 `project_id`、`hardware_id`、`target_id` 及工程名称，必须与从站本地配置和下发的文件名完全吻合，否则在写入前立即以 FoE 错误码终止流程。
-
----
-
-## 🛠️ 移植与快速上手
-
-### 1. 复制与定制配置文件
-复制 `include/ecat_foe_conf_template.h` 为 `ecat_foe_conf.h`，按需配置：
-```c
-#define ECAT_FOE_CONF_PROJECT_ID      0x10010001U
-#define ECAT_FOE_CONF_PROJECT_NAME    "SERVO_DRV"
-#define ECAT_FOE_CONF_HARDWARE_ID     0x00000001U
-
-#define ECAT_FOE_ENABLE_TARGET_APP    1
-#define ECAT_FOE_APP_BASE_ADDR        0x08020000U
-#define ECAT_FOE_APP_MAX_SIZE         (384U * 1024U)
-```
-
-### 2. 注册硬件目标驱动
-以内部 Flash 的 MCU APP 升级为例：
-```c
-static const ecat_foe_target_ops_t s_app_ops = {
-    .target_id = ECAT_FOE_TARGET_APP,
-    .name      = "APP",
-    .init      = bsp_flash_unlock,
-    .erase     = bsp_flash_erase,
-    .write     = bsp_flash_write,
-    .verify    = bsp_flash_verify_crc,
-    .finalize  = bsp_flash_mark_boot_valid,
-    .abort     = bsp_flash_lock,
-};
-
-ecat_foe_register_target(&s_app_ops, NULL);
-```
-
-### 3. 转接协议栈
-- **Beckhoff SSC**：直接在 `foeappl.c` 中将 `BL_FoeWrite`、`BL_FoeData` 转接到 `ecat_foe_ssc_write()`、`ecat_foe_ssc_data()`。
-- **SOES**：将 `foe_file_cfg_t` 结构体的 `write` 与 `write_data` 绑定至 `ecat_foe_soes_write()` 与 `ecat_foe_soes_write_data()`。
-
----
-
-## 🚀 固件打包工具使用
-
-使用提供的 Python 工具将编译生成的 `.bin` 打包为 `.efw` 文件：
-```bash
-python3 tools/efw_pack.py \
-  --bin build/app.bin \
-  --project-id 0x10010001 \
-  --project-name SERVO_DRV \
-  --hw-id 0x00000001 \
-  --target APP \
-  --version 1.0.0 \
-  -o SERVO_DRV_APP_1.0.0.efw
-```
-
----
-
-## 🧪 测试与验证
-
-项目内置纯 C 单元测试，测试套件涵盖常规升级、文件名篡改、工程 ID 不匹配、目标未使能拦截、分区超额防御、数据包 CRC 篡改及协议栈适配层测试：
-
-```bash
-make test
-```
-
----
-
-## 📄 开源许可证
-
-本项目基于 [MIT License](LICENSE) 开源发布。
