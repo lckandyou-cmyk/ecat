@@ -59,12 +59,15 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
 # ASan 内存与未定义行为核验目标
-# 历史构建与环境条件观察说明:
-# 早期测试在特定组合下（如 Apple Clang 配合 -O1/-O2 将多个包含 1MB 模拟缓冲区的测试函数内联至 main()，
-# 叠加 AddressSanitizer 栈红色区 redzones，且处于 macOS 默认 ~8MB 栈空间限制时）观察到过 stack-overflow (退出码 134)。
-# 实测核实：在 -O0 (无跨函数内联膨胀)、未开启 ASan 栈插桩、或调大栈上限 (如 ulimit -s 65520) 环境下该现象均未出现。
-# 本库核心代码本身为零动态分配且各函数栈帧极小 (最大 240 字节)。测试套件统一将 1MB 模拟硬件缓冲区置入静态存储区 (BSS)，
-# 以保证无论编译器优化决策与操作系统栈限制如何变化，测试运行期栈帧均处于安全区间。
+# 历史构建与环境条件复核说明 (基于 commit 9c78bc2 复核事实):
+# 1. 在 macOS 环境下通过 GNU Make 执行 `make test-asan` 时，Make 会为子进程设置较大栈上限 (通常为 65520KB / 64MB)，
+#    构建与测试整体退出码为 0。
+# 2. 但由该命令生成的同一 ASan 二进制文件 (tests/test_runner_core)，若脱离 make 在独立 shell 环境下执行，
+#    在系统默认栈空间 (ulimit -s 8192) 或受限栈空间 (ulimit -s 1024) 下，均会因 Apple Clang -O2 将多个包含
+#    1MB 模拟缓冲区的测试函数内联至 main()，叠加 AddressSanitizer 栈红色区 (redzones) 导致栈帧溢出并报 stack-overflow (退出码 134)。
+# 3. 栈帧尺寸限定：核心库代码 (src/ecat_foe_core.c) 为零动态分配，内部函数最大栈帧约 240 字节系在当前所测宿主环境
+#    (macOS arm64 / Apple Clang) 下的静态测量值，而非全平台通用常量。
+# 4. 测试套件正常运行依赖测试宿主环境提供合理的栈空间配额 (如 Make 默认赋予的栈上限)。
 test-asan:
 	$(MAKE) clean
 	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
