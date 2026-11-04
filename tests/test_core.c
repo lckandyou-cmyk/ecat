@@ -2592,8 +2592,8 @@ static void test_cross_target_finalize_prevents_duplicate_abort(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调用 deinit 绝不触发驱动 abort");
 }
 
-/* 专项测试: 公开状态查询函数在 NULL 与未配置前提下的防御性行为 */
-static void test_query_functions_uninitialized_and_null_preconditions(void)
+/* 专项测试: 公开状态查询函数在 NULL 与零初始化未配置前提下的防御性行为 */
+static void test_query_functions_null_and_unconfigured_flag_preconditions(void)
 {
     /* 1. NULL 指针安全入参检测 */
     TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(NULL), "core == NULL 时 upgrade_incomplete 返回 false");
@@ -2601,14 +2601,14 @@ static void test_query_functions_uninitialized_and_null_preconditions(void)
     TEST_ASSERT_EQ_INT(ecat_foe_core_get_last_error(NULL), ECAT_FOE_CORE_ERR_INVALID_ARG, "core == NULL 时 get_last_error 返回 INVALID_ARG");
     TEST_ASSERT(ecat_foe_core_get_project_name(NULL) == NULL, "core == NULL 时 get_project_name 返回 NULL");
 
-    /* 2. 脏内存 / 未通过 init 初始化的 core 结构体 */
-    ecat_foe_core_t uninit_core;
-    memset(&uninit_core, 0xA5, sizeof(uninit_core));
-    uninit_core.is_configured = false;
-
-    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&uninit_core), "未配置 core 结构体 upgrade_incomplete 返回 false");
-    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&uninit_core, 1), "未配置 core 结构体 target_incomplete 返回 false");
-    TEST_ASSERT(ecat_foe_core_get_project_name(&uninit_core) == NULL, "未配置 core 结构体 get_project_name 返回 NULL");
+    /* 2. 对象预先零初始化且未完成 init 配置 (is_configured == false) 的防御性降级 */
+    ecat_foe_core_t zero_unconf_core;
+    memset(&zero_unconf_core, 0, sizeof(zero_unconf_core));
+    /* 说明：仅验证 core 为 NULL 或对象预先零初始化且配置标记为 false 时的防御性降级，
+       测试不声称亦不测试读取未经清零初始化的任意脏内存 */
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&zero_unconf_core), "未配置 core 对象 upgrade_incomplete 返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&zero_unconf_core, 1), "未配置 core 对象 target_incomplete 返回 false");
+    TEST_ASSERT(ecat_foe_core_get_project_name(&zero_unconf_core) == NULL, "未配置 core 对象 get_project_name 返回 NULL");
 
     /* 3. 正常配置初始化后，非法 target_id 边界检测 */
     static mock_driver_t mcu;
@@ -2687,7 +2687,7 @@ int main(void)
     RUN_TEST(test_cross_target_different_targets_success_interleaving);
     RUN_TEST(test_cross_target_init_fail_vs_invalidate_fail);
     RUN_TEST(test_cross_target_finalize_prevents_duplicate_abort);
-    RUN_TEST(test_query_functions_uninitialized_and_null_preconditions);
+    RUN_TEST(test_query_functions_null_and_unconfigured_flag_preconditions);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);
