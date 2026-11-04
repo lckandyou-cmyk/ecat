@@ -279,8 +279,9 @@ def scan_unregistered_prose_lines(
     p2 = re.compile(r"[`]?([a-zA-Z0-9_\-\./]+\.(?:c|h|txt|pdf))[`]?\s*第\s*(\d+(?:-\d+)?)\s*行")
 
     errors: List[str] = []
-    status_counts: Dict[str, int] = {}
+    exemption_status_counts: Dict[str, int] = {}
     matched_exemptions: Set[int] = set()
+    local_quote_adjacent_count = 0
 
     # 建立豁免索引: (doc_path_norm, doc_line) -> list of (idx, ex)
     ex_index: Dict[Tuple[str, int], List[Tuple[int, Dict[str, Any]]]] = {}
@@ -310,12 +311,12 @@ def scan_unregistered_prose_lines(
                             found_refs.append((m[0], m[1]))
 
                         for raw_path, lref in found_refs:
-                            # 1. 检查是否为同文档相邻 (<=3 行) 且路径严格一致的 Quote 块覆盖
+                            # 1. 检查是否为同文档相邻 (<=3 行) 且路径一致的 Quote 块覆盖
                             if is_line_covered_by_local_quote(doc_rel, lno, raw_path, lref, quotes_map, doc_tags_map):
-                                status_counts["LOCAL_QUOTE_ADJACENT"] = status_counts.get("LOCAL_QUOTE_ADJACENT", 0) + 1
+                                local_quote_adjacent_count += 1
                                 continue
 
-                            # 2. 检查已登记豁免清单匹配 (路径必须严格一致，杜绝裸文件名与子目录二义性模糊放行)
+                            # 2. 检查已登记豁免清单匹配 (路径必须一致，避免裸文件名与子目录二义性模糊放行)
                             key = (os.path.normpath(doc_rel), lno)
                             matched = False
                             norm_doc_src = os.path.normpath(raw_path)
@@ -336,7 +337,7 @@ def scan_unregistered_prose_lines(
                                             matched = True
                                             matched_exemptions.add(ex_idx)
                                             st = ex.get("verification_status", "UNKNOWN")
-                                            status_counts[st] = status_counts.get(st, 0) + 1
+                                            exemption_status_counts[st] = exemption_status_counts.get(st, 0) + 1
                                         break
 
                             if not matched:
@@ -356,7 +357,25 @@ def scan_unregistered_prose_lines(
                 f"豁免项 #{idx} 未在实际文档中命中或文本哈希不符: {ex.get('doc_path')}:{ex.get('doc_line')} -> {ex.get('source_file')}:{ex.get('line_reference')}"
             )
 
-    return (len(errors) == 0), errors, status_counts
+    authoritative_count = len([
+        ex for ex in exemptions
+        if not os.path.normpath(ex.get("doc_path", "")).replace("\\", "/").startswith("docs/archive")
+    ])
+    archive_count = len([
+        ex for ex in exemptions
+        if os.path.normpath(ex.get("doc_path", "")).replace("\\", "/").startswith("docs/archive")
+    ])
+
+    stats: Dict[str, Any] = {
+        "local_quote_adjacent": local_quote_adjacent_count,
+        "matched_exemptions_count": len(matched_exemptions),
+        "total_exemptions_count": len(exemptions),
+        "authoritative_exemptions_count": authoritative_count,
+        "archive_exemptions_count": archive_count,
+        "exemption_status_counts": exemption_status_counts,
+    }
+
+    return (len(errors) == 0), errors, stats
 
 def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("============================================================")
@@ -527,7 +546,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
 
     # 8. 全库 Markdown 未登记正文行号与文本哈希严格核验
     print(f"[5/5] 扫描全库 Markdown 正文行号引用 (严密比对 doc_line 与文本 SHA-256)...")
-    prose_ok, prose_errs, status_counts = scan_unregistered_prose_lines(
+    prose_ok, prose_errs, stats = scan_unregistered_prose_lines(
         repo_root, manifest_map, doc_tags_map, prose_exemptions
     )
     if not prose_ok:
@@ -539,9 +558,14 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("------------------------------------------------------------")
     print(f" 核验统计与覆盖范围客观汇报:")
     print(f" - 登记 Quote 自动化三方核验: {checked_count} 项 (逐字比对吻合)")
-    print(f" - 正文行号登记豁免总数:     {len(prose_exemptions)} 项 (权威规范文档已清零，仅限归档历史记录)")
-    for st, cnt in sorted(status_counts.items()):
-        print(f"   * {st:38s}: {cnt} 处引用")
+    print(f" - 正文与 Quote 标记相邻挂接引用: {stats['local_quote_adjacent']} 处 (已直接绑定对应 Quote)")
+    print(f" - 正文行号显式清单豁免项总数:   {stats['total_exemptions_count']} 项 (实测命中: {stats['matched_exemptions_count']} 项)")
+    print(f"   * 权威规范文档豁免项:         {stats['authoritative_exemptions_count']} 项{' (权威文档未予任何行号豁免)' if stats['authoritative_exemptions_count'] == 0 else ''}")
+    print(f"   * 归档历史文档豁免项:         {stats['archive_exemptions_count']} 项 (仅限 docs/archive/ 历史记录)")
+    if stats['exemption_status_counts']:
+        print(f"   * 豁免分类统计明细 (共 {sum(stats['exemption_status_counts'].values())} 处引用):")
+        for st, cnt in sorted(stats['exemption_status_counts'].items()):
+            print(f"     - {st:36s}: {cnt} 处引用")
     print(" - 正则覆盖局限说明: 本工具基于正则表达式匹配显式文件行号引用，无法识别无行号自然语言引述或非常规引用语法")
     print(" - 外部未核验说明: Beckhoff ET9300 官方受限无法获取；ETG 规范为外部标准，均已严格标注未核验")
     print(">>> 三方引文自动化核验通过 (承诺范围仅限上述已登记条目) <<<")
