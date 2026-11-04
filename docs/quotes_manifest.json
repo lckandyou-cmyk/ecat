@@ -142,7 +142,7 @@
   ],
   "prose_line_exemptions": [
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 13,
       "source_file": "esc.c",
       "line_reference": "1155",
@@ -151,7 +151,7 @@
       "reason": "历史调研归档文档前期对比引用: esc.c:1155"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 32,
       "source_file": "esc.c",
       "line_reference": "1155",
@@ -160,7 +160,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc.c:1155"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 34,
       "source_file": "esc.c",
       "line_reference": "1160",
@@ -169,7 +169,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc.c:1160"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 36,
       "source_file": "esc.c",
       "line_reference": "1197",
@@ -178,7 +178,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc.c:1197"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 38,
       "source_file": "esc.c",
       "line_reference": "1202",
@@ -187,7 +187,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc.c:1202"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 40,
       "source_file": "esc.c",
       "line_reference": "388",
@@ -196,7 +196,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc.c:388"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 42,
       "source_file": "esc_foe.h",
       "line_reference": "48",
@@ -205,7 +205,7 @@
       "reason": "历史调研归档文档前期对比引用: soes/esc_foe.h:48"
     },
     {
-      "doc_path": "docs/research/boot-switch-report.md",
+      "doc_path": "docs/archive/boot-switch-report.md",
       "doc_line": 44,
       "source_file": "esc_foe.c",
       "line_reference": "83",
