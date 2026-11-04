@@ -563,6 +563,11 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             }
         }
 
+        /* 驱动 init 成功后，生命周期会话正式激活；此后发生任何失败均须调 abort 释放资源 */
+        core->session_active = true;
+        core->driver_abort_called = false;
+        core->driver_finalized = false;
+
         if (core->active_drv->invalidate != NULL) {
             if (core->active_drv->invalidate(core->active_user_ctx) != 0) {
                 core_abort_driver(core);
@@ -571,11 +576,6 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
                 return -1;
             }
         }
-
-        /* 驱动会话激活 */
-        core->session_active = true;
-        core->driver_abort_called = false;
-        core->driver_finalized = false;
 
         /* 头部装配闭环并初始化流式写入状态 */
         core->header_complete = true;

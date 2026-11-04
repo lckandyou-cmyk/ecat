@@ -1055,6 +1055,55 @@ static void test_same_block_header_over_receive_protects_valid_flag(void)
     TEST_ASSERT_EQ_INT(mcu.count_write, 0, "绝对不得向物理存储写入任何数据");
 }
 
+/* 测项 25: 驱动生命周期契约 (init 失败不调 abort；init 成功后 invalidate 失败必调 abort；新 WRQ 重试不重复 abort) */
+static void test_driver_lifecycle_init_invalidate_abort_retry(void)
+{
+    mock_driver_t mcu;
+    ecat_foe_core_t core;
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    /* 1. init 失败：驱动自身未就绪，核心机不应调用 abort */
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    mcu.inject_fail_init = true;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    int ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
+    TEST_ASSERT(ret != 0, "init 失败必须拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_INIT, "报 DRV_INIT 错误");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "init 被调用 1 次");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "init 失败不得调用 invalidate");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "init 自身失败核心机不调 abort");
+
+    /* 2. init 成功但 invalidate 失败：生命周期已激活，必须调用 abort 释放资源 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    mcu.inject_fail_invalidate = true;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
+    TEST_ASSERT(ret != 0, "invalidate 失败必须拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_INVALIDATE, "报 DRV_INVALIDATE 错误");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "init 成功调用 1 次");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "invalidate 被调用 1 次");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "invalidate 失败后必须调用 abort 释放资源");
+
+    /* 3. 失败后主站发起新 WRQ 重试：自愈机制不得重复调用 abort */
+    ret = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret, 0, "新 WRQ 请求被正常接收");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "新 WRQ 自愈不应重复调用 abort (保持 1 次)");
+
+    /* 4. 随后解除故障重试升级：完整流程必须成功完成且不再调用 abort */
+    mcu.inject_fail_invalidate = false;
+    ret = feed_stream_chunks(&core, efw, efw_len, 64, false);
+    TEST_ASSERT_EQ_INT(ret, 0, "重试数据块传输成功");
+    ret = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "重试固件提交成功");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "重试 finalize 成功调用 1 次");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "整个重试成功流程未再调用 abort");
+    TEST_ASSERT(mcu.valid_flag, "固件恢复有效标记");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -1094,6 +1143,7 @@ int main(void)
     RUN_TEST(test_no_abort_after_finalize_success);
     RUN_TEST(test_anti_rollback_only_reads_current_target);
     RUN_TEST(test_same_block_header_over_receive_protects_valid_flag);
+    RUN_TEST(test_driver_lifecycle_init_invalidate_abort_retry);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);
