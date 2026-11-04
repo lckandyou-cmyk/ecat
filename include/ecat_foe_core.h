@@ -159,6 +159,7 @@ typedef struct {
     ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
 
     /* 会话生命周期与驱动调用保护标记 */
+    bool                upgrade_incomplete;    /**< 固件升级未闭环标志 (driver init 成功置 1，finalize 成功清 0) */
     bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
@@ -239,6 +240,15 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
  * @return 0 成功
  */
 int ecat_foe_core_deinit(ecat_foe_core_t *core);
+
+/**
+ * @brief 查询当前核心是否存在未闭环的固件升级 (驱动已 init 但未成功 finalize)
+ *
+ * @param core 核心机指针
+ * @return true 驱动已初始化且未成功 finalize (固件残缺/处于升级中)
+ * @return false 未初始化或已成功完成升级
+ */
+bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
 
 /**
  * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)

@@ -190,22 +190,24 @@ def extract_printed_page_from_footer(page_text: str) -> Optional[int]:
 
 def check_authoritative_docs_for_unregistered_citations(repo_root: str) -> Tuple[bool, List[str]]:
     """
-    A3: 扫描权威文档 (README, SAD, efw-format, open-issues)，
+    A3 / P1c: 扫描权威文档 (README, SAD, efw-format, open-issues, soes-integration-options)，
     禁止手写 LAN9252 页码章节，指向时只允许 [pdf:ID]。
     违规模式: 12.14.x, 6.2.1.x, 第 N 页, page N, Table 6-x.
+    特别规则：soes-integration-options.md 仅在 <!-- pdf-table-begin --> 与 <!-- pdf-table-end --> 标记之外扫描。
     """
     authoritative_docs = [
         "README.md",
         "docs/architecture/SAD-v0.1.md",
         "docs/spec/efw-format-v0.1.md",
         "docs/open-issues.md",
+        "docs/architecture/soes-integration-options.md",
     ]
     prohibited_pat = re.compile(
         r"(?:"
         r"(?<![\d.])12\.14(?:\.\d+)?(?![\d.])"
         r"|(?<![\d.])6\.2\.1(?:\.\d+)?(?![\d.])"
         r"|第\s*\d+\s*页"
-        r"|\bpage\s+\d+\b"
+        r"|\b[Pp]age\s+\d+\b"
         r"|Table\s+6-\d+"
         r")",
         re.IGNORECASE
@@ -216,7 +218,17 @@ def check_authoritative_docs_for_unregistered_citations(repo_root: str) -> Tuple
         if not os.path.isfile(doc_full):
             continue
         with open(doc_full, "r", encoding="utf-8", errors="replace") as f:
+            in_table_marker = False
             for lno, line in enumerate(f, 1):
+                if doc_rel == "docs/architecture/soes-integration-options.md":
+                    if "<!-- pdf-table-begin -->" in line:
+                        in_table_marker = True
+                        continue
+                    if "<!-- pdf-table-end -->" in line:
+                        in_table_marker = False
+                        continue
+                    if in_table_marker:
+                        continue
                 clean_line = re.sub(r"\[pdf:[^\]]+\]", "", line)
                 m = prohibited_pat.search(clean_line)
                 if m:

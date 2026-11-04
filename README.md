@@ -1,6 +1,8 @@
+> 状态：草案，尚不可用。仅在宿主机单元测试中验证。SOES 适配层未接通真实协议栈（不调用 on_wrq 时首块数据会被拒绝，见 test_reproduce_soes_data_callback_without_wrq_stream_rejection）。未经硬件验证，不可用于生产。文件名协议架构待定。
+
 # ecat (Universal EtherCAT FoE Upgrade Library)
 
-面向嵌入式 EtherCAT 从站的高安全、零 malloc、可移植 **FoE (File over EtherCAT)** 固件升级通用核心库。
+面向嵌入式 EtherCAT 从站的零 malloc、可移植 **FoE (File over EtherCAT)** 固件升级通用核心库。
 
 ---
 
@@ -9,12 +11,12 @@
 - **规范版本**：遵循 `docs/spec/efw-format-v0.1.md` 固件容器格式规范与 `docs/architecture/SAD-v0.1.md` 系统架构设计。
 - **当前阶段**：
   - **阶段 A（固件解析与核验）**：已完成。支持 64 字节 `.efw` 头部的三阶段反序列化、小端安全读写、双向元数据校验及 IEEE 802.3 CRC32 运算。
-  - **阶段 B（核心升级状态机与适配）**：已完成核心机与 SOES 适配桩验证。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
+  - **阶段 B（核心升级状态机与适配）**：核心机在宿主机桩上验证，SOES 适配层未接通真实协议栈。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
   - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（测试断言与夹具统计见 make test 输出）。
 
 ---
 
-## 🛡️ 核心架构与安全保证
+## 🛡️ 设计目标（未经硬件验证）
 
 1. **零动态内存分配 (Zero malloc)**：
    - 全流程纯 C99 实现，严禁调用 `malloc`/`free`，所有缓冲与上下文均由静态或局部内存分配，内存占用确定可控。
@@ -81,6 +83,9 @@ make clean && make test CC=gcc-16
 # 启用 AddressSanitizer 与 UndefinedBehaviorSanitizer 内存安全检查
 make test-asan CC=clang
 ```
+
+### 工具说明
+- `gen_pdf_cite_table.py --update` 会回写 manifest 的 `doc_line` 和 `line_text_hash`，防漂移依赖 `--check` 与 PDF 校验。
 
 ---
 

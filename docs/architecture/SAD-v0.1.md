@@ -360,7 +360,7 @@ sequenceDiagram
      ```
      函数通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h Bit 0）判定是否有待处理状态转换；若该标志位未置位，直接执行 `return;` 退出，根本不会主动读取 `0120h`。
    - **设计要求**：若 APP 先前读取 0120h 导致硬件自动清除了 0220h 事件位，Bootloader 启动的新协议栈轮询时将无法感知待决请求。设计上要求 Bootloader 在协议栈初始化后，需保证挂起的 BOOT 状态转换能够被正常触发处理。
-   - **触发办法候选（只评估不实现，贴原文符号）**：
+   - **触发办法候选（只评估不实现）**：
      1. *候选方案 1（置位事件标志）*：在协议栈初始化完成后，由适配层通过原生符号显式设置 `ESCvar.ALevent |= ESCREG_ALEVENT_CONTROL;`，引导下一次主循环轮询自然进入 `ESC_state()`；
      2. *候选方案 2（直接调用状态处理）*：在外部检测到 `0120h == 0x0003` 且 `0130h != 0x0003` 时，直接显式调用 `ESC_state()`；
      3. *候选方案 3（主动写入确认）*：由适配层调用 `ESC_ALstatus(ESCboot);` 主动完成状态确认。
@@ -569,27 +569,27 @@ typedef struct ecat_foe_target_driver {
 #### 2. MCU 通过 PDI 访问 SII EEPROM 的机制【未核实（未纳入自动化核验清单）】
 * **0500h 寄存器**：
   - 出处：LAN9252 手册 EEPROM CONFIGURATION REGISTER（偏移 `0500h`，【未核实】）；
-  - Bit 0 原文：`PDI EEPROM Control`；原文说明：`1: Yes (PDI has EEPROM control)`。
+  - Bit 0：`PDI EEPROM Control`；说明：`1: Yes (PDI has EEPROM control)`。
 * **0501h 寄存器**：
   - 出处：LAN9252 手册 EEPROM PDI ACCESS STATE REGISTER（偏移 `0501h`，【未核实】）；
-  - Bit 0 原文：`Access to EEPROM`。
+  - Bit 0：`Access to EEPROM`。
 * **PDI 控制 EEPROM 规则**：
   - 出处：LAN9252 手册 EEPROM PDI ACCESS 规则说明（【未核实】）；
-  - 原文：`Otherwise, PDI controls the EEPROM interface.`。
+  - 说明：`Otherwise, PDI controls the EEPROM interface.`。
 * **0502h-0503h 寄存器**：
   - 出处：LAN9252 手册 EEPROM CONTROL/STATUS REGISTER（偏移 `0502h-0503h`，【未核实】）；
-  - Bit 15 原文：`Busy`；原文说明：`1: EEPROM interface is busy`；
-  - Bit 14 原文：`Error Write Enable`；
-  - Bit 13 原文：`Error Acknowledge/Command`；
-  - Bit 12 原文：`EEPROM Loading Status`；
-  - Bit 11 原文：`Checksum Error in ESC Configuration Area`；
-  - Bits 10:8 命令原文：`Command Register`；说明：`010: Write`；`100: Reload`。
+  - Bit 15：`Busy`；说明：`1: EEPROM interface is busy`；
+  - Bit 14：`Error Write Enable`；
+  - Bit 13：`Error Acknowledge/Command`；
+  - Bit 12：`EEPROM Loading Status`；
+  - Bit 11：`Checksum Error in ESC Configuration Area`；
+  - Bits 10:8 命令：`Command Register`；说明：`010: Write`；`100: Reload`。
 * **0504h-0507h 寄存器**：
   - 出处：LAN9252 手册 EEPROM ADDRESS REGISTER（偏移 `0504h-0507h`，【未核实】）；
-  - 寻址单位原文：`Bit 0: First word (16-bit)`。
+  - 寻址单位：`Bit 0: First word (16-bit)`。
 * **0508h-050Bh 寄存器**：
   - 出处：LAN9252 手册 EEPROM DATA REGISTER（偏移 `0508h-050Bh`，【未核实】）；
-  - 数据读写原文：`EEPROM Read/Write Data`。
+  - 数据读写：`EEPROM Read/Write Data`。
 
 #### 3. SII 校验字的位置与算法【未核实】
 * **核实状态**：**【未核实】**。
@@ -599,16 +599,16 @@ typedef struct ecat_foe_target_driver {
 #### 4. 新内容何时生效【未核实（未纳入自动化核验清单）】
 * **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 EEPROM CONTROL/STATUS REGISTER【未核实】），可触发 ESC 重新从 EEPROM 读取数据。
 * **特定功能限制（仅限 Enhanced Link 与 MI Link）**：
-  - 依据 Note 11（LAN9252 手册 EEPROM 链路检测配置注释【未核实】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
-  - 依据 Note 27（LAN9252 手册 EEPROM 寄存器注释【未核实】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
-  - 手册原文仅明确指出上述两项链路检测特性在手动 reload 时不会生效，**不能外推为全部寄存器或通用 Reload 规则**。
+  - 依据 Note 11（LAN9252 手册 EEPROM 链路检测配置注释【未核实】），说明仅在上电复位后首次 EEPROM 加载时生效（该限制仅针对 Enhanced Link detection）；
+  - 依据 Note 27（LAN9252 手册 EEPROM 寄存器注释【未核实】），说明仅在上电复位后首次 EEPROM 加载时生效（该限制仅针对 MI link detection）；
+  - 手册仅明确指出上述两项链路检测特性在手动 reload 时不会生效，**不能外推为全部寄存器或通用 Reload 规则**。
 
 #### 5. 写入 SII 前的防御校验项【已确定】
 为防御误刷导致变砖，在允许写入 SII EEPROM 之前，Bootloader 必须实施以下确定规则：
 1. **Target ID 严格匹配【已确定】**：容器头中的 `target_id` 必须严格等于 `0x0003`；
 2. **Payload 长度严格偶数与容量约束【已确定】**：`payload_length` 必须为偶数（Word 16 位对齐）且 `<= ECAT_FOE_SII_EEPROM_MAX_SIZE`；
 3. **写入后全片/写入区域逐字读回校验 (Read-back Verify)【已确定】**：每写入一个 Word，通过 PDI Read 命令逐字读回比对；写完整体后，调用驱动的 `read` 接口整体回读并计算 CRC32 进行比对；
-4. **Bootstrap 邮箱段与 SII Checksum 校验【暂缓】**：检查镜像中 Bootstrap 邮箱配置段（字偏移 0x14-0x17、0x1C bit3 标为【未核实（ETG.2010 未读到原文）】）及 SII Checksum 算法预校验暂缓实施，待后续查实标准规范后再行补充。
+4. **Bootstrap 邮箱段与 SII Checksum 校验【暂缓】**：检查镜像中 Bootstrap 邮箱配置段（字偏移 0x14-0x17、0x1C bit3 标为【未核实（ETG.2010 待查实）】）及 SII Checksum 算法预校验暂缓实施，待后续查实标准规范后再行补充。
 
 ### 4.4 外部用户数据 EEPROM 专项设计规范【已确定】
 * **纯驱动抽象隔离**：
@@ -640,8 +640,8 @@ typedef struct ecat_foe_target_driver {
     - `0x0004` -> `EEPROM`（原 PARAM）
 11. **【已确定，已核实】SOES 适配层传输结束判定机制**：
     SOES 适配层以回调数据长度 `length < foe_cfg->buffer_size` 作为传输结束（EOF）的唯一定界标准：
-    - 依据 1（正常传输块）：`esc_foe.c` 缓冲填满才调用写入钩子，原文为 `if(FOEvar.fbufposition >= foe_cfg->buffer_size)`，`failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，传入长度恒等于 `buffer_size`；
-    - 依据 2（最终结束块）：`esc_foe.c` 在 `FOE_fclose()` 关闭时调用写入钩子，原文为 `failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，此时传入长度为缓冲区余量，严格满足 `length < foe_cfg->buffer_size`（若恰好对齐则余量为 0）；
+    - 依据 1（正常传输块）：SOES `esc_foe.c` 内部在缓冲填满时调用写入函数，传入缓冲区与 `buffer_size` 长度；
+    - 依据 2（最终结束块）：SOES `esc_foe.c` 在 `FOE_fclose()` 关闭时调用写入函数，传入缓冲区与尾部余量，长度小于 `buffer_size`（恰好对齐时余量为 0）；
     - 依据 3（失败处理）：回调函数返回非零表示失败（均将返回值赋予 `failed`，非零即中止传输）。
 12. **【已确定，已核实】SOES 错误码处理策略**：
     选定候选 A：接受原生 SOES 数据阶段只回 `FOE_ERR_PROGERROR` (`0x800B`) 的行为，不要求用户给 SOES 打补丁。核心内部保留细分错误枚举供本地诊断，适配层在数据阶段统一返回非零由 SOES 下发 `0x800B`。

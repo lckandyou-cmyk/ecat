@@ -650,6 +650,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         }
 
         /* 驱动 init 成功后，生命周期会话正式激活；此后发生任何失败均须调 abort 释放资源 */
+        core->upgrade_incomplete = true;
         core->session_active = true;
         core->driver_abort_called = false;
         core->driver_finalized = false;
@@ -811,6 +812,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     }
 
     /* 成功提交后永久锁定，绝不可再调用 abort */
+    core->upgrade_incomplete = false;
     core->driver_finalized = true;
     core->driver_invalidated = false;
     core->session_active = false;
@@ -844,6 +846,14 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core)
     core_abort_driver(core);
     core_reset_session(core);
     core->state = ECAT_FOE_STATE_IDLE;
+}
+
+bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core)
+{
+    if (core == NULL || !core->is_configured) {
+        return false;
+    }
+    return core->upgrade_incomplete;
 }
 
 ecat_foe_core_err_t ecat_foe_core_get_last_error(const ecat_foe_core_t *core)

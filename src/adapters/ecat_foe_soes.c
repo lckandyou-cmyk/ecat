@@ -84,10 +84,12 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * - *as 匹配 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)
      * - *an 改写为 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)
      *
-     * 判定只依赖核心状态：
-     * 只要核心未成功执行 finalize (core->driver_finalized == false)，
-     * 且处于 driver_invalidated、session_active 或 state == ECAT_FOE_STATE_ERROR，
+     * 判定只依赖核心公开查询函数：
+     * ecat_foe_core_upgrade_incomplete(adapter->core)
+     * 若固件升级未闭环 (底层驱动已 init 但未成功 finalize，例如中途断开、校验失败或残留无效固件)，
      * 固件即处于残缺/不可用状态，必须强行拦截 BOOT->INIT 迁移。
+     *
+     * 适配层绝不直接读取 core 内部结构字段，维持核心机抽象封装。
      *
      * 时序与物理限制明确说明：
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
@@ -98,12 +100,7 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      */
     bool should_block_init = false;
     if (adapter->core != NULL) {
-        if (!adapter->core->driver_finalized) {
-            if (adapter->core->driver_invalidated || adapter->core->session_active ||
-                adapter->core->state == ECAT_FOE_STATE_ERROR) {
-                should_block_init = true;
-            }
-        }
+        should_block_init = ecat_foe_core_upgrade_incomplete(adapter->core);
     }
 
     if (*as == ECAT_TRANSITION_BOOT_TO_INIT && should_block_init) {

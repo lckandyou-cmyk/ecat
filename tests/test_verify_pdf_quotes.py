@@ -6,7 +6,7 @@ PDF 引文核验工具的独立全场景测试夹具套件。
 【设计原则】：
 1. 完全采用合成文本 (Synthetic Text)，严禁复制任何厂商专有原文；
 2. 独立生成标准轻量多页合成 PDF，常规测试不依赖任何外部 PDF 文件或目录；
-3. 针对全场景正例与反例进行严格自动化断言 (共 29 项)：
+3. 针对全场景正例与反例进行严格自动化断言 (共 31 项)：
    - Case 1: 正例全要素吻合通过 (Exit 0)
    - Case 2: 绑定文档文件不存在拦截 (Exit 1)
    - Case 3: 文档行超出范围 / 行被删除拦截 (Exit 1)
@@ -36,6 +36,8 @@ PDF 引文核验工具的独立全场景测试夹具套件。
    - Case 27: A4 强化反例：页脚缺失导致 printed_page 校验拦截 (Exit 1)
    - Case 28: A4 强化反例：页脚页码不符拦截 (Exit 1)
    - Case 29: A3 权威文档手写模式扫描拦截 (Exit 1)
+   - Case 30: P1c 夹具：soes-integration-options.md 标记外 Page 261 拦截 (Exit 1)
+   - Case 31: P1c 夹具：soes-integration-options.md 标记外 12.14.49 拦截 (Exit 1)
 """
 
 import os
@@ -197,7 +199,7 @@ def assert_case(name, exp_code, exp_msg_fragment, manifest_path, override_pdf=No
 
 def test_pdf_fixture_suite():
     print("============================================================")
-    print(" 运行 PDF 校验工具独立夹具测试套件 (合成无外部依赖 29 项覆盖)")
+    print(" 运行 PDF 校验工具独立夹具测试套件 (合成无外部依赖 31 项覆盖)")
     print("============================================================")
 
     total = 0
@@ -553,6 +555,28 @@ def test_pdf_fixture_suite():
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write("# README\nHandwritten violation: see Section 12.14.20 on page 239\n")
         if assert_case("Case 29: A3 权威文档手写模式扫描拦截", 1, "发现禁止的手写引用模式", m, repo_root=root):
+            passed += 1
+
+    # Case 30: P1c 夹具：soes-integration-options.md 标记之外出现 "Page 261" 拦截
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        soes_doc = os.path.join(root, "docs/architecture/soes-integration-options.md")
+        os.makedirs(os.path.dirname(soes_doc), exist_ok=True)
+        with open(soes_doc, "w", encoding="utf-8") as f:
+            f.write("# SOES Options\nViolation text outside table: refer to Page 261 for details\n<!-- pdf-table-begin -->\n<!-- pdf-table-end -->\n")
+        if assert_case("Case 30: P1c soes-integration-options.md 标记外 Page 261 拦截", 1, "发现禁止的手写引用模式", m, repo_root=root):
+            passed += 1
+
+    # Case 31: P1c 夹具：soes-integration-options.md 标记之外出现 "12.14.49" 拦截
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        soes_doc = os.path.join(root, "docs/architecture/soes-integration-options.md")
+        os.makedirs(os.path.dirname(soes_doc), exist_ok=True)
+        with open(soes_doc, "w", encoding="utf-8") as f:
+            f.write("# SOES Options\nViolation text outside table: Section 12.14.49 register\n<!-- pdf-table-begin -->\n<!-- pdf-table-end -->\n")
+        if assert_case("Case 31: P1c soes-integration-options.md 标记外 12.14.49 拦截", 1, "发现禁止的手写引用模式", m, repo_root=root):
             passed += 1
 
     print("------------------------------------------------------------")

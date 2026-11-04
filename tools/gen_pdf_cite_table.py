@@ -11,7 +11,8 @@ docs/architecture/soes-integration-options.md 中的
   python3 tools/gen_pdf_cite_table.py --check
     以非侵入方式比对文档现有表格是否与清单生成结果完全一致 (吻合返回 0，不吻合返回 1)
   python3 tools/gen_pdf_cite_table.py --update
-    生成最新表格并回写至文档，同时刷新清单中的 doc_line 与 line_text_hash
+    生成最新表格并回写至文档，同时刷新清单中的 doc_line 与 line_text_hash。
+    注意：--update 会回写 manifest 的 doc_line 和 line_text_hash，防漂移依赖 --check 与 PDF 校验。
 """
 
 import os
@@ -25,8 +26,8 @@ BEGIN_MARKER = "<!-- pdf-table-begin -->"
 END_MARKER = "<!-- pdf-table-end -->"
 
 TABLE_HEADER = [
-    "| 官方章节 (Section) | PDF 物理页 | 底部印刷页 | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) | 自动化核验状态与依据 |",
-    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+    "| 官方章节 (Section) / 寄存器名称 | PDF 物理页 | 底部印刷页 | 英文逐字原文 (English Verbatim Text) | 自动化核验状态与依据 |",
+    "| :--- | :--- | :--- | :--- | :--- |"
 ]
 
 def compute_hash(text: str) -> str:
@@ -45,11 +46,9 @@ def build_table_rows(manifest_data: Dict[str, Any]) -> Tuple[List[str], List[Dic
         pdf_page = t.get("pdf_page_cell", f"Page {q.get('pdf_page', '')}")
         prn_page = t.get("printed_page_cell", f"Page {q.get('printed_page', '')}")
         snippet_cell = t.get("verbatim_cell", f"`{q.get('snippet', '')}`")
-        cur_line = t.get("text_line_cell", "")
-        hist_line = t.get("hist_line_cell", "")
         status_cell = t.get("status_cell", "**【PDF 工具逐页与章节归属核验通过】**")
 
-        row_str = f"| {sec_cell} | {pdf_page} | {prn_page} | {snippet_cell} | {cur_line} | {hist_line} | {status_cell} |"
+        row_str = f"| {sec_cell} | {pdf_page} | {prn_page} | {snippet_cell} | {status_cell} |"
         quote_row_indices.append({
             "id": q.get("id"),
             "row_index": len(rows),
@@ -64,10 +63,8 @@ def build_table_rows(manifest_data: Dict[str, Any]) -> Tuple[List[str], List[Dic
         pdf_page = u.get("pdf_page_cell", "")
         prn_page = u.get("printed_page_cell", "")
         snippet_cell = u.get("verbatim_cell", "")
-        cur_line = u.get("text_line_cell", "")
-        hist_line = u.get("hist_line_cell", "")
-        status_cell = u.get("status_cell", "**【未核实（未纳入自动化核验清单）】**")
-        row_str = f"| {sec_cell} | {pdf_page} | {prn_page} | {snippet_cell} | {cur_line} | {hist_line} | {status_cell} |"
+        status_cell = u.get("status_cell", "未核实")
+        row_str = f"| {sec_cell} | {pdf_page} | {prn_page} | {snippet_cell} | {status_cell} |"
         rows.append(row_str)
 
     return rows, quote_row_indices
@@ -82,7 +79,7 @@ def main():
     parser.add_argument("--manifest", default="docs/pdf_quotes_manifest.json", help="PDF 清单文件路径")
     parser.add_argument("--doc", default="docs/architecture/soes-integration-options.md", help="文档目标路径")
     parser.add_argument("--check", action="store_true", help="比对文档中表格与清单生成内容是否一致")
-    parser.add_argument("--update", action="store_true", help="回写文档并更新清单行号与哈希")
+    parser.add_argument("--update", action="store_true", help="回写文档并更新清单行号与哈希（注意：--update 会回写 manifest 的 doc_line 和 line_text_hash，防漂移依赖 --check 与 PDF 校验）")
     args = parser.parse_args()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

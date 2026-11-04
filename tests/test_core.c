@@ -43,12 +43,14 @@ static bool g_current_test_failed = false;
 
 #define RUN_TEST(fn) do { \
     g_current_test_failed = false; \
+    int _start_assertions = g_core_tests_run; \
     printf("  RUN   %-55s", #fn); \
     fn(); \
+    int _delta = g_core_tests_run - _start_assertions; \
     if (!g_current_test_failed) { \
-        printf(" [PASS]\n"); \
+        printf(" [PASS] (+%d assertions)\n", _delta); \
     } else { \
-        printf(" [FAIL]\n"); \
+        printf(" [FAIL] (+%d assertions)\n", _delta); \
     } \
 } while(0)
 
@@ -810,7 +812,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
 
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
-    efw[63] ^= 0xFF; /* 破坏 CRC */
+    efw[64] ^= 0xFF; /* 头部通过且驱动已 init，破坏 payload 导致校验失败 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
     TEST_ASSERT(ret_cb != 0, "失败回调返回非零");
     TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "失败后核心机状态置为 ERROR");
@@ -1969,6 +1971,266 @@ static void test_reproduce_soes_data_callback_without_wrq_stream_rejection(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/*                     P3 钩子条件专项独立测试 (a ~ g)                         */
+/* -------------------------------------------------------------------------- */
+
+/* P3-a. 文件名被拒（未碰驱动）→ 不拦 */
+static void test_hook_filename_rejected_not_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+
+    int ret_wrq = test_wrq(&core, "INVALID_PROJECT_NAME_XXX.efw");
+    TEST_ASSERT(ret_wrq != 0, "非法文件名 WRQ 返回非 0 拒绝");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "未碰驱动: count_init 恒为 0");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = 0;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, 0, "文件名被拒未碰驱动时 hook 不得拦截 (an 保持 0)");
+}
+
+/* P3-b. 头校验失败（未 init）→ 不拦 */
+static void test_hook_header_invalid_not_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "合法文件名 WRQ 返回 0");
+
+    /* 注入损坏头部 (例如 Magic 错误) */
+    uint8_t bad_hdr[64];
+    memset(bad_hdr, 0xA5, sizeof(bad_hdr));
+    int ret_data = ecat_foe_core_on_data(&core, bad_hdr, sizeof(bad_hdr));
+    TEST_ASSERT_EQ_INT(ret_data, -1, "损坏头数据返回 -1");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "头校验失败未进入 init: count_init 恒为 0");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = 0;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, 0, "头校验失败未 init 时 hook 不得拦截 (an 保持 0)");
+}
+
+/* P3-c. init 成功、invalidate 失败 → 拦 */
+static void test_hook_init_ok_invalidate_failed_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    mcu.inject_fail_invalidate = true;
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "合法 WRQ 返回 0");
+
+    uint8_t payload[16] = {0x01, 0x02};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    int ret_data = ecat_foe_core_on_data(&core, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_data, -1, "invalidate 失败导致 on_data 返回 -1");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功调用");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 被调用且失败");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "init 成功但未 finalize，upgrade_incomplete 为 true");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "init 成功后失败必须拦截 BOOT->INIT (an 变为 0x13)");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发 al_error_fn 注入回调");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_val, ECAT_AL_STATUS_CODE_NO_VALID_FW, "向 al_error_fn 传入 0x0014");
+}
+
+/* P3-d. invalidate 成功后停止来数据（不调 on_abort）→ 拦 */
+static void test_hook_invalidate_ok_stream_stops_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 64);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "合法 WRQ 返回 0");
+
+    uint8_t payload[16] = {0x01, 0x02};
+    uint8_t efw[256];
+    build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    int ret_data = ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT_EQ_INT(ret_data, 0, "发送 64 字节头部成功返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功调用");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 成功调用");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "驱动 finalize 尚未调用");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "断流时 upgrade_incomplete 为 true");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "invalidate 成功后断流必须拦截 BOOT->INIT (an 变为 0x13)");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发 al_error_fn 注入回调");
+}
+
+/* P3-e. finalize 成功后 set_floor 失败 → 不拦 */
+static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+    core.cfg.anti_rollback_enable = true;
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    s_mock_set_floor_fail = true;
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x02000000U, 0x01000000U, payload, 16);
+
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "合法 WRQ 返回 0");
+
+    int ret_data = ecat_foe_core_on_data(&core, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_data, 0, "数据流写入返回 0");
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, -1, "set_floor 失败导致 on_end 返回 -1");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动 finalize 已成功调用");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "finalize 成功后 upgrade_incomplete 必须为 false");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "finalize 成功后 set_floor 失败不拦截 BOOT->INIT (an 保持 INIT)");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "不调用 al_error_fn");
+
+    s_mock_set_floor_fail = false;
+}
+
+/* P3-f. 成功升级 → 不拦 */
+static void test_hook_upgrade_success_not_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    int ret_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq, 0, "合法 WRQ 返回 0");
+
+    int ret_data = ecat_foe_core_on_data(&core, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_data, 0, "固件数据写入返回 0");
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "固件结束闭环返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动 finalize 成功");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_SUCCESS, "核心状态为 SUCCESS");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "upgrade_incomplete 为 false");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "成功升级不拦截 BOOT->INIT (an 保持 INIT)");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "不调用 al_error_fn");
+}
+
+/* P3-g. 先 d，再在同一个 core 实例上走新的成功升级 → 不拦 */
+static void test_hook_stream_stops_then_new_upgrade_success_not_blocked(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 64);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    /* 阶段 1: 走 d 流程 (invalidate 成功后断流) */
+    int ret_wrq1 = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq1, 0, "第 1 次 WRQ 成功");
+
+    uint8_t payload[16] = {0x11, 0x22};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    int ret_data1 = ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT_EQ_INT(ret_data1, 0, "第 1 次发送 64 字节头部成功");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 成功");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "驱动尚未 finalize");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "断流时 upgrade_incomplete 为 true");
+
+    /* 此时尝试切入 INIT，必须拦截 */
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "断流阶段拦截 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "调用 al_error_fn");
+
+    /* 阶段 2: 在同一个 core 实例上发起新的成功升级 (不重建 core，不手动 reset core) */
+    s_mock_al_error_calls = 0;
+    s_mock_al_error_val = 0;
+    adapter.buffer_size = 512;
+
+    int ret_wrq2 = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq2, 0, "同一个 core 实例发起新 WRQ 成功自愈");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "自愈时触发上次未闭环驱动 abort");
+
+    int ret_data2 = ecat_foe_core_on_data(&core, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_data2, 0, "新升级完整固件写入成功");
+    int ret_end2 = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end2, 0, "新升级成功结束闭环");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "新升级成功 finalize");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "新升级成功后 upgrade_incomplete 变为 false");
+
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "新升级成功后放行 BOOT->INIT (an 保持 INIT)");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "放行时不调用 al_error_fn");
+}
+
+/* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -2021,6 +2283,13 @@ int main(void)
     RUN_TEST(test_dirty_memory_initialization_a5_and_02);
     RUN_TEST(test_null_project_name_rejection);
     RUN_TEST(test_reproduce_soes_data_callback_without_wrq_stream_rejection);
+    RUN_TEST(test_hook_filename_rejected_not_blocked);
+    RUN_TEST(test_hook_header_invalid_not_blocked);
+    RUN_TEST(test_hook_init_ok_invalidate_failed_blocked);
+    RUN_TEST(test_hook_invalidate_ok_stream_stops_blocked);
+    RUN_TEST(test_hook_finalize_ok_set_floor_failed_not_blocked);
+    RUN_TEST(test_hook_upgrade_success_not_blocked);
+    RUN_TEST(test_hook_stream_stops_then_new_upgrade_success_not_blocked);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);
