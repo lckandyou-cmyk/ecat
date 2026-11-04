@@ -244,23 +244,30 @@ int ecat_foe_core_deinit(ecat_foe_core_t *core);
 /**
  * @brief 查询当前核心是否存在未闭环的固件升级 (任何启用的目标驱动已 init 但尚未由相同目标成功 finalize)
  *
+ * @pre 核心机上下文必须已成功通过 ecat_foe_core_init() 完成静态配置核验 (core != NULL 且 core->is_configured == true)。
+ *      若 core 为空或未经有效初始化配置，函数执行防御性降级返回 false (表示当前无正在跟踪的有效升级会话)。
+ *      调用方 (如协议栈适配层) 应在核心机初始化完成后再挂接此类状态查询，避免在未初始化状态下误判。
+ *
  * @note 局限性说明：此状态仅在当前 core 实例的单次内存生命周期内由位掩码跟踪；
  *       若发生 deinit/reinit 或硬件断电重启，RAM 内存数据清零，必须依赖底层非易失性介质
  *       的物理有效性检查与 Bootloader 启动引导校验兜底。
  *
  * @param core 核心机指针
  * @return true 存在任一目标处于升级未闭环状态
- * @return false 未初始化或所有已启动目标均已闭环
+ * @return false 未初始化、参数非法或所有已启动目标均已闭环
  */
 bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
 
 /**
  * @brief 查询特定目标当前是否存在未闭环的固件升级
  *
+ * @pre 核心机上下文必须已通过 ecat_foe_core_init() 成功初始化 (core != NULL 且 core->is_configured == true)，
+ *      且 target_id 处于有效范围 (1 ~ ECAT_FOE_TARGET_COUNT)。若未初始化或参数越界，安全返回 false。
+ *
  * @param core 核心机指针
  * @param target_id 目标编号 (1 ~ ECAT_FOE_TARGET_COUNT)
  * @return true 该目标处于升级未闭环状态
- * @return false 该目标未启动升级或已成功 finalize 闭环
+ * @return false 未初始化、参数越界、该目标未启动升级或已成功 finalize 闭环
  */
 bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id);
 
@@ -318,8 +325,9 @@ const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err);
 
 /**
  * @brief 获取核心机内部持久化存储的项目名
+ * @pre 核心机上下文必须已通过 ecat_foe_core_init() 成功初始化 (core != NULL 且 core->is_configured == true)。
  * @param core 核心机上下文指针
- * @return 指向内部持久化以 '\0' 结尾项目名字符串的指针，若 core 为空返回 NULL
+ * @return 指向内部持久化以 '\0' 结尾项目名字符串的指针；若 core 为空或未经初始化配置返回 NULL
  */
 const char *ecat_foe_core_get_project_name(const ecat_foe_core_t *core);
 

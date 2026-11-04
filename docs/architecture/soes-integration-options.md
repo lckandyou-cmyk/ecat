@@ -303,15 +303,10 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
 
-**官方文档获取实况说明**：
-- 官方路径测试 1 (v1i10): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i10.pdf`
-  - 实测结果: HTTP 403 Forbidden (CloudFront WAF 拦截页面, HTML 919 字节, 包含 "403 ERROR: The request could not be satisfied. Request blocked.")；
-- 官方路径测试 2 (v1i8): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i8.pdf`
-  - 实测结果: HTTP 404 Not Found (HTML 页面)；
-- 官方路径测试 3 (Application_Notes 目录): `https://download.beckhoff.com/download/document/Application_Notes/an_et9300_v1i10.pdf` 及 `v1i8.pdf`
-  - 实测结果: 均为 HTTP 404 Not Found；
-- 访问控制策略: Beckhoff 官方 CDN 实施了反爬与访问控制策略，禁止外部自动化脚本公开匿名下载；
-- 状态判定: 本地无源文件，未核验。严格保留为未核验状态，绝不伪造核验结论或宽泛宣称已核验。
+**官方文档获取与访问策略说明**：
+- ET9300 为 Beckhoff 官方从站协议栈（Slave Stack Code, SSC）开发包代码，其配套应用笔记（Application Note ET9300）面向 EtherCAT Technology Group (ETG) 会员及官方受控渠道分发；
+- Beckhoff 官方未开放公开匿名直接下载链接，官方服务对自动化脚本匿名抓取实施了访问控制；
+- 状态判定：本地无源文件，未核验。文档内不保留任何未经官方验证的猜测下载路径，严格保留为未核验状态，绝不伪造核验结论。
 
 | 文档出处 | 章节与描述内容 | 核验状态与说明 |
 | :--- | :--- | :--- |

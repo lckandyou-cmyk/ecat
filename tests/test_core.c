@@ -2592,6 +2592,35 @@ static void test_cross_target_finalize_prevents_duplicate_abort(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调用 deinit 绝不触发驱动 abort");
 }
 
+/* 专项测试: 公开状态查询函数在 NULL 与未配置前提下的防御性行为 */
+static void test_query_functions_uninitialized_and_null_preconditions(void)
+{
+    /* 1. NULL 指针安全入参检测 */
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(NULL), "core == NULL 时 upgrade_incomplete 返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(NULL, 1), "core == NULL 时 target_incomplete 返回 false");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_get_last_error(NULL), ECAT_FOE_CORE_ERR_INVALID_ARG, "core == NULL 时 get_last_error 返回 INVALID_ARG");
+    TEST_ASSERT(ecat_foe_core_get_project_name(NULL) == NULL, "core == NULL 时 get_project_name 返回 NULL");
+
+    /* 2. 脏内存 / 未通过 init 初始化的 core 结构体 */
+    ecat_foe_core_t uninit_core;
+    memset(&uninit_core, 0xA5, sizeof(uninit_core));
+    uninit_core.is_configured = false;
+
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&uninit_core), "未配置 core 结构体 upgrade_incomplete 返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&uninit_core, 1), "未配置 core 结构体 target_incomplete 返回 false");
+    TEST_ASSERT(ecat_foe_core_get_project_name(&uninit_core) == NULL, "未配置 core 结构体 get_project_name 返回 NULL");
+
+    /* 3. 正常配置初始化后，非法 target_id 边界检测 */
+    static mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 0), "target_id == 0 越界返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, ECAT_FOE_TARGET_COUNT + 1), "target_id 超过最大配额返回 false");
+    TEST_ASSERT(ecat_foe_core_get_project_name(&core) != NULL, "初始化有效 core 获取项目名成功");
+    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "获取项目名匹配期望值");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -2658,6 +2687,7 @@ int main(void)
     RUN_TEST(test_cross_target_different_targets_success_interleaving);
     RUN_TEST(test_cross_target_init_fail_vs_invalidate_fail);
     RUN_TEST(test_cross_target_finalize_prevents_duplicate_abort);
+    RUN_TEST(test_query_functions_uninitialized_and_null_preconditions);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);
