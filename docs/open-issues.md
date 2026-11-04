@@ -8,8 +8,8 @@
 
 本类问题通过查阅芯片官方 Datasheet 或 ETG 官方技术规范即可查实闭环：
 
-1. **AL Event Request 寄存器（0220h）清除条件【LAN9252 已核实 / 其他 ESC 待确认】**：
-   - 内容：LAN9252 手册 Section 12.14.28（第 253 页）已核实 Bit 0 AL Control Event 明确注明 `This bit is cleared by reading the AL Control Register from PDI.`；ET1100、AX58100 等其他 ESC 控制器的清除条件仍待横向比对确认。
+1. **AL Event Request 寄存器（0220h）清除条件【未核实（待 PDF 工具全量独立核查）】**：
+   - 内容：LAN9252 手册 AL Event Request 寄存器（0220h，跨第 252-253 页，章节号待定为 12.14.34，【未核实（待 PDF 工具全量独立核查）】）Bit 0 AL Control Event 是否由 PDI 读 0120h 自动清除；以及 ET1100、AX58100 等其他 ESC 控制器的清除条件。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 3.1 节第 5 条。
 2. **SII Configuration Area Checksum 存放位置与计算算法【未核实】**：
    - 内容：LAN9252 手册 Section 12.14.49（第 261 页）定义了校验和错误位 Bit 11，但全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法。

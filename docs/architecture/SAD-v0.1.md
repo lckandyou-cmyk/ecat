@@ -150,9 +150,9 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
 
 #### 1. 切换握手核心原则【已确定】
 * **禁止通用库与 Bootloader 直接操作 ESC AL Status**：
-  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，见 LAN9252 手册 Section 12.14.20，第 239 页）时，**绝对不向 ESC AL Status 寄存器 (`0130h-0131h`) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
+  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，LAN9252 章节出处【未核实（待 PDF 工具全量独立核查）】）时，**绝对不向 ESC AL Status 寄存器 (`0130h-0131h`) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
 * **由协议栈自行接管并确认**：
-  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（见 LAN9252 手册 Section 12.14.21，第 240 页）完成握手响应。通用升级库核心与用户驱动**绝对不直接写 ESC 0130h 寄存器**。
+  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（LAN9252 章节出处【未核实（待 PDF 工具全量独立核查）】）完成握手响应。通用升级库核心与用户驱动**绝对不直接写 ESC 0130h 寄存器**。
 * **待验证与未核实事项**：
   - MCU 硬件复位后，ESC 内部寄存器与邮箱 SM（SyncManager）配置是否能够完好保留、从站协议栈启动后能否无缝接上当前待处理的 BOOT 请求标为 **【待验证】**。
   - SSC 协议栈在未确认状态下重启接管的具体行为标为 **【未核实（未读到 SSC 源码）】**。
@@ -345,7 +345,7 @@ sequenceDiagram
 6. **【待验证】Bootloader 启动时主动比对 0120h 与 0130h**：
    - **问题机理**：APP 在检测到 `INIT -> BOOT` 请求时通常会读取 AL Control 寄存器（`0120h`）。
    - **协议栈源码出处**：查阅 SOES 源码 `esc.c` 中 `ESC_state()` 函数实现，通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h 寄存器 Bit 0）来发现是否有待处理的状态转换请求；若该事件位未置位，函数直接 `return;` 退出，根本不会主动读取 `0120h`。
-   - **事件清除条件出处**：依据 LAN9252 手册 Section 12.14.28（第 253 页），AL Event Request 寄存器（0220h）Bit 0 为 AL Control Event，其注释明确指出：`This bit is cleared by reading the AL Control Register from PDI.`。证实 PDI 读取 0120h 时硬件会自动清除该事件。
+   - **事件清除条件出处**：依据 LAN9252 手册 AL Event Request 寄存器（0220h，跨第 252-253 页，章节号待定为 12.14.34，【未核实（待 PDF 工具全量独立核查）】），Bit 0 为 AL Control Event，其注释注明：`This bit is cleared by reading the AL Control Register from PDI.`。证实 PDI 读取 0120h 时硬件会自动清除该事件。
    - **应对规则【待验证】**：若 APP 先前读取 0120h 导致 0220h 事件位已被清除，新启动的从站协议栈轮询时将无法感知到待决请求，状态机将永远卡死在 INIT 无法进入 BOOT。因此 Bootloader 内部启动协议栈时，**协议栈或适配代码必须在初始化完成后主动读取 0120h 并与 0130h 比对**，若发现 `0120h == 0x0003` 且 `0130h != 0x0003`，必须由协议栈强制主动触发向 BOOT 的状态转换处理。
 7. **【建议，待验证】升级成功后的重启走暖切换（专用标志值）**：
    - **时机判定【已确定，待真机验证】**：固件写入与校验成功后，由主站发起从 BOOT 到 INIT 的状态转换请求（`BOOT -> INIT`，依据 Infineon 官方范例工程说明）。
@@ -541,10 +541,10 @@ typedef struct ecat_foe_target_driver {
 * **默认配置关闭**：`ECAT_FOE_ENABLE_TARGET_SII_EEPROM` 必须默认严格置 `0`。
 * **风险与推断说明**：
   ESC 的 SII (Slave Information Interface) EEPROM 存放着 ESC 上电硬件配置与 ESI 数据。
-  依据 LAN9252 手册核实结果（Section 12.14.49，第 261 页），若 EEPROM 镜像写入损坏或校验失败，上电时 ESC 寄存器将报错：Bit 11 `Checksum Error in ESC Configuration Area` 为 1，Bit 12 `EEPROM Loading Status` 为 1。
+  依据 LAN9252 手册（Section 12.14.49，第 261 页，【未核实（待 PDF 工具全量独立核查）】），若 EEPROM 镜像写入损坏或校验失败，上电时 ESC 寄存器将报错：Bit 11 `Checksum Error in ESC Configuration Area` 为 1，Bit 12 `EEPROM Loading Status` 为 1。
   **工程推断【推断】**：虽然手册只给出了上述状态位，但依据从站硬件行为特性，ESC 此时将处于错误挂起状态，无法正常响应主站进入 BOOT 状态，主站亦无法通过网络恢复通信。依赖标准 BOOT/FoE 的 MCU Bootloader 网络恢复路径将彻底失效，设备完全变砖，必须拆机使用物理夹具重新烧录物理 EEPROM。
 
-#### 2. MCU 通过 PDI 访问 SII EEPROM 的机制（依据 LAN9252 手册核实）
+#### 2. MCU 通过 PDI 访问 SII EEPROM 的机制【未核实（待 PDF 工具全量独立核查）】
 * **0500h 小节**：
   - 出处：LAN9252 手册 `12.14.47 EEPROM CONFIGURATION REGISTER`（偏移 `0500h`）；
   - Bit 0 原文：`PDI EEPROM Control`；原文说明：`1: Yes (PDI has EEPROM control)`。
@@ -574,11 +574,11 @@ typedef struct ecat_foe_target_driver {
 * **核实依据说明**：
   LAN9252 官方手册 Section 12.14.49 定义了状态位 `Checksum Error in ESC Configuration Area`，但**手册全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法**。该项标记为【未核实】，待查实 ETG 官方规范后补充。
 
-#### 4. 新内容何时生效（依据 LAN9252 手册核实）
-* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 Section 12.14.49），可触发 ESC 重新从 EEPROM 读取数据。
+#### 4. 新内容何时生效【未核实（待 PDF 工具全量独立核查）】
+* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 Section 12.14.49，【未核实（待 PDF 工具全量独立核查）】），可触发 ESC 重新从 EEPROM 读取数据。
 * **特定功能限制（仅限 Enhanced Link 与 MI Link）**：
-  - 依据 Note 11（LAN9252 手册 Section 12.14.25 第 243 页注释，引用 Section 12.8），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
-  - 依据 Note 27（LAN9252 手册 Section 12.14.51 Note 27），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
+  - 依据 Note 11（LAN9252 手册 Section 12.14.25 第 243 页注释，引用 Section 12.8，【未核实（待 PDF 工具全量独立核查）】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
+  - 依据 Note 27（LAN9252 手册 Section 12.14.51 Note 27，【未核实（待 PDF 工具全量独立核查）】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
   - 手册原文仅明确指出上述两项链路检测特性在手动 reload 时不会生效，**不能外推为全部寄存器或通用 Reload 规则**。
 
 #### 5. 写入 SII 前的防御校验项【已确定】

@@ -264,7 +264,7 @@ void ESC_ALerror (uint16_t errornumber);
 | Section 12.14.20 (AL Control 寄存器) | Page 239 | Page 239 | `12.14.20 AL CONTROL REGISTER` (Offset: `0120h-0121h`) | 第 30981 行 | 历史未单独制表 |
 | Section 12.14.21 (AL Status 寄存器) | Page 240 | Page 240 | `12.14.21 AL STATUS REGISTER` (Offset: `0130h-0131h`) | 第 31059 行 | 历史未单独制表 |
 | Section 12.14.22 (AL Status Code 寄存器) | Page 241 | Page 241 | `12.14.22 AL STATUS CODE REGISTER` (Offset: `0134h-0135h`) | 第 31174 行 | 历史未单独制表 |
-| Section 12.14.28 (AL Event Request 寄存器) | Page 253 | Page 253 | `This bit is cleared by reading the AL Control Register from PDI.` | 第 32264 行 | 历史误标为未核实 |
+| Section 12.14.34 (AL Event Request 寄存器) | Page 253 (标题在 252 页) | Page 253 (标题在 252 页) | `This bit is cleared by reading the AL Control Register from PDI.` | 第 32264 行 | 历史误标为未核实 |
 | Section 12.14.25 (Note 11 引用 12.8) | Page 243 | Page 243 | `Note 11: The default value of this field can be configured via EEPROM.` (引用 Page 201 Sec 12.8) | 第 31430 行 | 第 31434 行 |
 | Section 12.14.49 | Page 261 | Page 261 | `12.14.49 EEPROM CONTROL/STATUS REGISTER` | 第 33483 行 | 第 33481, 33485 行 |
 | Section 12.14.49 (Bit 15) | Page 261 | Page 261 | `Busy` | 第 33506 行 | 第 33496, 33498 行 |
