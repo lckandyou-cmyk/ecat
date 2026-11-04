@@ -140,3 +140,8 @@
      - Beckhoff TwinCAT 体系中，`FB_EcFoeWriteFile` 功能块的 `sFoEPathName` 参数专门表示从站侧文件名，独立于 PC 侧本地文件名。
      - 官方参考链接：https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/1058204683.html
    - 状态：【待决策，不实现】。
+
+5. **升级未闭环状态在 deinit/reinit 与断电重启后的已知局限【已知局限】**：
+   - 机制实现：核心机内部通过位掩码（`target_incomplete_mask`）按目标记录固件未完成状态，保证在单次 core 内存生命周期内，只有相同目标成功 finalize 才能解除其未完成状态，防止多目标交叉升级时误放行残缺固件。
+   - 内存易失性局限：该位掩码驻留在 RAM 运行态。若应用层主动调用 `ecat_foe_core_deinit` 或重新 `ecat_foe_core_init`，结构体清零导致该状态丢失；若设备发生硬件断电重启，RAM 数据丢失，重新初始化后未完成状态必然归零。
+   - 工程边界与防变砖要求：本核心库不变更持久化驱动契约接口，明确记录该局限，不声称在纯内存层解决跨掉电追踪问题。在真实硬件系统中，物理固件有效性必须依赖底层驱动在非易失性存储介质（如 Flash 标志位、校验区）中的真实记录，以及 Bootloader 引导启动时的完整性自检兜底。

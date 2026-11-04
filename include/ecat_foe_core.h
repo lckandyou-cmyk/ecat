@@ -159,7 +159,8 @@ typedef struct {
     ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
 
     /* 会话生命周期与驱动调用保护标记 */
-    bool                upgrade_incomplete;    /**< 固件升级未闭环标志 (driver init 成功置 1，finalize 成功清 0) */
+    uint32_t            target_incomplete_mask; /**< 按目标跟踪的未闭环位掩码 (bit T-1 表示目标 T 驱动已 init 但未成功 finalize) */
+    bool                upgrade_incomplete;    /**< 固件升级未闭环标志 (存在任一未完成目标为 true) */
     bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
@@ -242,13 +243,27 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
 int ecat_foe_core_deinit(ecat_foe_core_t *core);
 
 /**
- * @brief 查询当前核心是否存在未闭环的固件升级 (驱动已 init 但未成功 finalize)
+ * @brief 查询当前核心是否存在未闭环的固件升级 (任何启用的目标驱动已 init 但尚未由相同目标成功 finalize)
+ *
+ * @note 局限性说明：此状态仅在当前 core 实例的单次内存生命周期内由位掩码跟踪；
+ *       若发生 deinit/reinit 或硬件断电重启，RAM 内存数据清零，必须依赖底层非易失性介质
+ *       的物理有效性检查与 Bootloader 启动引导校验兜底。
  *
  * @param core 核心机指针
- * @return true 驱动已初始化且未成功 finalize (固件残缺/处于升级中)
- * @return false 未初始化或已成功完成升级
+ * @return true 存在任一目标处于升级未闭环状态
+ * @return false 未初始化或所有已启动目标均已闭环
  */
 bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
+
+/**
+ * @brief 查询特定目标当前是否存在未闭环的固件升级
+ *
+ * @param core 核心机指针
+ * @param target_id 目标编号 (1 ~ ECAT_FOE_TARGET_COUNT)
+ * @return true 该目标处于升级未闭环状态
+ * @return false 该目标未启动升级或已成功 finalize 闭环
+ */
+bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id);
 
 /**
  * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)

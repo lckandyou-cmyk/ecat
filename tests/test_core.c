@@ -2231,6 +2231,358 @@ static void test_hook_stream_stops_then_new_upgrade_success_not_blocked(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/*             按目标生命周期状态跟踪与跨目标拦截独立测试套件                  */
+/* -------------------------------------------------------------------------- */
+
+/* 1. 跨目标状态保护测试: A 失败后 B 成功，A 依然维持未闭环并持续拦截 BOOT->INIT */
+static void test_reproduce_cross_target_incomplete_upgrade_leak(void)
+{
+    mock_driver_t mcu;
+    mock_driver_t sii;
+    mock_driver_init(&mcu);
+    mock_driver_init(&sii);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, &sii, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_calls = 0;
+    s_mock_al_error_val = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    /* 阶段 1: 升级目标 A (MCU, Target 1)，驱动已 init 且已 invalidate，但写入失败 */
+    int ret_wrq_a = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq_a, 0, "目标 A (MCU) WRQ 成功");
+
+    uint8_t payload_a[16] = {0x11, 0x22};
+    uint8_t efw_a[256];
+    size_t efw_a_len = build_test_efw(efw_a, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload_a, 16);
+    (void)efw_a_len;
+
+    int ret_hdr_a = ecat_foe_core_on_data(&core, efw_a, 64);
+    TEST_ASSERT_EQ_INT(ret_hdr_a, 0, "目标 A 发送头部成功");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "目标 A 驱动 init 成功");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "目标 A 驱动 invalidate 成功 (物理固件已失效)");
+    TEST_ASSERT(!mcu.valid_flag, "目标 A 固件处于无效状态");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A 被正确记录为未完成");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "核心存在未闭环目标");
+
+    /* 模拟数据结束校验失败 (CRC 校验不匹配导致 on_end 返回非 0) */
+    uint8_t corrupt_payload[16] = {0xFF, 0xFF};
+    ecat_foe_core_on_data(&core, corrupt_payload, 16);
+    int ret_fail = ecat_foe_core_on_end(&core);
+    TEST_ASSERT(ret_fail != 0, "数据损坏导致 on_end 校验失败");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "核心状态进入 ERROR");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "失败后目标 A 依然未完成");
+
+    /* 阶段 1 此时若尝试切入 INIT，坚决拦截 */
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "阶段 1 单目标未完成时 hook 拦截 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发报警回调");
+
+    /* 阶段 2: 同一个 core 实例上，转向升级不同目标 B (SII, Target 3) 并成功完成 */
+    s_mock_al_error_calls = 0;
+    int ret_wrq_b = test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq_b, 0, "同一个 core 实例发起目标 B (SII) WRQ 成功自愈");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "自愈时触发目标 A 的 abort 释放资源");
+
+    uint8_t payload_b[16];
+    for (int i = 0; i < 16; i++) payload_b[i] = (uint8_t)(i * 2);
+    uint8_t efw_b[256];
+    size_t efw_b_len = build_test_efw(efw_b, 0x10010001U, 0x00000001U, 1, 1, 3, 0, 0x01000000U, 0, payload_b, 16);
+
+    int ret_data_b = feed_stream_chunks(&core, efw_b, efw_b_len, 32, false);
+    TEST_ASSERT_EQ_INT(ret_data_b, 0, "目标 B 数据推送成功");
+    int ret_end_b = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end_b, 0, "目标 B 成功提交 finalize");
+    TEST_ASSERT(sii.valid_flag, "目标 B (SII) 固件有效");
+
+    /* 阶段 3: 严格断言按目标跟踪状态与跨目标拦截 */
+    TEST_ASSERT(!mcu.valid_flag, "目标 A (MCU) 物理介质仍处于无效/残缺状态");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 B (SII) finalize 后已清除自身未完成状态");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A (MCU) 的未完成状态被严格保留");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "因目标 A 残缺，核心全局依然处于未闭环状态");
+
+    /* 测试 post_state_hook: 此时坚决拦截 BOOT->INIT，绝不误放行 */
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "跨目标防御生效: 目标 A 仍残缺时坚决拦截 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发 al_error_fn 报警回调");
+}
+
+/* 2. 同目标恢复测试: 目标 A 失败拦截后，在同一个 core 实例上重新成功升级目标 A，解除拦截 */
+static void test_cross_target_same_target_recovery(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    /* 步骤 1: 目标 A 启动升级后断流失败 */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    uint8_t payload[16] = {1, 2};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A 处于未完成状态");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "未完成时拦截");
+
+    /* 步骤 2: 在同一个 core 实例上重新完整升级目标 A */
+    s_mock_al_error_calls = 0;
+    int ret_wrq2 = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(ret_wrq2, 0, "新 WRQ 成功自愈");
+    ecat_foe_core_on_data(&core, efw, efw_len);
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "目标 A 重新升级成功");
+    TEST_ASSERT(mcu.valid_flag, "目标 A 物理固件已恢复有效");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A 自身未完成标记已清除");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "核心已无未完成目标");
+
+    /* 步骤 3: 再次尝试切入 INIT，正常放行 */
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "同目标恢复成功后正常放行 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "放行时不报警");
+}
+
+/* 3. 多个目标未完成测试: A 失败且 B 也失败，逐步恢复过程严格保持拦截直到全部完成 */
+static void test_cross_target_multiple_incomplete_targets(void)
+{
+    mock_driver_t mcu;
+    mock_driver_t sii;
+    mock_driver_init(&mcu);
+    mock_driver_init(&sii);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, &sii, NULL);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+
+    uint8_t payload[16] = {1, 2};
+    uint8_t efw_mcu[256];
+    size_t efw_mcu_len = build_test_efw(efw_mcu, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    uint8_t efw_sii[256];
+    size_t efw_sii_len = build_test_efw(efw_sii, 0x10010001U, 0x00000001U, 1, 1, 3, 0, 0x01000000U, 0, payload, 16);
+
+    /* 1. 目标 1 (MCU) 启动后失败 */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw_mcu, 64);
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 1 未完成");
+
+    /* 2. 目标 3 (SII) 启动后也失败 */
+    test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw_sii, 64);
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 未完成");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 1 依然未完成");
+
+    /* 此时两者均未完成，必须拦截 */
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "两目标均未完成时坚决拦截");
+
+    /* 3. 仅成功恢复目标 1 (MCU) */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw_mcu, efw_mcu_len);
+    ecat_foe_core_on_end(&core);
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 1 已闭环");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 依然未完成");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "仍有目标未完成");
+
+    /* 此时仍必须拦截 */
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "仅恢复部分目标时继续拦截");
+
+    /* 4. 成功恢复目标 3 (SII) */
+    test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw_sii, efw_sii_len, 32, false);
+    ecat_foe_core_on_end(&core);
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 已闭环");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "全部目标已闭环");
+
+    /* 全部闭环后放行 */
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "全部目标恢复后放行 BOOT->INIT");
+}
+
+/* 4. 不同目标交替成功测试: 目标 1 成功 -> 目标 3 失败 -> 目标 4 成功 -> 目标 3 恢复 */
+static void test_cross_target_different_targets_success_interleaving(void)
+{
+    mock_driver_t mcu;
+    mock_driver_t sii;
+    mock_driver_t eeprom;
+    mock_driver_init(&mcu);
+    mock_driver_init(&sii);
+    mock_driver_init(&eeprom);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, &sii, &eeprom);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512);
+
+    uint8_t payload[16] = {0xAA};
+    uint8_t efw1[256], efw3[256], efw4[256];
+    size_t l1 = build_test_efw(efw1, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    size_t l3 = build_test_efw(efw3, 0x10010001U, 0x00000001U, 1, 1, 3, 0, 0x01000000U, 0, payload, 16);
+    size_t l4 = build_test_efw(efw4, 0x10010001U, 0x00000001U, 1, 1, 4, 0, 0x01000000U, 0, payload, 16);
+
+    /* A. 目标 1 成功升级 */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw1, l1);
+    ecat_foe_core_on_end(&core);
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "目标 1 成功时不拦");
+
+    /* B. 目标 3 升级启动后中断 */
+    test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw3, 64);
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 未完成");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "存在未完成目标");
+
+    /* C. 目标 4 (EEPROM) 成功升级 */
+    test_wrq(&core, "SERVO_DRV_EEPROM_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw4, l4, 32, false);
+    ecat_foe_core_on_end(&core);
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 4), "目标 4 已闭环");
+    TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 仍未完成");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "因目标 3 未完成，核心仍未闭环");
+
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+    uint8_t an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "目标 4 成功不能掩盖目标 3 残缺，坚决拦截");
+
+    /* D. 目标 3 重新成功升级 */
+    test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw3, l3, 32, false);
+    ecat_foe_core_on_end(&core);
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "全目标均闭环");
+
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "全部完成后正常放行");
+}
+
+/* 5. init 失败 vs invalidate 失败对照测试 */
+static void test_cross_target_init_fail_vs_invalidate_fail(void)
+{
+    /* 测项 A: 驱动 init 失败 -> 驱动资源未激活，不置位未完成状态，不拦截 */
+    {
+        mock_driver_t mcu;
+        mock_driver_init(&mcu);
+        mcu.inject_fail_init = true;
+
+        ecat_foe_core_t core;
+        setup_default_core(&core, &mcu, NULL, NULL);
+
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 512);
+
+        test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+        uint8_t payload[16] = {1};
+        uint8_t efw[256];
+        size_t l = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+        int ret_data = ecat_foe_core_on_data(&core, efw, l);
+        TEST_ASSERT_EQ_INT(ret_data, -1, "init 失败返回 -1");
+        TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 已被调用");
+        TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "init 失败未触碰 invalidate");
+        TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 1), "init 失败不记录为未完成");
+        TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "核心未记录未闭环目标");
+
+        uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+        uint8_t an = ECAT_STATE_INIT;
+        ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+        TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "init 失败不触发拦截");
+    }
+
+    /* 测项 B: 驱动 init 成功但 invalidate 失败 -> 固件处于未闭环状态，必须拦截 */
+    {
+        mock_driver_t mcu;
+        mock_driver_init(&mcu);
+        mcu.inject_fail_invalidate = true;
+
+        ecat_foe_core_t core;
+        setup_default_core(&core, &mcu, NULL, NULL);
+
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 512);
+
+        test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+        uint8_t payload[16] = {1};
+        uint8_t efw[256];
+        size_t l = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+        int ret_data = ecat_foe_core_on_data(&core, efw, l);
+        TEST_ASSERT_EQ_INT(ret_data, -1, "invalidate 失败返回 -1");
+        TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功");
+        TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 失败");
+        TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "init 成功即标记为未完成");
+        TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "核心标记存在未闭环目标");
+
+        uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
+        uint8_t an = ECAT_STATE_INIT;
+        ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+        TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "invalidate 失败坚决拦截");
+    }
+}
+
+/* 6. finalize 后防重复 abort 强化测试: 成功 finalize 后，后续 abort/自愈/deinit 绝不调用 abort */
+static void test_cross_target_finalize_prevents_duplicate_abort(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+
+    ecat_foe_core_t core;
+    setup_default_core(&core, &mcu, NULL, NULL);
+
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t l = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+
+    /* 正常完整升级完成 finalize */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw, l);
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "升级成功");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动 finalize 成功调用");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "成功完成未调用 abort");
+
+    /* 动作 1: 主动调用 on_abort */
+    ecat_foe_core_on_abort(&core);
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调 on_abort 绝不触发驱动 abort");
+
+    /* 动作 2: 新会话 WRQ 自愈触发 */
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后新会话自愈绝不触发驱动 abort");
+
+    /* 动作 3: 调用 deinit */
+    ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调用 deinit 绝不触发驱动 abort");
+}
+
+/* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -2290,6 +2642,12 @@ int main(void)
     RUN_TEST(test_hook_finalize_ok_set_floor_failed_not_blocked);
     RUN_TEST(test_hook_upgrade_success_not_blocked);
     RUN_TEST(test_hook_stream_stops_then_new_upgrade_success_not_blocked);
+    RUN_TEST(test_reproduce_cross_target_incomplete_upgrade_leak);
+    RUN_TEST(test_cross_target_same_target_recovery);
+    RUN_TEST(test_cross_target_multiple_incomplete_targets);
+    RUN_TEST(test_cross_target_different_targets_success_interleaving);
+    RUN_TEST(test_cross_target_init_fail_vs_invalidate_fail);
+    RUN_TEST(test_cross_target_finalize_prevents_duplicate_abort);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

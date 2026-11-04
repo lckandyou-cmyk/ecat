@@ -649,7 +649,10 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             }
         }
 
-        /* 驱动 init 成功后，生命周期会话正式激活；此后发生任何失败均须调 abort 释放资源 */
+        /* 驱动 init 成功后，生命周期会话正式激活；按目标记录升级未闭环状态 */
+        if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
+            core->target_incomplete_mask |= (1U << (core->req_target_id - 1));
+        }
         core->upgrade_incomplete = true;
         core->session_active = true;
         core->driver_abort_called = false;
@@ -812,7 +815,11 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     }
 
     /* 成功提交后永久锁定，绝不可再调用 abort */
-    core->upgrade_incomplete = false;
+    /* 仅清除当前目标自身的未完成标志，其余目标的未完成状态严格保留 */
+    if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
+        core->target_incomplete_mask &= ~(1U << (core->req_target_id - 1));
+    }
+    core->upgrade_incomplete = (core->target_incomplete_mask != 0);
     core->driver_finalized = true;
     core->driver_invalidated = false;
     core->session_active = false;
@@ -853,7 +860,15 @@ bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core)
     if (core == NULL || !core->is_configured) {
         return false;
     }
-    return core->upgrade_incomplete;
+    return (core->target_incomplete_mask != 0) || core->upgrade_incomplete;
+}
+
+bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id)
+{
+    if (core == NULL || !core->is_configured || target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT) {
+        return false;
+    }
+    return (core->target_incomplete_mask & (1U << (target_id - 1))) != 0;
 }
 
 ecat_foe_core_err_t ecat_foe_core_get_last_error(const ecat_foe_core_t *core)
