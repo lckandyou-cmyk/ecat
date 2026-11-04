@@ -115,7 +115,16 @@
        - `*as` 匹配复合迁移码 `ECAT_TRANSITION_BOOT_TO_INIT`（`(ESCinit << 4) | ESCboot = 0x13U`，由 SOES 第 1128 行合成，高 4 位为目标状态 `0x1`，低 4 位为当前状态 `0x3`）；
        - `*an` 改写为 AL 状态值 `ECAT_AL_STATUS_BOOT_ERROR`（`ESCboot | ESCerror = 0x03 | 0x10 = 0x13U`，写入 `0x130` AL 状态寄存器）；
        - 两者数值恰好同为 `0x13`，但前者是状态迁移事件码，后者是带错误标志的物理状态值，语义完全不同。
-     - **错误码设定**：适配层实际调用注入的错误回调设置 AL 状态码为 `ECAT_AL_STATUS_CODE_NO_VALID_FW`（`0x0014`，在真实 SOES 中对应 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`）。
+     - **错误码设定**：适配层实际调用注入的错误回调设置 AL 状态码为 `ECAT_AL_STATUS_CODE_NO_VALID_FW`（`0x0014`，在真实 SOES 中对应 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`，而非 `ALERR_INVALIDSTATECHANGE` `0x0011`）。
+   - 状态错误码源码依据（`esc.h:108-111`）：
+<!-- quote-begin: Q11_ESC_H_ALERR_CONSTANTS -->
+```c
+#define ALERR_INVALIDSTATECHANGE    0x0011
+#define ALERR_UNKNOWNSTATE          0x0012
+#define ALERR_BOOTNOTSUPPORTED      0x0013
+#define ALERR_NOVALIDFIRMWARE       0x0014
+```
+<!-- quote-end: Q11_ESC_H_ALERR_CONSTANTS -->
    - 源码依据（`esc.c:1111-1135`）：
 <!-- quote-begin: Q10_ESC_C_ALCONTROL_INIT_ERRACK -->
 ```c

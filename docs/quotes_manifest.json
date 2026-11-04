@@ -195,6 +195,20 @@
         "   }"
       ],
       "description": "ESC_state() 中对 ALcontrol 状态请求遮罩、ac==ESCinit 错误确认重置与 pre_state_change_hook 调用"
+    },
+    {
+      "id": "Q11_ESC_H_ALERR_CONSTANTS",
+      "doc_path": "docs/open-issues.md",
+      "source_file": "esc.h",
+      "start_line": 108,
+      "end_line": 111,
+      "expected_snippet": [
+        "#define ALERR_INVALIDSTATECHANGE    0x0011",
+        "#define ALERR_UNKNOWNSTATE          0x0012",
+        "#define ALERR_BOOTNOTSUPPORTED      0x0013",
+        "#define ALERR_NOVALIDFIRMWARE       0x0014"
+      ],
+      "description": "SOES AL 状态错误码宏定义 (包含 ALERR_INVALIDSTATECHANGE 与 ALERR_NOVALIDFIRMWARE 常量值)"
     }
   ],
   "prose_line_exemptions": [
