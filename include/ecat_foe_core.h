@@ -216,6 +216,23 @@ typedef struct {
 int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
 
 /**
+ * @brief 反初始化核心升级状态机并安全释放活跃会话资源
+ *
+ * 【生命周期与资源释放契约】：
+ * 1. 若 core 为 NULL 或尚未成功初始化 (!core->is_configured)，直接安全返回 0 (No-op)。
+ * 2. 若 core 当前处于活跃会话中 (core->session_active 为 true)：
+ *    - 若底层驱动已初始化且尚未调用 abort 或 finalize，显式调用目标驱动的 abort 回调释放底层硬件/闪存资源；
+ *    - 标记 driver_abort_called 为 true。
+ * 3. 清空 core 全部内存 (memset 为 0)，显式将 is_configured 置为 false，状态重置为 ECAT_FOE_STATE_IDLE。
+ * 4. 【重新初始化规范】：ecat_foe_core_init() 严禁前置读取未初始化 core 的任何字段以防未定义行为；若需要
+ *    重新初始化一个处于活跃会话的 core 实例，调用方必须先显式调用 ecat_foe_core_deinit(core)，然后再执行 ecat_foe_core_init()。
+ *
+ * @param core 核心状态机实例指针
+ * @return 0 成功
+ */
+int ecat_foe_core_deinit(ecat_foe_core_t *core);
+
+/**
  * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)
  * 若上一次会话未闭环，主动调驱动 abort 并重置会话。
  * @param core         核心机上下文指针

@@ -207,6 +207,22 @@ static void core_reset_session(ecat_foe_core_t *core)
     core->last_error = ECAT_FOE_CORE_OK;
 }
 
+int ecat_foe_core_deinit(ecat_foe_core_t *core)
+{
+    if (core == NULL || !core->is_configured) {
+        return 0;
+    }
+
+    /* 若存在活跃会话且驱动未完成 finalize，调用驱动 abort 回调安全中止并释放底层硬件资源 */
+    core_abort_driver(core);
+
+    /* 清空核心全部内存，重置为未配置 */
+    memset(core, 0, sizeof(*core));
+    core->state = ECAT_FOE_STATE_IDLE;
+    core->is_configured = false;
+    return 0;
+}
+
 int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
 {
     if (core == NULL) {

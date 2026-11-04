@@ -815,31 +815,103 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     TEST_ASSERT(ret_cb != 0, "失败回调返回非零");
     TEST_ASSERT(adapter.last_commit_failed, "last_commit_failed 为 true");
 
-    uint8_t as = 0x13U; /* BOOT_TO_INIT */
-    uint8_t an = 0x01U;
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT; /* 0x13U: BOOT_TO_INIT 迁移码 */
+    uint8_t an = ECAT_STATE_INIT;              /* 0x01U */
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT_EQ_INT(an, 0x13U, "post hook 改写为 BOOT + Error (0x13)");
-    TEST_ASSERT_EQ_INT(adapter.last_al_error, 0x0014U, "记录 AL 状态错误码 0x0014 ALERR_NOVALIDFIRMWARE");
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "post hook 改写为 BOOT + Error (0x13)");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, ECAT_AL_STATUS_CODE_NO_VALID_FW, "记录 AL 状态错误码 0x0014 ALERR_NOVALIDFIRMWARE");
     TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "al_error_fn 注入回调被调用且仅调用 1 次");
-    TEST_ASSERT_EQ_INT(s_mock_al_error_val, 0x0014U, "向 al_error_fn 传入的错误码为 0x0014");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_val, ECAT_AL_STATUS_CODE_NO_VALID_FW, "向 al_error_fn 传入的错误码为 0x0014");
 
     /* 验证非 BOOT_TO_INIT 迁移时不拦截且不调用 al_error_fn */
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
-    as = 0x12U; /* PREOP_TO_BOOT 或其他状态 */
-    an = 0x03U;
+    as = (uint8_t)((ECAT_STATE_BOOT << 4) | ECAT_STATE_PREOP); /* 非 BOOT_TO_INIT */
+    an = ECAT_STATE_BOOT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT_EQ_INT(an, 0x03U, "非 BOOT_TO_INIT 迁移不予拦截改写");
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_BOOT, "非 BOOT_TO_INIT 迁移不予拦截改写");
     TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "非 BOOT_TO_INIT 迁移不调用 al_error_fn");
+
+    /* 验证显式 reset 接口能可靠清除失败状态 */
+    ecat_foe_soes_reset(&adapter);
+    TEST_ASSERT(!adapter.last_commit_failed, "ecat_foe_soes_reset 成功清除 last_commit_failed");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, 0, "ecat_foe_soes_reset 成功清除 last_al_error");
+
+    /* 验证失败后重新成功升级的自愈解除拦截能力 (短包结束路径) */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    /* 模拟上一会话失败遗留标记 */
+    adapter.last_commit_failed = true;
+    adapter.last_al_error = ECAT_AL_STATUS_CODE_NO_VALID_FW;
+    /* 重新组织正确固件 */
+    efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    /* 在真实 SOES 中若未走 on_wrq，此处直接由核心启动 WRQ */
+    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "新会话短包写入成功");
+    TEST_ASSERT(!adapter.last_commit_failed, "短包成功后必须自动复位 last_commit_failed 为 false");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, 0, "短包成功后必须自动复位 last_al_error 为 0");
+
+    /* 验证解除拦截后再次尝试 BOOT->INIT 迁移正常放行 */
+    s_mock_al_error_calls = 0;
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "成功提交后 BOOT->INIT 正常放行");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "成功提交后不触发 al_error_fn");
+
+    /* 验证 0 长度包结束路径的失败与成功自愈 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    /* 将 buffer_size 设为 64，构造 64 字节负载 (总长 128 字节，正好为 2 个 64 字节整包，不触发短包结束，必须由 0 长度包结束) */
+    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
+    uint8_t payload64[64];
+    for (int i = 0; i < 64; i++) payload64[i] = (uint8_t)(i + 1);
+    uint8_t efw128[256];
+    size_t efw128_len = build_test_efw(efw128, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload64, 64);
+    TEST_ASSERT_EQ_INT(efw128_len, 128, "总固件长度为 128 字节");
+
+    /* A. 故意诱发 0 长度包结束时失败 (CRC 错误) */
+    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    /* 发送头部 64 字节整包 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, 64);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "发送第 1 块 64 字节成功");
+    /* 发送有效载荷 64 字节整包，但故意篡改第 1 字节导致 CRC 校验失败 */
+    uint8_t bad_chunk[64];
+    memcpy(bad_chunk, efw128 + 64, 64);
+    bad_chunk[0] ^= 0xAA;
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, bad_chunk, 64);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "第 2 块整包由于尚未触发 on_end 返回 0");
+    /* 发送 0 长度包触发结束，此时因 CRC 校验失败，on_end 返回非 0 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, NULL, 0);
+    TEST_ASSERT(ret_cb != 0, "CRC 错误时 0 长度包结束必须返回非 0 失败");
+    TEST_ASSERT(adapter.last_commit_failed, "0 长度包失败时 last_commit_failed 置为 true");
+
+    /* B. 重新发起正确流程并通过 0 长度包成功自愈 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    /* 发送正确的第 1 块 64 字节 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, 64);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试第 1 块 64 字节成功");
+    /* 发送正确的第 2 块 64 字节 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128 + 64, 64);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试第 2 块 64 字节成功");
+    /* 发送 0 长度包闭环 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, NULL, 0);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "正确固件 0 长度包结束返回 0 成功");
+    TEST_ASSERT(!adapter.last_commit_failed, "0 长度包成功必须复位 last_commit_failed 为 false");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, 0, "0 长度包成功必须复位 last_al_error 为 0");
 
     /* 验证提交成功时正常允许迁移至 INIT 且不调用 al_error_fn */
     adapter.last_commit_failed = false;
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
-    as = 0x13U;
-    an = 0x01U;
+    as = ECAT_TRANSITION_BOOT_TO_INIT;
+    an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT_EQ_INT(an, 0x01U, "提交成功时允许正常迁移至 INIT");
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "提交成功时允许正常迁移至 INIT");
     TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "提交成功时不调用 al_error_fn");
 
     /* 验证空指针健壮性 */
@@ -847,6 +919,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     ecat_foe_soes_post_state_hook(&adapter, NULL, &an);
     ecat_foe_soes_post_state_hook(&adapter, &as, NULL);
     ecat_foe_soes_set_al_error_fn(NULL, mock_al_error_cb);
+    ecat_foe_soes_reset(NULL);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1450,6 +1523,91 @@ static void test_self_referential_pointer_elimination_and_idle_copy(void)
     TEST_ASSERT(memcmp(mcu.mem, payload, 16) == 0, "副本写入数据完全正确");
 }
 
+/* 30. 核心机反初始化 deinit 与活跃会话 abort 契约测试 */
+static void test_core_deinit_lifecycle(void)
+{
+    mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+
+    /* 1. NULL 指针防御 */
+    int ret = ecat_foe_core_deinit(NULL);
+    TEST_ASSERT_EQ_INT(ret, 0, "deinit(NULL) 必须安全返回 0");
+
+    /* 2. 未配置的核心机 (is_configured == false) 安全返回 0 (No-op) */
+    memset(&core, 0, sizeof(core));
+    ret = ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "deinit 未配置核心机返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "未配置核心机绝不得触发 abort");
+
+    /* 3. 已配置但处于空闲态 (IDLE，无活跃会话) 的核心机 deinit */
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT(core.is_configured, "初始化核心机成功");
+    ret = ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "空闲核心机 deinit 成功");
+    TEST_ASSERT(!core.is_configured, "deinit 后 core.is_configured 变为 false");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "空闲核心机 deinit 不触发驱动 abort");
+
+    /* 4. 活跃会话进行中 (WRQ 之后、数据流传输中) 触发 deinit: 必须安全中止底层驱动释放资源 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    uint8_t payload[16] = {1, 2, 3, 4};
+    uint8_t efw[256];
+    size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
+    /* 发送 64 字节头部，使驱动执行 init 与 invalidate 并进入活跃会话 */
+    ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT(core.session_active, "会话处于活跃状态");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动已执行 init");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "尚未执行 abort");
+
+    ret = ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "活跃会话 deinit 成功返回 0");
+    TEST_ASSERT(!core.is_configured, "deinit 后核心标记不可用");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "活跃会话 deinit 必须且仅调用 1 次驱动 abort");
+
+    /* 5. 幂等性测试: 连续再次调用 deinit 绝不重复触发 abort */
+    ret = ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "重复 deinit 安全返回 0");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "重复 deinit 绝不发生重复 abort 泄漏");
+
+    /* 6. 成功 finalize 提交后的会话 deinit: 严禁调用 abort 破坏已提交的有效固件 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw, efw_len, 32, false);
+    int ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "固件升级正常成功");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动已执行 finalize");
+    TEST_ASSERT(mcu.valid_flag, "固件置为有效");
+
+    ret = ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(ret, 0, "已提交核心机 deinit 成功");
+    TEST_ASSERT(!core.is_configured, "core 重置为不可用");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "已成功 finalize 的固件在 deinit 时严禁调用 abort");
+    TEST_ASSERT(mcu.valid_flag, "固件有效标记保持 true");
+
+    /* 7. 活跃会话经 deinit 释放后重新初始化全流程恢复测试 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT(core.session_active, "会话活跃");
+    /* 显式 deinit 安全释放硬件资源 */
+    ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "deinit 释放活跃硬件资源");
+
+    /* 重新 init 核心机并执行完整升级 */
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT(core.is_configured, "重新初始化核心机成功");
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    feed_stream_chunks(&core, efw, efw_len, 32, false);
+    ret_end = ecat_foe_core_on_end(&core);
+    TEST_ASSERT_EQ_INT(ret_end, 0, "重新初始化后新升级成功闭环");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_SUCCESS, "最终状态机为 SUCCESS");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "新会话驱动成功 finalize");
+}
+
 /* -------------------------------------------------------------------------- */
 /*                               主测试入口                                   */
 /* -------------------------------------------------------------------------- */
@@ -1494,6 +1652,7 @@ int main(void)
     RUN_TEST(test_padding_capacity_boundary);
     RUN_TEST(test_failed_session_new_wrq_full_upgrade_recovery);
     RUN_TEST(test_self_referential_pointer_elimination_and_idle_copy);
+    RUN_TEST(test_core_deinit_lifecycle);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

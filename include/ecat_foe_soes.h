@@ -14,6 +14,27 @@ extern "C" {
 #endif
 
 /**
+ * @brief EtherCAT AL 状态码与状态迁移常量定义
+ *
+ * 语义辨析与设计说明：
+ * - 迁移码 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)：
+ *   在 SOES esc.c:1128 中计算所得由 BOOT (0x03) 迁往 INIT (0x01) 的复合事件码。
+ * - 状态码 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)：
+ *   写入 AL 状态寄存器 (0x130) 的状态值，表示当前处于 BOOT 态且 Error 标志位置 1 (0x03 | 0x10)。
+ * 两者数值虽同为 0x13，但属于完全不同的寄存器语义和控制逻辑，必须使用明确的命名常量严格区分。
+ */
+#define ECAT_STATE_INIT                 0x01U
+#define ECAT_STATE_PREOP                0x02U
+#define ECAT_STATE_BOOT                 0x03U
+#define ECAT_STATE_SAFEOP               0x04U
+#define ECAT_STATE_OP                   0x08U
+#define ECAT_STATE_FLAG_ERROR           0x10U
+
+#define ECAT_TRANSITION_BOOT_TO_INIT    ((uint8_t)((ECAT_STATE_INIT << 4) | ECAT_STATE_BOOT)) /**< 0x13U: BOOT->INIT 迁移码 */
+#define ECAT_AL_STATUS_BOOT_ERROR       ((uint8_t)(ECAT_STATE_BOOT | ECAT_STATE_FLAG_ERROR))  /**< 0x13U: BOOT+Error 状态值 */
+#define ECAT_AL_STATUS_CODE_NO_VALID_FW 0x0014U                                               /**< ALERR_NOVALIDFIRMWARE (0x0014) */
+
+/**
  * @brief AL 错误码上报函数原型 (在真实 SOES 中对应 ESC_ALerror(uint16_t errornumber))
  */
 typedef void (*ecat_foe_al_error_fn_t)(uint16_t errornumber);
@@ -33,6 +54,13 @@ typedef struct {
  * @param buffer_size SOES 配置的 fbuffer 尺寸
  */
 void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core, uint32_t buffer_size);
+
+/**
+ * @brief 显式复位 SOES 适配层失败记录与 AL 错误缓存
+ * 在无 WRQ 钩子的原生 SOES 外部驱动层或重新启动升级时供外部调用
+ * @param adapter 适配层上下文
+ */
+void ecat_foe_soes_reset(ecat_foe_soes_adapter_t *adapter);
 
 /**
  * @brief 设置 AL 错误上报注入回调函数 (真实 SOES 中传入 ESC_ALerror，单测传入桩函数)

@@ -28,6 +28,14 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     s_active_adapter = adapter;
 }
 
+void ecat_foe_soes_reset(ecat_foe_soes_adapter_t *adapter)
+{
+    if (adapter != NULL) {
+        adapter->last_commit_failed = false;
+        adapter->last_al_error = 0;
+    }
+}
+
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
 {
     if (adapter != NULL) {
@@ -60,6 +68,9 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
             adapter->last_commit_failed = true;
             return 1U;
         }
+        /* 提交成功：自动解除失败标记与 AL 错误缓存，允许后续 BOOT->INIT 迁移 */
+        adapter->last_commit_failed = false;
+        adapter->last_al_error = 0;
         return 0U;
     }
 
@@ -75,6 +86,9 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
             adapter->last_commit_failed = true;
             return 1U;
         }
+        /* 提交成功：自动解除失败标记与 AL 错误缓存，允许后续 BOOT->INIT 迁移 */
+        adapter->last_commit_failed = false;
+        adapter->last_al_error = 0;
     }
 
     return 0U; /* 0 表示成功 */
@@ -86,7 +100,11 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
         return;
     }
 
-    /* 依据 SAD 1.2 缓解措施 2: 检测 BOOT -> INIT 迁移 (0x13)
+    /* 依据 SAD 1.2 缓解措施 2: 检测 BOOT -> INIT 迁移
+     * 使用语义清晰的命名常量严格区分迁移码与 AL 状态值：
+     * - *as 匹配 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)
+     * - *an 改写为 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)
+     *
      * 时序与物理限制明确说明：
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
      * 2. 若在此处改写 *an 为 BOOT|Error 并调用注入的 al_error_fn(0x0014) (在真实 SOES 中对应 ESC_ALerror)，
@@ -94,12 +112,12 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * 3. 局限性说明：当前为测试桩仿真验证，真实 SOES 源码尚未集成编译，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
      *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
      */
-    if (*as == 0x13U && adapter->last_commit_failed) {
+    if (*as == ECAT_TRANSITION_BOOT_TO_INIT && adapter->last_commit_failed) {
         /* 改写目标状态为 BOOT + Error (0x03 | 0x10 = 0x13) */
-        *an = 0x03U | 0x10U;
-        adapter->last_al_error = 0x0014U; /* ALERR_NOVALIDFIRMWARE (0x0014) */
+        *an = ECAT_AL_STATUS_BOOT_ERROR;
+        adapter->last_al_error = ECAT_AL_STATUS_CODE_NO_VALID_FW;
         if (adapter->al_error_fn != NULL) {
-            adapter->al_error_fn(0x0014U);
+            adapter->al_error_fn(ECAT_AL_STATUS_CODE_NO_VALID_FW);
         }
     }
 }
