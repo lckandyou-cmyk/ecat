@@ -2,16 +2,24 @@
 """
 tools/verify_soes_quotes.py
 
-三方严格核验 SOES 源码引用工具 (Three-way Quote Verification Tool)。
-比对三方数据源：
-1. 外部清单文件 (docs/quotes_manifest.json)；
-2. 项目技术文档内标记代码块 (<!-- quote-begin: ID --> ... <!-- quote-end: ID -->)；
-3. 本地真实 SOES 源码文件 (按照行号范围提取的逐字源码)。
+三方严格核验 SOES 源码引用工具 (Three-way Quote Verifier)。
+
+【核验原则与三方数据源】：
+1. 外部清单文件 (docs/quotes_manifest.json)
+2. 项目 Markdown 文档标记块 (<!-- quote-begin: ID --> ... <!-- quote-end: ID -->)
+3. 本地真实 SOES 源码文件 (按照行号范围提取的代码片段)
+
+【严密防御与拦截机制】：
+- 清单为空列表时直接失败；
+- 清单内部重复 ID 直接失败；
+- 文档标记未配对 (有 begin 缺 end，或有 end 缺 begin) 直接失败；
+- 文档标记嵌套 (begin 内部再出现 begin) 直接失败；
+- 全库 Markdown 反向扫描：文档内出现未知 ID、重复标记或位置与清单 doc_path 不符直接失败；
+- 三方文本字符逐字逐行比对，任何差异直接失败。
 
 【覆盖范围与承诺边界】：
 本工具仅针对外部清单文件显式登记的条目执行核验并作出真实性承诺，
 不声称亦不覆盖任何未登记的文本段落。
-若任何一方缺失、标记不匹配、行号越界或文本字符不一致，均非零退出。
 """
 
 import os
@@ -19,57 +27,114 @@ import sys
 import json
 import re
 import argparse
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Set
 
-def extract_quote_from_doc(doc_path: str, qid: str) -> Tuple[bool, List[str], str]:
-    """从 markdown 文档中根据 HTML 注释标记提取代码块中的引文字符串列表"""
-    if not os.path.isfile(doc_path):
-        return False, [], f"文档文件不存在: {doc_path}"
+def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, Any]], str]:
+    """
+    反向扫描仓库中所有 .md 文件中的 quote-begin 和 quote-end 标记。
+    检查：
+    1. 标记未配对
+    2. 标记嵌套
+    3. 文档内部重复标记
+    返回: (ok, tags_found_map, error_msg)
+    tags_found_map 格式: { qid: {"doc_rel": str, "code_lines": List[str], "line_no": int} }
+    """
+    begin_pattern = re.compile(r"<!--\s*quote-begin:\s*([\w_]+)\s*-->")
+    end_pattern = re.compile(r"<!--\s*quote-end:\s*([\w_]+)\s*-->")
 
-    with open(doc_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
+    tags_found: Dict[str, Dict[str, Any]] = {}
 
-    begin_tag = f"<!-- quote-begin: {qid} -->"
-    end_tag = f"<!-- quote-end: {qid} -->"
-
-    begin_pos = content.find(begin_tag)
-    if begin_pos == -1:
-        return False, [], f"文档中未找到起始标记: {begin_tag}"
-
-    end_pos = content.find(end_tag, begin_pos + len(begin_tag))
-    if end_pos == -1:
-        return False, [], f"文档中未找到结束标记: {end_tag}"
-
-    block = content[begin_pos + len(begin_tag) : end_pos].strip()
-
-    # 提取 fenced code block 内部内容
-    lines = block.splitlines()
-    snippet_lines = []
-    in_code = False
-    for line in lines:
-        line_clean = line.rstrip("\r\n")
-        if line_clean.startswith("```"):
-            if not in_code:
-                in_code = True
+    for root, dirs, files in os.walk(repo_root):
+        if ".git" in root or ".gemini" in root:
+            continue
+        for file in sorted(files):
+            if not file.endswith(".md"):
                 continue
-            else:
-                in_code = False
-                break
-        if in_code:
-            snippet_lines.append(line_clean)
+            full_path = os.path.join(root, file)
+            doc_rel = os.path.relpath(full_path, repo_root)
 
-    if not snippet_lines:
-        return False, [], f"标记 {qid} 内部未找到有效的代码块内容"
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                return False, {}, f"读取文档失败: {doc_rel} ({e})"
 
-    return True, snippet_lines, ""
+            active_qid = None
+            active_begin_line = None
+            code_buffer: List[str] = []
+            in_code_fenced = False
+
+            for lidx, raw_line in enumerate(lines, 1):
+                line = raw_line.rstrip("\r\n")
+
+                b_match = begin_pattern.search(line)
+                e_match = end_pattern.search(line)
+
+                # 检查同一行是否同时有 begin 和 end
+                if b_match and e_match:
+                    return False, {}, f"文档 {doc_rel} 第 {lidx} 行 quote-begin 与 quote-end 位于同一行"
+
+                if b_match:
+                    qid = b_match.group(1)
+                    if active_qid is not None:
+                        return False, {}, f"文档 {doc_rel} 第 {lidx} 行发现嵌套标记 '{qid}' (在未闭合标记 '{active_qid}' 内部)"
+                    if qid in tags_found:
+                        first_doc = tags_found[qid]["doc_rel"]
+                        first_line = tags_found[qid]["line_no"]
+                        return False, {}, f"重复标记 '{qid}': 在 {doc_rel}:{lidx} 重复出现 (已在 {first_doc}:{first_line} 定义)"
+                    active_qid = qid
+                    active_begin_line = lidx
+                    code_buffer = []
+                    in_code_fenced = False
+                    continue
+
+                if e_match:
+                    qid = e_match.group(1)
+                    if active_qid is None:
+                        return False, {}, f"文档 {doc_rel} 第 {lidx} 行发现孤立的 quote-end 标记 '{qid}' (无匹配的 quote-begin)"
+                    if active_qid != qid:
+                        return False, {}, f"文档 {doc_rel} 第 {lidx} 行标记不匹配: 期望 quote-end: {active_qid}，实际为 {qid}"
+
+                    # 提取 fenced block 内部代码行
+                    extracted: List[str] = []
+                    fence_count = 0
+                    for c_line in code_buffer:
+                        if c_line.strip().startswith("```"):
+                            fence_count += 1
+                            continue
+                        if fence_count == 1:
+                            extracted.append(c_line)
+
+                    if fence_count < 2 or not extracted:
+                        return False, {}, f"文档 {doc_rel} 标记 '{active_qid}' 内部未包含有效的 Markdown 代码块 (```)"
+
+                    tags_found[active_qid] = {
+                        "doc_rel": doc_rel,
+                        "code_lines": extracted,
+                        "line_no": active_begin_line,
+                    }
+                    active_qid = None
+                    active_begin_line = None
+                    continue
+
+                if active_qid is not None:
+                    code_buffer.append(line)
+
+            if active_qid is not None:
+                return False, {}, f"文档 {doc_rel} 末尾存在未配对闭合的标记 '{active_qid}' (位于第 {active_begin_line} 行)"
+
+    return True, tags_found, ""
 
 def extract_quote_from_source(source_path: str, start_line: int, end_line: int) -> Tuple[bool, List[str], str]:
-    """从真实 SOES 源码中提取指定行号范围的文本"""
+    """从本地源文件中提取指定行号范围的文本"""
     if not os.path.isfile(source_path):
         return False, [], f"源码文件不存在: {source_path}"
 
-    with open(source_path, "r", encoding="utf-8", errors="replace") as f:
-        all_lines = [l.rstrip("\r\n") for l in f]
+    try:
+        with open(source_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = [l.rstrip("\r\n") for l in f]
+    except Exception as e:
+        return False, [], f"读取源码失败: {source_path} ({e})"
 
     if start_line < 1 or end_line > len(all_lines) or start_line > end_line:
         return False, [], f"行号范围越界: {start_line}-{end_line} (源文件总行数: {len(all_lines)})"
@@ -85,6 +150,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print(f" SOES 源码目录: {soes_dir}")
     print("============================================================")
 
+    # 1. 清单文件存在与合法性检查
     if not os.path.isfile(manifest_path):
         print(f"[FATAL] 外部清单文件不存在: {manifest_path}")
         return 2
@@ -100,16 +166,57 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         print(f"[FATAL] 清单根结构必须为 JSON Array")
         return 2
 
-    seen_ids = set()
+    # 2. 空清单直接判定失败
+    if len(manifest_data) == 0:
+        print(f"[FATAL] 清单内容为空列表 []，无核验条目")
+        return 2
+
+    manifest_map: Dict[str, Dict[str, Any]] = {}
+    duplicate_ids: Set[str] = set()
+
+    for item in manifest_data:
+        qid = item.get("id")
+        if not qid:
+            print(f"[FATAL] 清单存在无 ID 条目: {item}")
+            return 2
+        if qid in manifest_map:
+            duplicate_ids.add(qid)
+        manifest_map[qid] = item
+
+    if duplicate_ids:
+        print(f"[FATAL] 清单中存在重复 ID: {sorted(list(duplicate_ids))}")
+        return 2
+
+    # 3. 反向扫描全仓库 Markdown 文档中的全部标记
+    print("[1/3] 扫描仓库全部 Markdown 文档标记结构 (检查未配对/嵌套/重复)...")
+    scan_ok, doc_tags_map, scan_err = scan_all_markdown_tags(repo_root)
+    if not scan_ok:
+        print(f"  [FAIL] 文档标记反向扫描失败: {scan_err}")
+        return 1
+    print(f"  [OK] 文档扫描完成，共捕获 {len(doc_tags_map)} 处配对标记")
+
+    # 4. 反向核验：检查文档中是否有未知 ID 或出现在非指定文档中
+    print("[2/3] 反向交叉校验 (检查文档标记是否超出清单或位置错乱)...")
+    for doc_qid, tag_info in doc_tags_map.items():
+        if doc_qid not in manifest_map:
+            print(f"  [FAIL] 反向拦截: 文档 {tag_info['doc_rel']}:{tag_info['line_no']} 存在清单未登记的未知 ID '{doc_qid}'")
+            return 1
+        expected_doc = manifest_map[doc_qid].get("doc_path")
+        actual_doc = tag_info["doc_rel"]
+        if os.path.normpath(expected_doc) != os.path.normpath(actual_doc):
+            print(f"  [FAIL] 标记文档错位: ID '{doc_qid}' 登记于 '{expected_doc}'，但实际出现在 '{actual_doc}'")
+            return 1
+    print("  [OK] 反向交叉校验通过，文档标记无遗留或错位")
+
+    # 5. 三方比对 (Manifest vs Doc vs Source)
+    print(f"[3/3] 执行三方逐行内容核验 (共 {len(manifest_data)} 处登记条目)...")
+    print("------------------------------------------------------------")
+
     failures = 0
     checked_count = 0
 
-    print(f"【登记清单核验范围说明】：仅对清单中登记的 {len(manifest_data)} 处引用进行三方比对。")
-    print("------------------------------------------------------------")
-
-    for item in manifest_data:
+    for qid, item in manifest_map.items():
         checked_count += 1
-        qid = item.get("id")
         doc_rel = item.get("doc_path")
         source_rel = item.get("source_file")
         start_line = item.get("start_line")
@@ -117,27 +224,19 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         expected_snippet = item.get("expected_snippet")
         desc = item.get("description", "")
 
-        # 1. 清单条目完整性与 ID 唯一性检查
-        if not qid or not doc_rel or not source_rel or start_line is None or end_line is None or expected_snippet is None:
-            print(f"[{qid or 'UNKNOWN'}] [FAIL] 清单字段缺失或非法")
+        if not doc_rel or not source_rel or start_line is None or end_line is None or expected_snippet is None:
+            print(f"[{qid}] [FAIL] 清单字段缺失")
             failures += 1
             continue
 
-        if qid in seen_ids:
-            print(f"[{qid}] [FAIL] 清单中存在重复的引用 ID")
-            failures += 1
-            continue
-        seen_ids.add(qid)
-
-        # 2. 从文档中提取引文 (Party 2)
-        doc_full = os.path.join(repo_root, doc_rel)
-        doc_ok, doc_lines, doc_err = extract_quote_from_doc(doc_full, qid)
-        if not doc_ok:
-            print(f"[{qid}] [FAIL] 文档引文提取失败: {doc_err}")
+        if qid not in doc_tags_map:
+            print(f"[{qid}] [FAIL] 清单登记的条目在对应文档 '{doc_rel}' 中缺失标记")
             failures += 1
             continue
 
-        # 3. 从 SOES 源码中提取引文 (Party 3)
+        doc_lines = doc_tags_map[qid]["code_lines"]
+
+        # 读取本地真实源码行
         src_full = os.path.join(soes_dir, source_rel)
         src_ok, src_lines, src_err = extract_quote_from_source(src_full, start_line, end_line)
         if not src_ok:
@@ -145,7 +244,6 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
             failures += 1
             continue
 
-        # 4. 三方逐行一致性严格核验 (Manifest vs Doc vs Source)
         manifest_vs_doc = (expected_snippet == doc_lines)
         manifest_vs_src = (expected_snippet == src_lines)
 
@@ -156,16 +254,16 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
             print(f"  [FAIL] {qid:28s} -> 三方比对不一致！")
             if not manifest_vs_doc:
                 print(f"         [差异: 清单 vs 文档]")
-                print(f"           - 清单行数: {len(expected_snippet)} | 文档行数: {len(doc_lines)}")
-                for i in range(max(len(expected_snippet), len(doc_lines))):
+                max_l = max(len(expected_snippet), len(doc_lines))
+                for i in range(max_l):
                     e_l = expected_snippet[i] if i < len(expected_snippet) else "<EOF>"
                     d_l = doc_lines[i] if i < len(doc_lines) else "<EOF>"
                     if e_l != d_l:
                         print(f"           Line +{i}: 清单: {repr(e_l)} vs 文档: {repr(d_l)}")
             if not manifest_vs_src:
                 print(f"         [差异: 清单 vs 源码]")
-                print(f"           - 清单行数: {len(expected_snippet)} | 源码行数: {len(src_lines)}")
-                for i in range(max(len(expected_snippet), len(src_lines))):
+                max_l = max(len(expected_snippet), len(src_lines))
+                for i in range(max_l):
                     e_l = expected_snippet[i] if i < len(expected_snippet) else "<EOF>"
                     s_l = src_lines[i] if i < len(src_lines) else "<EOF>"
                     if e_l != s_l:
