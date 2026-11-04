@@ -259,9 +259,13 @@ void ESC_ALerror (uint16_t errornumber);
 
 | 官方章节 (Section) | PDF 物理页 | 底部印刷页 | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Table 6-1 | Page 38 | Page 38 | `EEPROM Loader Run` | 第 4718 行 | 第 4758 行 |
-| Section 6.2.1.2 | Page 39 | Page 39 | `Driving the RST# input pin low initiates a chip-level reset.` | 第 4869 行 | 第 4874, 4875 行 |
-| Section 12.8 (Note 11) | Page 243 | Page 243 | `Note 11: The default value of this field can be configured via EEPROM.` | 第 31430 行 | 第 31434 行 |
+| Table 6-1 (复位源与功能影响表) | Page 38 | Page 38 | `RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY` (`EEPROM Loader Run`) | 第 4694, 4718 行 | 第 4758 行 |
+| Section 6.2.1.2 (RST# 引脚复位) | Page 39 | Page 39 | `6.2.1.2 RST# Pin Reset` (`Driving the RST# input pin low initiates a chip-level reset.`) | 第 4867, 4869 行 | 第 4874, 4875 行 |
+| Section 12.14.20 (AL Control 寄存器) | Page 239 | Page 239 | `12.14.20 AL CONTROL REGISTER` (Offset: `0120h-0121h`) | 第 30981 行 | 历史未单独制表 |
+| Section 12.14.21 (AL Status 寄存器) | Page 240 | Page 240 | `12.14.21 AL STATUS REGISTER` (Offset: `0130h-0131h`) | 第 31059 行 | 历史未单独制表 |
+| Section 12.14.22 (AL Status Code 寄存器) | Page 241 | Page 241 | `12.14.22 AL STATUS CODE REGISTER` (Offset: `0134h-0135h`) | 第 31174 行 | 历史未单独制表 |
+| Section 12.14.28 (AL Event Request 寄存器) | Page 253 | Page 253 | `This bit is cleared by reading the AL Control Register from PDI.` | 第 32264 行 | 历史误标为未核实 |
+| Section 12.14.25 (Note 11 引用 12.8) | Page 243 | Page 243 | `Note 11: The default value of this field can be configured via EEPROM.` (引用 Page 201 Sec 12.8) | 第 31430 行 | 第 31434 行 |
 | Section 12.14.49 | Page 261 | Page 261 | `12.14.49 EEPROM CONTROL/STATUS REGISTER` | 第 33483 行 | 第 33481, 33485 行 |
 | Section 12.14.49 (Bit 15) | Page 261 | Page 261 | `Busy` | 第 33506 行 | 第 33496, 33498 行 |
 | Section 12.14.49 (Bit 14) | Page 261 | Page 261 | `Error Write Enable` | 第 33518 行 | 第 33504 行 |
