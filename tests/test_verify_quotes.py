@@ -120,7 +120,7 @@ def run_verifier(manifest: str, repo: str, soes: str) -> subprocess.CompletedPro
 
 def test_fixture_suite():
     print("============================================================")
-    print(" 运行三方校验工具独立夹具测试套件 (全场景覆盖)")
+    print(" 运行三方校验工具独立夹具测试套件 (多场景验证)")
     print("============================================================")
 
     test_passed = 0
@@ -419,6 +419,30 @@ def test_fixture_suite():
         with open(doc_path, "w", encoding="utf-8") as f:
             f.write(doc_text)
         assert_case("Case 20.2: 距离 quote-begin 4 行拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:10-13'", manifest, repo, soes)
+
+    # 20.3: 相邻引用但源码文件不符拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        doc_text = "正文相邻引用但文件不符: `esc.c:10-13`\n\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 20.3: 相邻引用但源码文件不符拦截", 1, "发现未登记的正文行号引用: 'esc.c:10-13'", manifest, repo, soes)
+
+    # 20.4: 相邻引用但行范围超出 Quote 范围拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        doc_text = "正文相邻引用但行号超出: `esc_foe.c:9-13`\n\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 20.4: 相邻引用但行范围超出 Quote 范围拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:9-13'", manifest, repo, soes)
 
     # Case 21: 同名 basename 但不同目录路径混淆反例拦截
     with tempfile.TemporaryDirectory() as td:
