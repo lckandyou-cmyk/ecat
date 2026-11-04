@@ -40,10 +40,10 @@
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
 - **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现初步的接口转换打样与单测桩（验证短包识别、0 长度包结束判定，以及双参数 `post_state_change_hook` 拦截与 AL 状态错误码 `0x0014` 记录仿真）。**真实 SOES 源码尚未集成编译，现场硬件与真实主站动态联调尚未开展【未核实/待开发与真机动态验证】**。
 - **原生协议栈限制与技术约束 (静态推断与动态验证界定)**：
-  - *【静态推断】文件名匹配机制与空名/短前缀风险*：原生 SOES（`esc_foe.c:72`）采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定**由接收长度 `num_chars` 决定前缀匹配，而非精确匹配**。基于静态代码分析得出两项潜在风险（【待动态实测确认】）：
+  - *【静态推断】文件名匹配机制与空名/短前缀风险*：原生 SOES 在 `esc_foe.c` 的 WRQ 文件名匹配逻辑中采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定**由接收长度 `num_chars` 决定前缀匹配，而非精确匹配**。基于静态代码分析得出两项潜在风险（【待动态实测确认】）：
     1. **空文件名风险**：若主站发来空名（`num_chars == 0`），`strncmp(..., 0)` 恒等于 0，将无条件误命中首条配置（`files[0]` 对应 MCU 固件）；
     2. **短前缀误绑定**：若主站发送公共前缀，会命中首个具有该前缀的表项，引发跨目标误绑定。
-  - *【静态推断】0 长度结束包与 AL 错误*：原生 SOES 在 0 长度结束包分支（`esc_foe.c:459-465`）中忽略了 `FOE_fclose()` 的返回值。适配层目前在单测桩中验证了通过 `post_state_change_hook`（`*as == 0x13U`）改写目标状态为 `0x13 (BOOT|Error)` 并记录错误码 `0x0014`，**但在真实物理环境下，进入 post hook 时物理邮箱已通过 `ESC_stopmbx()` 停止，能否防止错误固件被引导仍取决于 Bootloader 前置校验和硬件原子性，绝不能宣称真机已验证拦截**。
+  - *【静态推断】0 长度结束包与 AL 错误*：原生 SOES 在 `esc_foe.c` 的 0 长度结束包分支中忽略了 `FOE_fclose()` 的返回值。适配层目前在单测桩中验证了通过 `post_state_change_hook`（`*as == 0x13U`）改写目标状态为 `0x13 (BOOT|Error)` 并记录错误码 `0x0014`，**但在真实物理环境下，进入 post hook 时物理邮箱已通过 `ESC_stopmbx()` 停止，能否防止错误固件被引导仍取决于 Bootloader 前置校验和硬件原子性，绝不能宣称真机已验证拦截**。
   - *【静态推断】关闭 RRQ 的真实编译方式（不可定义为 0）*：原生 SOES 使用 `#ifdef FOE_READ_SUPPORTED` 控制代码编译。**不可通过定义为 0（如 `-DFOE_READ_SUPPORTED=0`）来禁用**！因 C 预处理器 `#ifdef` 仅判断宏是否存在，定义为 0 仍会被判定为真而编入 RRQ 逻辑并引发缓冲区越界读 (Buffer Over-read) 风险。**必须保持该宏完全未定义或显式 `#undef`**，方可走 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`。
 - **源码与规范引用清单**：关于 SOES、LAN9252 手册及 ETG 规范的全局行号引用与核验状态，详见 [soes-integration-options.md 第 6 节](docs/architecture/soes-integration-options.md#6-全局行号与外部规范引用盘点表-reference-inventory)。
 

@@ -1,5 +1,10 @@
 # EtherCAT INIT→BOOT 状态切换与独立 Bootloader 衔接技术调研报告
 
+> ⚠️ **【未核实历史记录归档横幅 (Historical Research Archive Banner)】**  
+> 本文档为项目前期技术调研与讨论备忘录（属于历史调研归档文档），保留当时的引用关系与研究思路。  
+> 文档中所引述的部分外部散文件转换行号未纳入自动化三方核验体系，亦不代表当前系统的正式架构设计与最终代码实现。  
+> 权威规范与经过自动化核验的结论，请以项目根目录 `README.md`、`docs/spec/` 及 `docs/architecture/` 为准。
+
 ## 摘要结论
 
 经实际调取并逐行核对本地已下载的官方与开源原文件（Beckhoff ET9300 应用笔记 v1.10、SOES 源码、Microchip LAN9252 数据手册、Infineon XMC4800 范例工程文档与源码、Microchip MPLAB Harmony 应用文档、PSI 范例工程文档），关于 **APP 收到 INIT→BOOT 请求后复位进独立 Bootloader 衔接官方流程** 的调研结论如下：

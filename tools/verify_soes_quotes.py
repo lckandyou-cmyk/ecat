@@ -216,14 +216,15 @@ def extract_quote_from_source(source_path: str, start_line: int, end_line: int) 
 def is_line_covered_by_local_quote(
     doc_rel: str,
     doc_line: int,
+    raw_src_path: str,
     src_basename: str,
     line_ref: str,
     quotes_map: Dict[str, Dict[str, Any]],
     doc_tags_map: Dict[str, Dict[str, Any]],
 ) -> bool:
     """
-    检查一个正文行号引用是否被同一文档且位置相邻 (<=5 行) 的 Quote 块覆盖。
-    严格防范跨文档借用与同名跨文件放行。
+    检查一个正文行号引用是否被同一文档且位置相邻 (<=3 行) 的 Quote 块覆盖。
+    严格防范跨文档借用与同名跨文件路径混淆。
     """
     parts = line_ref.split("-")
     try:
@@ -234,25 +235,38 @@ def is_line_covered_by_local_quote(
     except ValueError:
         return False
 
+    norm_doc = os.path.normpath(doc_rel)
+    norm_raw_dir = os.path.dirname(os.path.normpath(raw_src_path))
+
     for qid, q in quotes_map.items():
         if qid not in doc_tags_map:
             continue
         tag_info = doc_tags_map[qid]
 
         # 1. 必须位于同一文档
-        if os.path.normpath(tag_info["doc_rel"]) != os.path.normpath(doc_rel):
+        if os.path.normpath(tag_info["doc_rel"]) != norm_doc:
             continue
 
-        # 2. 必须位置相邻 (距离 quote-begin 标记行在 5 行以内)
+        # 2. 必须位置相邻 (严格收紧至距离 quote-begin 标记行在 3 行以内)
         tag_lno = tag_info["line_no"]
-        if abs(doc_line - tag_lno) > 5:
+        if abs(doc_line - tag_lno) > 3:
             continue
 
-        # 3. 源码文件及行号范围必须包含
-        q_src = os.path.basename(q.get("source_file", ""))
+        # 3. 源码文件及路径匹配 (防同名 basename 跨目录混淆)
+        q_src_raw = q.get("source_file", "")
+        q_src_base = os.path.basename(q_src_raw)
+        if q_src_base != src_basename:
+            continue
+
+        q_src_dir = os.path.dirname(os.path.normpath(q_src_raw))
+        if norm_raw_dir != "" and q_src_dir != "" and norm_raw_dir != q_src_dir:
+            # 路径存在二义性冲突，严禁放行借用
+            continue
+
+        # 4. 行号范围必须完整包含
         q_s = q.get("start_line", 0)
         q_e = q.get("end_line", 0)
-        if q_src == src_basename and q_s <= s and e <= q_e:
+        if q_s <= s and e <= q_e:
             return True
 
     return False
@@ -296,15 +310,15 @@ def scan_unregistered_prose_lines(
                         trimmed_line = raw_line.rstrip("\r\n").strip()
                         line_hash = compute_line_text_hash(trimmed_line)
 
-                        found_refs: List[Tuple[str, str]] = []
+                        found_refs: List[Tuple[str, str, str]] = []
                         for m in p1.findall(raw_line):
-                            found_refs.append((os.path.basename(m[0]), m[1]))
+                            found_refs.append((m[0], os.path.basename(m[0]), m[1]))
                         for m in p2.findall(raw_line):
-                            found_refs.append((os.path.basename(m[0]), m[1]))
+                            found_refs.append((m[0], os.path.basename(m[0]), m[1]))
 
-                        for src_base, lref in found_refs:
-                            # 1. 检查是否为同文档相邻 Quote 块覆盖
-                            if is_line_covered_by_local_quote(doc_rel, lno, src_base, lref, quotes_map, doc_tags_map):
+                        for raw_path, src_base, lref in found_refs:
+                            # 1. 检查是否为同文档相邻 (<=3 行) Quote 块覆盖
+                            if is_line_covered_by_local_quote(doc_rel, lno, raw_path, src_base, lref, quotes_map, doc_tags_map):
                                 status_counts["LOCAL_QUOTE_ADJACENT"] = status_counts.get("LOCAL_QUOTE_ADJACENT", 0) + 1
                                 continue
 
@@ -529,10 +543,11 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
 
     print("------------------------------------------------------------")
     print(f" 核验统计与覆盖范围客观汇报:")
-    print(f" - 登记 Quote 自动化三方核验: {checked_count} 项 (100% 逐字吻合)")
-    print(f" - 正文行号精确豁免总数:     {len(prose_exemptions)} 项 (零通配符，逐项绑定 doc_line 与文本 SHA-256)")
+    print(f" - 登记 Quote 自动化三方核验: {checked_count} 项 (逐字比对吻合)")
+    print(f" - 正文行号精确豁免总数:     {len(prose_exemptions)} 项 (权威规范文档已清零，仅限归档历史记录)")
     for st, cnt in sorted(status_counts.items()):
         print(f"   * {st:38s}: {cnt} 处引用")
+    print(" - 正则覆盖局限说明: 本工具基于正则表达式匹配显式文件行号引用，无法识别无行号自然语言引述或非常规引用语法")
     print(" - 外部未核验说明: Beckhoff ET9300 官方受限无法获取；ETG 规范为外部标准，均已严格标注未核验")
     print(">>> 三方引文自动化核验通过 (承诺范围仅限上述已登记条目) <<<")
     return 0

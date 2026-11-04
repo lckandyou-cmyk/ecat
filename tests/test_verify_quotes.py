@@ -24,6 +24,8 @@ tests/test_verify_quotes.py
 17. 豁免行文本被修改 (line_text_hash 不匹配) 拦截 (-> 返回 1)
 18. 豁免项缺失必须字段拦截 (-> 返回 1)
 19. 相同行号但引文内容错误拦截 (-> 返回 1)
+20. 引用距离 quote-begin 标记边界测试 (恰好 3 行通过，4 行失败拦截)
+21. 同名 basename 但不同目录路径混淆反例拦截 (-> 返回 1)
 
 【安全保证】：
 本测试仅在临时目录中读写夹具，绝不修改用户真实的 /tmp/soes_src 目录与源码。
@@ -380,6 +382,67 @@ def test_fixture_suite():
         with open(doc_path, "w", encoding="utf-8") as f:
             f.write(content)
         assert_case("Case 19: 相同行号引文内容错误拦截", 1, "差异: 清单 vs 文档", manifest, repo, soes)
+
+    # Case 20: 引用距离 quote-begin 标记边界测试 (恰好 3 行通过，4 行失败拦截)
+    # 20.1: 恰好距离 3 行 -> 判定为相邻 Quote 覆盖通过 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        # quote-begin 在第 3 行，在第 6 行 (距离 3 行) 插入引用
+        with open(doc_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        # 构造: line 1: title, line 2: quote-begin, line 3: c, line 4: code, line 5: c, line 6: quote-end
+        # 我们在 quote-begin 前一行 (距离 1) 或前三行
+        new_doc = "行 1: `esc_foe.c:10-13`\n行 2: text\n行 3: text\n" + content
+        # quote-begin 现在位于第 4+ 行，距离第 1 行恰好为 3 行
+        lines = new_doc.splitlines(keepends=True)
+        # 精确构造: line 1 引用, line 2 空行, line 3 空行, line 4 是 quote-begin (4 - 1 = 3)
+        doc_text = "正文相邻引用: `esc_foe.c:10-13`\n\n\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 20.1: 距离 quote-begin 恰好 3 行通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
+    # 20.2: 距离 4 行 -> 超出相邻覆盖范围拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        # line 1 引用, line 2 空行, line 3 空行, line 4 空行, line 5 是 quote-begin (5 - 1 = 4 > 3)
+        doc_text = "正文非相邻引用: `esc_foe.c:10-13`\n\n\n\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 20.2: 距离 quote-begin 4 行拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:10-13'", manifest, repo, soes)
+
+    # Case 21: 同名 basename 但不同目录路径混淆反例拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        # 将源文件移至子目录 soes_src/soes/esc_foe.c
+        sub_dir = os.path.join(soes, "soes")
+        os.makedirs(sub_dir, exist_ok=True)
+        old_src = os.path.join(soes, "esc_foe.c")
+        new_src = os.path.join(sub_dir, "esc_foe.c")
+        os.rename(old_src, new_src)
+        # 更新 manifest 中 quote 的 source_file
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["quotes"][0]["source_file"] = "soes/esc_foe.c"
+        m["file_checksums"] = {"soes/esc_foe.c": hashlib.sha256(open(new_src, "rb").read()).hexdigest()}
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        # 在距离 quote-begin 仅 1 行处引述 "other_dir/esc_foe.c:10-13" (同名 basename 但目录不同)
+        doc_text = "不同目录混淆引用: `other_dir/esc_foe.c:10-13`\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "```\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 21: 同名 basename 但不同目录混淆拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:10-13'", manifest, repo, soes)
 
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")

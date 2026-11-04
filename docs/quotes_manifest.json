@@ -142,526 +142,76 @@
   ],
   "prose_line_exemptions": [
     {
-      "doc_path": "README.md",
-      "doc_line": 43,
-      "source_file": "esc_foe.c",
-      "line_reference": "72",
-      "line_text_hash": "0557a37d78947444ab572877d87906a526f09bf34118f61587c480702997bab7",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "README 原生 SOES 行为说明引用: esc_foe.c:72"
-    },
-    {
-      "doc_path": "README.md",
-      "doc_line": 46,
-      "source_file": "esc_foe.c",
-      "line_reference": "459-465",
-      "line_text_hash": "cbdef0e153d4d954ed3aa32cb9e30981b6cbe78a177e90f4bc75b656ae19bb8b",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "README 原生 SOES 行为说明引用: esc_foe.c:459-465"
-    },
-    {
-      "doc_path": "docs/open-issues.md",
-      "doc_line": 21,
-      "source_file": "esc_foe.h",
-      "line_reference": "17",
-      "line_text_hash": "086ce8eaf47384165992d84421d7ff06e66a23492df2991e34d0fbbee6404de4",
-      "verification_status": "HISTORICAL_ISSUE_TRACKING",
-      "reason": "历史遗留问题跟踪清单引用: esc_foe.h:17"
-    },
-    {
-      "doc_path": "docs/open-issues.md",
-      "doc_line": 94,
-      "source_file": "esc_foe.c",
-      "line_reference": "459-465",
-      "line_text_hash": "bb74d1a11f0ca3a8663c7d41142b832c55e76685e1fb2d6dbb878e1b57be7fb1",
-      "verification_status": "HISTORICAL_ISSUE_TRACKING",
-      "reason": "历史遗留问题跟踪清单引用: esc_foe.c:459-465"
-    },
-    {
-      "doc_path": "docs/open-issues.md",
-      "doc_line": 99,
-      "source_file": "esc.c",
-      "line_reference": "1307",
-      "line_text_hash": "ffa501e1b7c1826d25dbdce802939e9fef048b9ad7fe8e299e98ea79d5b3526c",
-      "verification_status": "HISTORICAL_ISSUE_TRACKING",
-      "reason": "历史遗留问题跟踪清单引用: esc.c:1307"
-    },
-    {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 8,
+      "doc_line": 13,
       "source_file": "esc.c",
       "line_reference": "1155",
       "line_text_hash": "938fc2f7e6d61c2aa33b98a6602b1b66c27585083de216cf7cea51b131f8adb7",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:1155"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: esc.c:1155"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 27,
+      "doc_line": 32,
       "source_file": "esc.c",
       "line_reference": "1155",
       "line_text_hash": "7ebca7a3030b3d7ecdd4bb10ca7864cce6f51fc1238ed724f4f99d7f1e7a11ba",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:1155"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc.c:1155"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 29,
+      "doc_line": 34,
       "source_file": "esc.c",
       "line_reference": "1160",
       "line_text_hash": "d0916b790ac2be1307c1859a83cc79fb07ab7e46e0b53e2ad43f91dd5818ab8f",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:1160"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc.c:1160"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 31,
+      "doc_line": 36,
       "source_file": "esc.c",
       "line_reference": "1197",
       "line_text_hash": "ac547dd56247f9142240fea4b09dfa5fd0210776012c75907f966c6ac09b6117",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:1197"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc.c:1197"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 33,
+      "doc_line": 38,
       "source_file": "esc.c",
       "line_reference": "1202",
       "line_text_hash": "085b0addf6667c6b5687eb6677f59597208a8e8870a05cb5c5e33396acd97c43",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:1202"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc.c:1202"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 35,
+      "doc_line": 40,
       "source_file": "esc.c",
       "line_reference": "388",
       "line_text_hash": "d080f702ea82612d925d1925b19956e097d6d3feac08f6d0a1c6ea713d6beee3",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc.c:388"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc.c:388"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 37,
+      "doc_line": 42,
       "source_file": "esc_foe.h",
       "line_reference": "48",
       "line_text_hash": "933f777e191628ed5f008b0e8efb9fa37b29ac4b22152d594d1f04f0f7708b09",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc_foe.h:48"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc_foe.h:48"
     },
     {
       "doc_path": "docs/research/boot-switch-report.md",
-      "doc_line": 39,
+      "doc_line": 44,
       "source_file": "esc_foe.c",
       "line_reference": "83",
       "line_text_hash": "ed1d58164f53682f84d11d938baad5e94e762ced39142f2446926f77bfd7fe5c",
-      "verification_status": "HISTORICAL_RESEARCH_REPORT",
-      "reason": "前期调研报告历史比对行号: esc_foe.c:83"
-    },
-    {
-      "doc_path": "docs/spec/efw-format-v0.1.md",
-      "doc_line": 171,
-      "source_file": "esc_foe.h",
-      "line_reference": "17",
-      "line_text_hash": "a2f3a3a38f24a2cf6e93584981e694627cc1b2ec482248291e0dc234db62994c",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "固件格式规范文件名长度上限引用: esc_foe.h:17"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 70,
-      "source_file": "esc_foe.c",
-      "line_reference": "187-195",
-      "line_text_hash": "595731d2d1d489de75b330460211b23797d637d79454810960094442bf3ea6a8",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:187-195"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 72,
-      "source_file": "esc_foe.c",
-      "line_reference": "158-160",
-      "line_text_hash": "297fb90c5b9903363a0d2d06440223f4709b10e93b7f5d0aa95837a5a22fe2c5",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:158-160"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 78,
-      "source_file": "esc_foe.c",
-      "line_reference": "459-465",
-      "line_text_hash": "ed6021042308fba2cb5dac41a5c47ed8f4a191a1b947fd90d417bb0d11bb5798",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:459-465"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 99,
-      "source_file": "esc.h",
-      "line_reference": "89",
-      "line_text_hash": "3e7231ca6bcd6d17553ef927c45a0419c6ef9d0703d2a85a4e085c17ffdd0303",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:89"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 110,
-      "source_file": "esc.h",
-      "line_reference": "89",
-      "line_text_hash": "8c2f617bc2e23d7cc0fa6a8cbb45d75202ffe38c5b55a97ed0ece6f0ac557ace",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:89"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 111,
-      "source_file": "esc.h",
-      "line_reference": "74",
-      "line_text_hash": "747395e43856adad2de30b8b1b9e3626f23057fc8a423d8ba6f039a5ab9fe863",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:74"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 112,
-      "source_file": "esc.h",
-      "line_reference": "111",
-      "line_text_hash": "30ccccb5a0b81f5d7513bd2c22b2e4a6166465598ed84700ab690ff8c00c8c45",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:111"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 112,
-      "source_file": "esc.c",
-      "line_reference": "25",
-      "line_text_hash": "30ccccb5a0b81f5d7513bd2c22b2e4a6166465598ed84700ab690ff8c00c8c45",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.c:25"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 117,
-      "source_file": "esc_foe.c",
-      "line_reference": "217-239",
-      "line_text_hash": "bad854d9f26bee4a3271bee7fab12f9c43bf8c576465243da4614e4891576677",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:217-239"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 126,
-      "source_file": "esc_foe.c",
-      "line_reference": "160",
-      "line_text_hash": "960b5ca89d4dfa3be9d1aef04ce996cc96e671f2bea704843c6a3544ff2db3d0",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:160"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 153,
-      "source_file": "lan9252.txt",
-      "line_reference": "31015",
-      "line_text_hash": "b85df33411abfaa36ccb41a3682d16efa806ba4366e8d361017de8192e9b9ad4",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:31015"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 155,
-      "source_file": "lan9252.txt",
-      "line_reference": "31109",
-      "line_text_hash": "759858143e315e35fbe340de6a5f01aee51c3053c276f4944cdcf6a5075baa04",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:31109"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 347,
-      "source_file": "esc.c",
-      "line_reference": "1095-1105",
-      "line_text_hash": "0f18187b0e36b8ca13b02703de64c211d44efab2596eb2d5561a1aa53d98c440",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.c:1095-1105"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 355,
-      "source_file": "esc_foe.c",
-      "line_reference": "217-239",
-      "line_text_hash": "fddd993d63d14508292ec8f454fc9e685055024df5241c240c82c9b2704a4900",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:217-239"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 361,
-      "source_file": "esc.h",
-      "line_reference": "262-274",
-      "line_text_hash": "173f105cda66c54d1603a12dd087e755eec4ca507c06a90670c4ba2a117bfbaa",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:262-274"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 379,
-      "source_file": "esc_foe.c",
-      "line_reference": "474-499",
-      "line_text_hash": "34e0c417715de48a679e92a66d70d7f69674428084b2e5c57addf1cd5b903c4b",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:474-499"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 382,
-      "source_file": "esc_foe.c",
-      "line_reference": "459-465",
-      "line_text_hash": "d65fb1a73394cf4c5efce6fc92799e6d68a41f00732e90346f06b4cee4113fe3",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:459-465"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 386,
-      "source_file": "esc.h",
-      "line_reference": "281",
-      "line_text_hash": "476177e56e8fa9e04be50935a9fbf5d1af362ed3fdfe972b3c4ddab3f2f12c8f",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc.h:281"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 388,
-      "source_file": "esc_foe.c",
-      "line_reference": "510-520",
-      "line_text_hash": "f8acd63ea731885aaccb017850ca5a0b39a06da37ab2f9658638e9644165402f",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:510-520"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 549,
-      "source_file": "lan9252.txt",
-      "line_reference": "33362",
-      "line_text_hash": "9701cfa77d97172accdb3d8545d2e0bc029107f6955efee043e276c0306f8614",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33362"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 552,
-      "source_file": "lan9252.txt",
-      "line_reference": "33431",
-      "line_text_hash": "17b1e2b82d11aa982493c586e1b4068ef961c114f2551b8383c9411f3479cbe9",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33431"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 555,
-      "source_file": "lan9252.txt",
-      "line_reference": "33465-33467",
-      "line_text_hash": "7d8fba021488d9d5650748828278beb5747b461c76dba7ec27b40dac9ae8e946",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33465-33467"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 558,
-      "source_file": "lan9252.txt",
-      "line_reference": "33481",
-      "line_text_hash": "7cc4a1d0f14fda0750fa6a55e9dedcb213eddfe8c72a57fe29b3a2bd93518f85",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33481"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 566,
-      "source_file": "lan9252.txt",
-      "line_reference": "33698",
-      "line_text_hash": "9efc81f9d980c8b76810c5362d2deba88ac61231471f81f1bb510e5a63d1c663",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33698"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 569,
-      "source_file": "lan9252.txt",
-      "line_reference": "33744",
-      "line_text_hash": "c3e1d6c78e7ab11c4b809eaabb8857a9b1be3cbdfade743758546b756e1d6da2",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33744"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 578,
-      "source_file": "lan9252.txt",
-      "line_reference": "33575",
-      "line_text_hash": "38169e08a3e52ea29b7b71ec05c0b81c910278bfff5c593fa84e3792d88b5beb",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33575"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 580,
-      "source_file": "lan9252.txt",
-      "line_reference": "31434",
-      "line_text_hash": "d2584c10fd88bd66ca25c562ed0fe515af2a563a4dec3a999123100ee90fb52a",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:31434"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 581,
-      "source_file": "lan9252.txt",
-      "line_reference": "33980",
-      "line_text_hash": "9c2d3704fee6bd1ff599fd686220b106df0eed5065cb76d3a2b2682f63d92e15",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: lan9252.txt:33980"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 621,
-      "source_file": "esc_foe.c",
-      "line_reference": "158-163",
-      "line_text_hash": "def3d75abf192d2dcb9240662c04c33418bc8fa02bfa0a898e626bc4957fbd74",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:158-163"
-    },
-    {
-      "doc_path": "docs/architecture/SAD-v0.1.md",
-      "doc_line": 622,
-      "source_file": "esc_foe.c",
-      "line_reference": "187-195",
-      "line_text_hash": "ee3aabaf7c902b92b26c512588efddacb9bb48314103cad4874fa36d982fbd3c",
-      "verification_status": "HISTORICAL_ARCHITECTURE_DESIGN_DOCUMENT",
-      "reason": "SAD-v0.1 历史系统架构设计文档引用: esc_foe.c:187-195"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 104,
-      "source_file": "esc_foe.c",
-      "line_reference": "110",
-      "line_text_hash": "7519a7d1096309a8def5556fe8b1467ed2e2ca722eb1bbbb946ea5a78c61b15f",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc_foe.c:110"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 238,
-      "source_file": "esc_foe.c",
-      "line_reference": "70-73",
-      "line_text_hash": "7b96c82b7a402c6e99cd017c426c396593aab4051995fc51cd44db7fc54d8609",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc_foe.c:70-73"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 239,
-      "source_file": "esc_foe.c",
-      "line_reference": "459-465",
-      "line_text_hash": "3b8a7e5fec2879a720a07e877b0a611f14e15fb04383cbbf7fd5d954bd6ddacb",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc_foe.c:459-465"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 240,
-      "source_file": "esc_foe.c",
-      "line_reference": "493-506",
-      "line_text_hash": "22e8fad9f35874ecdbab3d023df96b3340ca0b1ff3a9698c502613656a52639f",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc_foe.c:493-506"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 241,
-      "source_file": "esc.h",
-      "line_reference": "317-318",
-      "line_text_hash": "42972883e1600dd87fbae3c6e72fb4c78ff70842c4cd24d5e482b7fc4c8abba0",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc.h:317-318"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 242,
-      "source_file": "esc.h",
-      "line_reference": "712",
-      "line_text_hash": "5481280585c7876dd0aa59ef3119daa29997a35306e65655b9591cc2488454ac",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc.h:712"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 243,
-      "source_file": "esc.c",
-      "line_reference": "1128-1135",
-      "line_text_hash": "dda9ee22798902cb2b098eee7691e8e2bfc4b2cfa641b52a66842e429a4dd7d8",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc.c:1128-1135"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 244,
-      "source_file": "esc.c",
-      "line_reference": "1191-1196",
-      "line_text_hash": "992dfcc61c2e2f762aaf0c16f5da7dd84d08a77ea9840f4a6736ee6e3308d7fd",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc.c:1191-1196"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 245,
-      "source_file": "esc.c",
-      "line_reference": "1304-1308",
-      "line_text_hash": "07bc4cf8c3788d8c7251f33c0daeef6b8c54cfa9ca99acf68a4660f1846da0f3",
-      "verification_status": "REGISTERED_QUOTE_REFERENCE",
-      "reason": "soes-integration-options.md 对应登记 Quote 引文: esc.c:1304-1308"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 246,
-      "source_file": "esc_foe.h",
-      "line_reference": "17",
-      "line_text_hash": "70f011ba885ed242b1bccfa3e69039f6ef706b5036f0f25f04fc6d11684dfe06",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc_foe.h:17"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 247,
-      "source_file": "esc_foe.c",
-      "line_reference": "158-163",
-      "line_text_hash": "744d24aaa06ee505511cfd58b6e969a4c7271618ce06c525aee455cafa666689",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc_foe.c:158-163"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 248,
-      "source_file": "esc_foe.c",
-      "line_reference": "187-195",
-      "line_text_hash": "21eb2ea134f7d13525651c8f72bcd3699196b35464f8db4c103738d281a84231",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc_foe.c:187-195"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 249,
-      "source_file": "esc.c",
-      "line_reference": "1155-1160",
-      "line_text_hash": "fba583cfa2cce64fe82c87dd8eff801b6e19b01d07e7b29ba234f895c5f4f740",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc.c:1155-1160"
-    },
-    {
-      "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 250,
-      "source_file": "esc.c",
-      "line_reference": "1197-1202",
-      "line_text_hash": "762d1eabe5e86093ce5322aae51b58c2443497f029ee12df55d15295c3dc1088",
-      "verification_status": "LOCAL_MANUAL_VERIFIED",
-      "reason": "本地源文件人工核对行号: esc.c:1197-1202"
+      "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
+      "reason": "历史调研归档文档前期对比引用: soes/esc_foe.c:83"
     }
   ]
 }

@@ -18,7 +18,7 @@
    - 内容：ETG.2010 官方规范中关于 Bootstrap 邮箱配置段的字偏移地址（暂标为 0x14-0x17、0x1C bit3）及其标准定义。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 4.3 节第 5 条。
 4. **FoE 文件名编码与协议前缀限制【未核实】（长度上限【已核实 SOES】）**：
-   - 内容：SOES 协议栈源码 `soes/esc_foe.h` 第 17 行明确 `#define FOE_FN_MAX      31`，文件名长度上限已确定为 31 字节；ETG.1000.6 官方规范对 FoE 文件名字符编码（ASCII / UTF-8）以及官方是否强制特定前缀的约束仍标记为 **【未核实】**。
+   - 内容：SOES 协议栈头文件 `soes/esc_foe.h` 明确宏定义 `#define FOE_FN_MAX      31`，文件名长度上限已确定为 31 字节；ETG.1000.6 官方规范对 FoE 文件名字符编码（ASCII / UTF-8）以及官方是否强制特定前缀的约束仍标记为 **【未核实】**。
    - 出处：`docs/spec/efw-format-v0.1.md` 第 7.1 节。
 5. **EtherCAT 主站单包响应超时标准数值【未核实】**：
    - 内容：TwinCAT 及标准 EtherCAT 主站对 FoE 单包数据请求与写入响应的默认超时时间阈值。
@@ -91,12 +91,12 @@
 ## 4. 协议栈缺陷规避与后续架构增强方案【待决策】
 
 1. **0 长度包分支 `FOE_fclose` 返回值被 SOES 忽略的落地处理【已确定】**：
-   - 现状事实：查阅 SOES 源码 `esc_foe.c` 第 459-465 行，在独立 0 长度包触发完成的分支中，`FOE_fclose()` 的返回值未被检查，SOES 直接向主站回复最终成功 ACK。
+   - 现状事实：查阅 SOES 源码 `esc_foe.c` 的 0 长度包结束分支，在独立 0 长度包触发完成的分支中，`FOE_fclose()` 的返回值未被检查，SOES 直接向主站回复最终成功 ACK。
    - 触发条件澄清：空包路径出现条件是传输总长度（`header_length + payload_length`）恰为底层 FoE 单包数据容量（`ESC_FOE_DATA_SIZE`）的整数倍，与应用层 `foe_cfg->buffer_size` 无关；TwinCAT 实际分包行为标记为 **【未核实】**。
    - 已确定决策：v1 架构完全接受此原生限制，不打源码补丁。
    - 安全底线：`drv->invalidate()` 已提前清除固件就绪/有效标记，失败时设备重启设计目标为停留在 Bootloader 等待重新升级（取决于 Bootloader 引导前置校验完备性及介质掉电写入原子性）。
    - 缓解措施 1：打包工具新增可选参数 `--foe-packet-size N`，必要时在 payload 末尾填充 `0xFF` 规避空包路径（SII 目标补 2 字节整倍数），填充计入 `payload_length` 与 `payload_crc32`。此为尽力而为缓解，主站实际分包大小标记为 **【未核实】**。
-   - 缓解措施 2：适配层记录“最后提交失败”状态，在主站发起 `BOOT -> INIT` 状态切换时通过 `post_state_change_hook`（`esc.c` 第 1307 行）拒绝迁移（`*an = ESCboot | ESCerror`）并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`（`0x0014`）设置 AL 状态码拦截。（SSC 侧状态迁移拒绝与设置 AL Status Code 机制标记为 **【未核实】**）。
+   - 缓解措施 2：适配层记录“最后提交失败”状态，在主站发起 `BOOT -> INIT` 状态切换时通过 `post_state_change_hook`（`esc.c` 状态迁移后置钩子调用点）拒绝迁移（`*an = ESCboot | ESCerror`）并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`（`0x0014`）设置 AL 状态码拦截。（SSC 侧状态迁移拒绝与设置 AL Status Code 机制标记为 **【未核实】**）。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 1.2 节、第 3.2 节、第 5.1 节第 15 条。
 
 2. **流式环形缓冲队列解耦方案（v1 排除，后续版本待评审）【待决策】**：

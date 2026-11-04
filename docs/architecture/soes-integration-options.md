@@ -101,7 +101,7 @@
 ## 3. 关闭 RRQ 的真实编译方式与缓冲区越界风险
 
 ### 3.1 预编译宏机制核查
-原生 SOES 采用 `#ifdef FOE_READ_SUPPORTED`（`esc_foe.c:110, 510, 598`）控制读逻辑编译。
+原生 SOES 采用 `#ifdef FOE_READ_SUPPORTED` 控制读逻辑编译。
 - **未定义（唯一正确关闭方式）**：不定义 `FOE_READ_SUPPORTED`，代码中无 RRQ 分支，收到 RRQ 报文落入 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`；
 - **【不可定义为 0】定义为 0 的配置陷阱**：若传入 `-DFOE_READ_SUPPORTED=0`，因 C 预处理器 `#ifdef` 仅判定宏是否存在，宏依然生效，会错误编译包含 RRQ 逻辑。
 
@@ -233,21 +233,21 @@ void ESC_ALerror (uint16_t errornumber);
   - `esc_foe.h`: `84f5011c258d1e25d8d9ab22bfb74f4ab45b1e6b01f3a6be13e5cf2138034eb7`
 *注意：上述 SHA-256 仅代表当前本地散文件环境的比对基线，绝不能当作上游官方 Release 认证。*
 
-| 源码文件与行号 | 引用内容或用途 | 核验模式与状态 |
+| 登记条目与源码归属 | 校验内容或用途 | 核验模式与状态 |
 | :--- | :--- | :--- |
-| `esc_foe.c:70-73` | WRQ 文件名匹配判定 (`0 == strncmp`) | **【自动三方逐行严格核验 (Q1)】** |
-| `esc_foe.c:459-465` | 0 长度包结束分支 (`FOE_fclose` 返回值被忽略) | **【自动三方逐行严格核验 (Q2)】** |
-| `esc_foe.c:493-506` | 短包结束分支 (`FOE_fclose` 严格返回值检查) | **【自动三方逐行严格核验 (Q3)】** |
-| `esc.h:317-318` | `pre/post_state_change_hook` 钩子函数指针声明 | **【自动三方逐行严格核验 (Q4)】** |
-| `esc.h:712` | `ESC_ALerror` 错误码设置函数原型声明 | **【自动三方逐行严格核验 (Q5)】** |
-| `esc.c:1128-1135` | `pre_state_change_hook` 调用时机与迁移码合成 | **【自动三方逐行严格核验 (Q6)】** |
-| `esc.c:1191-1196` | `BOOT_TO_INIT` 停用邮箱及赋值 `an = ESCinit` | **【自动三方逐行严格核验 (Q7)】** |
-| `esc.c:1304-1308` | `post_state_change_hook` 触发时机（停邮箱之后） | **【自动三方逐行严格核验 (Q8)】** |
-| `esc_foe.h:17` | `#define FOE_FN_MAX 31` 文件名长度上限 | **【本地人工核对】** 对照本地源文件确认 |
-| `esc_foe.c:158-163` | 接收缓冲区满调用 `write_function` 及地址累加 | **【本地人工核对】** 对照本地源文件确认 |
-| `esc_foe.c:187-195` | `FOE_fclose` 关闭文件时写入剩余缓冲区 | **【本地人工核对】** 对照本地源文件确认 |
-| `esc.c:1155-1160` | `INIT_TO_BOOT` 与 `BOOT_TO_BOOT` 合并分支，调用 `ESC_startmbxboot` 启动 Bootstrap 邮箱 | **【本地人工核对】** 对照本地源文件确认 |
-| `esc.c:1197-1202` | 非 INIT 状态切入 BOOT 直接报错设置 | **【本地人工核对】** 对照本地源文件确认 |
+| Quote `Q1` (`esc_foe.c`) | WRQ 文件名匹配判定 (`0 == strncmp`) | **【自动三方逐行严格核验 (Q1)】** |
+| Quote `Q2` (`esc_foe.c`) | 0 长度包结束分支 (`FOE_fclose` 返回值被忽略) | **【自动三方逐行严格核验 (Q2)】** |
+| Quote `Q3` (`esc_foe.c`) | 短包结束分支 (`FOE_fclose` 严格返回值检查) | **【自动三方逐行严格核验 (Q3)】** |
+| Quote `Q4` (`esc.h`) | `pre/post_state_change_hook` 钩子函数指针声明 | **【自动三方逐行严格核验 (Q4)】** |
+| Quote `Q5` (`esc.h`) | `ESC_ALerror` 错误码设置函数原型声明 | **【自动三方逐行严格核验 (Q5)】** |
+| Quote `Q6` (`esc.c`) | `pre_state_change_hook` 调用时机与迁移码合成 | **【自动三方逐行严格核验 (Q6)】** |
+| Quote `Q7` (`esc.c`) | `BOOT_TO_INIT` 停用邮箱及赋值 `an = ESCinit` | **【自动三方逐行严格核验 (Q7)】** |
+| Quote `Q8` (`esc.c`) | `post_state_change_hook` 触发时机（停邮箱之后） | **【自动三方逐行严格核验 (Q8)】** |
+| `esc_foe.h` 文件名长度宏 | `#define FOE_FN_MAX 31` 文件名长度上限 | **【本地人工核对】** 对照本地头文件确认 |
+| `esc_foe.c` 缓冲区累加逻辑 | 接收缓冲区满调用 `write_function` 及地址累加 | **【本地人工核对】** 对照本地源文件确认 |
+| `esc_foe.c` 文件关闭余量逻辑 | `FOE_fclose` 关闭文件时写入剩余缓冲区 | **【本地人工核对】** 对照本地源文件确认 |
+| `esc.c` Bootstrap 邮箱启动分支 | `INIT_TO_BOOT` 与 `BOOT_TO_BOOT` 分支启动 Bootstrap 邮箱 | **【本地人工核对】** 对照本地源文件确认 |
+| `esc.c` 非 INIT 切入 BOOT 分支 | 非 INIT 状态切入 BOOT 直接报错设置 | **【本地人工核对】** 对照本地源文件确认 |
 
 ### 6.2 Microchip LAN9252 数据手册引用 (`lan9252.txt`)
 
@@ -255,36 +255,40 @@ void ESC_ALerror (uint16_t errornumber);
 - 官方来源: Microchip 官网 `https://ww1.microchip.com/downloads/en/DeviceDoc/00001909A.pdf`
 - 本地下载文件: `/tmp/vendor_docs/00001909A.pdf` (SHA-256: `f9b73097c21a1ad5e9b1a23ba10002c6bbeb7836422376c646e84313294e96c6`)
 - 文本转换文件: `/tmp/vendor_docs/lan9252.txt` (40,871 行, SHA-256: `e9839ad1bbd0ee4fe725584b0d2fa8fd545693a6f974ff4f9e193f698790b2e1`)
-- 核验比对说明：本表对照 Microchip 官方原版 DS00001909A PDF 及其文本转换文件进行核验。经逐项比对，技术内容、寄存器名与位定义与官方原版完全一致；关于历史文档中的行号与当前转换文本行号差异，因缺乏确凿转换版本记录，成因未作主观推测，下表客观对比各项出处（不假定同号即正确）。
+- 核验比对说明：本表对照 Microchip 官方原版 DS00001909A PDF 及其文本转换文件进行核验，明确区分 PDF 阅读器物理页码与手册底部印刷页码。经逐项比对，技术内容、寄存器名与位定义与官方原版完全一致；关于历史文档中的行号与当前转换文本行号差异，因缺乏确凿转换版本记录，成因未作主观推测，下表客观对比各项出处（不假定同号即正确）。
 
-| 官方章节 (Section) | 官方页码 (Page) | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) |
-| :--- | :--- | :--- | :--- | :--- |
-| Table 6-1 | Page 48 | `EEPROM Loader Run` | 第 4718 行 | 第 4758 行 |
-| Section 6.2.1.2 | Page 49 | `Driving the RST# input pin low initiates a chip-level reset.` | 第 4869 行 | 第 4874, 4875 行 |
-| Section 12.8 (Note 11) | Page 201 | `Note 11: The default value of this field can be configured via EEPROM.` | 第 31430 行 | 第 31434 行 |
-| Section 12.14.49 | Page 260 | `12.14.49 EEPROM CONTROL/STATUS REGISTER` | 第 33483 行 | 第 33481, 33485 行 |
-| Section 12.14.49 (Bit 15) | Page 260 | `Busy` | 第 33506 行 | 第 33496, 33498 行 |
-| Section 12.14.49 (Bit 14) | Page 260 | `Error Write Enable` | 第 33518 行 | 第 33504 行 |
-| Section 12.14.49 (Bit 13) | Page 260 | `Error Acknowledge/Command` | 第 33531 行 | 第 33518 行 |
-| Section 12.14.49 (Bit 12) | Page 261 | `EEPROM Loading Status` | 第 33550 行 | 第 33532 行 |
-| Section 12.14.49 (Bit 11) | Page 261 | `Checksum Error in ESC Configuration Area` | 第 33563 行 | 第 33544 行 |
-| Section 12.14.49 (Bits 10:8) | Page 261 | `Command Register` (Write 010, Reload 100) | 第 33593-33599 行 | 第 33568, 33574, 33575 行 |
-| Section 12.14.50 | Page 262 | `12.14.50 EEPROM ADDRESS REGISTER` | 第 33698 行 | 第 33698, 33702, 33717 行 |
-| Section 12.14.51 | Page 263 | `12.14.51 EEPROM DATA REGISTER` | 第 33751 行 | 第 33744, 33748, 33769 行 |
-| Section 12.14.51 (Note 27) | Page 265 | `Note 27: The default value of this field can be configured via EEPROM.` | 第 33978 行 | 第 33980 行 |
+| 官方章节 (Section) | PDF 物理页 | 底部印刷页 | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Table 6-1 | Page 38 | Page 38 | `EEPROM Loader Run` | 第 4718 行 | 第 4758 行 |
+| Section 6.2.1.2 | Page 39 | Page 39 | `Driving the RST# input pin low initiates a chip-level reset.` | 第 4869 行 | 第 4874, 4875 行 |
+| Section 12.8 (Note 11) | Page 243 | Page 243 | `Note 11: The default value of this field can be configured via EEPROM.` | 第 31430 行 | 第 31434 行 |
+| Section 12.14.49 | Page 261 | Page 261 | `12.14.49 EEPROM CONTROL/STATUS REGISTER` | 第 33483 行 | 第 33481, 33485 行 |
+| Section 12.14.49 (Bit 15) | Page 261 | Page 261 | `Busy` | 第 33506 行 | 第 33496, 33498 行 |
+| Section 12.14.49 (Bit 14) | Page 261 | Page 261 | `Error Write Enable` | 第 33518 行 | 第 33504 行 |
+| Section 12.14.49 (Bit 13) | Page 261 | Page 261 | `Error Acknowledge/Command` | 第 33531 行 | 第 33518 行 |
+| Section 12.14.49 (Bit 12) | Page 261 | Page 261 | `EEPROM Loading Status` | 第 33550 行 | 第 33532 行 |
+| Section 12.14.49 (Bit 11) | Page 261 | Page 261 | `Checksum Error in ESC Configuration Area` | 第 33563 行 | 第 33544 行 |
+| Section 12.14.49 (Bits 10:8) | Page 262 | Page 262 | `Command Register` (Write 010, Reload 100) | 第 33593-33599 行 | 第 33568, 33574, 33575 行 |
+| Section 12.14.50 | Page 263 | Page 263 | `12.14.50 EEPROM ADDRESS REGISTER` | 第 33698 行 | 第 33698, 33702, 33717 行 |
+| Section 12.14.51 | Page 263 | Page 263 | `12.14.51 EEPROM DATA REGISTER` | 第 33751 行 | 第 33744, 33748, 33769 行 |
+| Section 12.14.51 (Note 27) | Page 265 | Page 265 | `Note 27: The default value of this field can be configured via EEPROM.` | 第 33978 行 | 第 33980 行 |
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
 
 **官方文档获取实况说明**：
-- 官方下载路径测试: `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i10.pdf`
-- 抓取实测结果: 虽然 HEAD 请求返回 HTTP 200，但实际 GET 请求下载时被 CloudFront 阻断并返回 HTTP 403 Forbidden（返回 CloudFront WAF 拦截页面：`403 ERROR: The request could not be satisfied. Request blocked.`）；
+- 官方路径测试 1 (v1i10): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i10.pdf`
+  - 实测结果: HTTP 403 Forbidden (CloudFront WAF 拦截页面, HTML 919 字节, 包含 "403 ERROR: The request could not be satisfied. Request blocked.")；
+- 官方路径测试 2 (v1i8): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i8.pdf`
+  - 实测结果: HTTP 404 Not Found (HTML 页面)；
+- 官方路径测试 3 (Application_Notes 目录): `https://download.beckhoff.com/download/document/Application_Notes/an_et9300_v1i10.pdf` 及 `v1i8.pdf`
+  - 实测结果: 均为 HTTP 404 Not Found；
 - 访问控制策略: Beckhoff 官方 CDN 实施了反爬与访问控制策略，禁止外部自动化脚本公开匿名下载；
 - 状态判定: 本地无源文件，未核验。严格保留为未核验状态，绝不伪造核验结论或宽泛宣称已核验。
 
-| 文档行号出处 | 章节与描述内容 | 核验状态与说明 |
+| 文档出处 | 章节与描述内容 | 核验状态与说明 |
 | :--- | :--- | :--- |
-| 第 9725 行 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无 `an_et9300.txt`，属历史记录) |
-| 第 9728 行 | 第 15 章 第 129 页 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无源文件) |
+| 历史记录行号 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无 `an_et9300.txt`，属历史记录) |
+| 历史记录行号 | 第 15 章 第 129 页 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无源文件) |
 
 ### 6.4 ETG 官方规范引用
 | 规范编号 | 引用主题 | 核验状态与说明 |

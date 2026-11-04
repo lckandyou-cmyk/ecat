@@ -64,18 +64,18 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
 * **两层结束判定机制【已确定，已核实】**：
   在从站协议栈与升级库架构中，必须明确区分两层结束判定：
   1. **底层 FoE 邮箱包级定界（SOES 内部）**：
-     - 出处依据：`soes/esc_foe.c` 第 479/493 行（当 `data_len < ESC_FOE_DATA_SIZE` 时进入尾包分支）以及第 459 行（收到 `data_len == 0` 独立结束包）；
+     - 出处依据：`soes/esc_foe.c` 短包判定逻辑（当 `data_len < ESC_FOE_DATA_SIZE` 时进入尾包分支）以及 0 长度包分支（收到 `data_len == 0` 独立结束包）；
      - 行为：SOES 在内部判定传输完成并调用 `FOE_fclose()` 刷出缓冲区余量数据。
   2. **应用回调级定界（适配层使用）**：
-     - 出处依据：`soes/esc_foe.c` 第 187-195 行，`FOE_fclose()` 内部调用 `foe_file->write_function` 刷出余量；
+     - 出处依据：`soes/esc_foe.c` 中 `FOE_fclose()` 内部调用 `foe_file->write_function` 刷出余量；
      - 判定规则：适配层以写入回调参数 **`length < foe_cfg->buffer_size`** 作为传输结束（EOF）的唯一定界依据。
-       - 常规传输时：因 SOES 仅在 `fbuffer` 攒满时才回调（`esc_foe.c` 第 158-160 行），传入长度恒等于 `foe_cfg->buffer_size`，适配层调用核心机 `on_data`；
+       - 常规传输时：因 SOES 仅在 `fbuffer` 攒满时才回调（`esc_foe.c` 缓冲区满写入逻辑），传入长度恒等于 `foe_cfg->buffer_size`，适配层调用核心机 `on_data`；
        - 传输结束时：在 `FOE_fclose()` 内部传入的长度为缓冲区余量，严格满足 `length < foe_cfg->buffer_size`（若恰好对齐则长度为 0）。
 * **`on_data` 允许 `chunk_len == 0`【已确定】**：
   - 核心语义：核心协议机显式支持 `chunk_len == 0`。当传入 `chunk_len == 0` 时，核心协议机直接将其视为传输结束定界符（EOF），并在内部自动触发完整的 `on_end` 校验与提交流程（包含补齐写入、流 CRC 比对、物理回读校验与 `finalize()` 标记有效）；
   - 适配层定界简化：适配层在 `write_function` 回调中，当 `length < foe_cfg->buffer_size` 时（无论 `length > 0` 还是 `length == 0`），均可直接调用 `ecat_foe_core_on_data`。若 `length == 0`，核心自动触发结束流程闭环；若 `length > 0`，适配层在送入尾块后亦可显式调用 `ecat_foe_core_on_end()`。
 * **0 长度包分支 `FOE_fclose` 返回值被 SOES 忽略的处理策略【已确定】**：
-  - **源码出处与事实**：查阅 `soes/esc_foe.c` 第 459-465 行：
+  - **源码出处与事实**：查阅 `soes/esc_foe.c` 0 长度包结束分支逻辑：
     ```c
     else if (data_len == 0)
     {
@@ -85,7 +85,7 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
        FOE_init ();
     }
     ```
-    在 0 长度包结束分支中，`FOE_fclose()` 的返回值（即 `write_function` 回调的返回值）被**完全忽略**，SOES 未对返回值做任何检查，直接执行第 463 行 `FOE_send_ack()` 向主站回复成功 ACK 并通过第 464 行 `FOE_init()` 重置状态机（对比短包分支第 495 行 `if ((ncopied != data_len) || FOE_fclose ())` 明确检查了返回值）。
+    在 0 长度包结束分支中，`FOE_fclose()` 的返回值（即 `write_function` 回调的返回值）被**完全忽略**，SOES 未对返回值做任何检查，直接执行 `FOE_send_ack()` 向主站回复成功 ACK 并通过 `FOE_init()` 重置状态机（对比短包分支中明确检查了返回值 `if ((ncopied != data_len) || FOE_fclose ())`）。
   - **空包路径出现条件**：独立 0 长度包只在传输总字节数（`header_length + payload_length`）**恰好等于底层 FoE 数据包单包容量（`ESC_FOE_DATA_SIZE`）的整数倍时才会出现**；这纯粹属于以太网 FoE 协议层分包规则，**与应用层配置的 `foe_cfg->buffer_size` 缓冲大小完全无关**。（注：TwinCAT 等主流主站在整倍数时实际下发 0 长度包的行为标记为 **【未核实】**）。
   - **架构决策【已确定】**：v1 架构确定**完全接受此限制，不给 SOES 打源码补丁**。
   - **安全性保证（防变砖）**：
@@ -95,10 +95,10 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
   - **缓解措施 2（从站状态机 BOOT→INIT 切换拦截报错）【已核实钩子存在、能改写目标状态并设置 AL 错误码；效果待真机验证】**：
 
     **源码事实（`esc.c`）**：
-    - 第 1129 行：`` as = (uint8_t)((ac << 4) | (as & 0x0f)); ``——将 AL Command（主站请求态）移入高 4 位，当前 AL Status（当前态）保留低 4 位，合并为迁移码。
-    - 第 1131–1134 行：`pre_state_change_hook` 在此时调用，位于 `switch(as)` **之前**。此时 `*as` 为合并后的迁移码（`BOOT_TO_INIT` 即 `0x13`，`esc.h` 第 89 行），`*an` 为当前 AL Status 值。
-    - 第 1140 行 `switch(as)` 随后执行，进入 `case BOOT_TO_INIT:` 分支（第 1191 行），执行 `ESC_stopmbx()` 并将 `an = ESCinit;`（第 1193–1194 行）——**此赋值在 `switch` 内部，会无条件覆盖 pre 钩子对 `*an` 的修改**；pre 钩子无法阻止 `switch` 内的迁移处理，也无法阻止邮箱被停止。
-    - 第 1305–1307 行：`post_state_change_hook` 在整个 `switch` 处理（含 `ESC_stopmbx()`）之后调用，此时邮箱已停。
+    - `as = (uint8_t)((ac << 4) | (as & 0x0f));`——将 AL Command（主站请求态）移入高 4 位，当前 AL Status（当前态）保留低 4 位，合并为迁移码。
+    - `pre_state_change_hook` 在此时调用，位于 `switch(as)` **之前**。此时 `*as` 为合并后的迁移码（`BOOT_TO_INIT` 即 `0x13`），`*an` 为当前 AL Status 值。
+    - `switch(as)` 随后执行，进入 `case BOOT_TO_INIT:` 分支，执行 `ESC_stopmbx()` 并将 `an = ESCinit;`——**此赋值在 `switch` 内部，会无条件覆盖 pre 钩子对 `*an` 的修改**；pre 钩子无法阻止 `switch` 内的迁移处理，也无法阻止邮箱被停止。
+    - `post_state_change_hook` 在整个 `switch` 处理（含 `ESC_stopmbx()`）之后调用，此时邮箱已停。
 
     **拦截方案（基于以上源码分析）**：
 
@@ -106,15 +106,15 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
       源码证明 `pre_state_change_hook` 在 `switch` 前调用，但 `case BOOT_TO_INIT:` 中 `an = ESCinit;` 会覆盖 pre 钩子对 `*an` 的改写，`ESC_stopmbx()` 也必然执行。**pre 钩子无法保持邮箱可用、无法阻止 `switch` 内的迁移处理**，不适合在此拦截状态切换。
 
     - **post 钩子（可改写最终结果，但邮箱已停）【待真机验证】**：
-      `post_state_change_hook` 在 `switch` 完成之后调用（第 1305 行），此时 `ESC_stopmbx()` 已执行。Hook 内修改 `*an` 与调用 `ESC_ALerror()` 的结果将在第 1321 行 `ESC_ALstatus(an)` 写入 `0x130 AL Status`。拦截步骤：
-      1. Hook 检测到 `*as == BOOT_TO_INIT`（`0x13`，`esc.h` 第 89 行）且适配层“最后提交失败”标志已置位；
-      2. 改写目标状态：`*an = ESCboot | ESCerror;`（`esc.h` 第 74 行 `ESCboot = 0x03`，第 77 行 `ESCerror = 0x10`）；
-      3. 调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE);`（`0x0014`，`esc.h` 第 111 行，`esc.c` 第 25 行），向 `0x134 AL Status Code` 写入固件无效错误码；
-      4. SOES 第 1310 行因 `an & ESCerror` 置位跳过清错，第 1321 行 `ESC_ALstatus(an)` 将错误状态写入 `0x130`；
+      `post_state_change_hook` 在 `switch` 完成之后调用，此时 `ESC_stopmbx()` 已执行。Hook 内修改 `*an` 与调用 `ESC_ALerror()` 的结果将在后续由 `ESC_ALstatus(an)` 写入 `0x130 AL Status`。拦截步骤：
+      1. Hook 检测到 `*as == BOOT_TO_INIT`（`0x13`）且适配层拦截条件满足（如“最后提交失败”或会话未正常闭环）；
+      2. 改写目标状态：`*an = ESCboot | ESCerror;`（`ESCboot = 0x03`，`ESCerror = 0x10`）；
+      3. 调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE);`（`0x0014`），向 `0x134 AL Status Code` 写入固件无效错误码；
+      4. SOES 因 `an & ESCerror` 置位跳过清错，通过 `ESC_ALstatus(an)` 将错误状态写入 `0x130`；
       5. **后果**：主站收到状态切换被拒绝，AL Status 停留在 BOOT+Error，AL Status Code 为 `0x0014`。**此时邮箱已停，主站只能看到错误码后重新走 INIT→BOOT 发起升级**（不能直接重试 WRQ）。
       6. SSC 侧 `post_state_change_hook` 等效机制标记为 **【未核实（未读到 SSC 源码）】**。
 * **栈层中止通知缺口与会话自愈机制【已确定】**：
-  - 源码出处：`soes/esc_foe.c` 第 217-239 行 `FOE_abort()` 实现。
+  - 源码出处：`soes/esc_foe.c` 中 `FOE_abort()` 函数实现。
   - 源码事实：SOES 协议栈在遭遇通信错误（如包序号错、超时、或主站下发 FoE ERR）进入 `FOE_abort` 路径时，仅发送 ERR 包并调用 `FOE_init()` 重置自身，**绝对不会调用应用层回调函数（既不调用 `write_function`，也无任何 abort 钩子）**。
   - 影响与后果：核心协议机无法实时收到 `on_abort` 通知，导致核心机产生未闭环的会话状态残留（仍处于写状态），底层目标驱动的 `drv->abort()` 也不会在协议栈中止的瞬间被调用。
   - **安全底线保证**：由于架构上在首包擦除前已强制调用了 `drv->invalidate()`，固件区已被标记为无效状态，保障在 Bootloader 前置校验完备且存储介质掉电不损坏标记的前提下，防止误引导半途损坏的固件。
@@ -123,7 +123,7 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
     2. **状态感知兜底规则（尽力保证）**：若适配层或 Bootloader 主循环能够感知到从站离开了 BOOT 状态（例如监听到 AL Control 离开 BOOT 或总线复位），应主动显式调用 `ecat_foe_core_on_abort()`，通知核心机清理残留会话。
 * **回调返回值语义【已确定，已核实】**：
   - 规范约定：回调函数（`write_function`）返回 `0` 表示成功；返回**任意非零值**表示失败；
-  - 源码事实：查阅 `soes/esc_foe.c` 第 160 行与第 165 行（`failed = foe_file->write_function(...); if (failed) ...`），以及第 474 行（`if (!ncopied) FOE_abort(FOE_ERR_PROGERROR);`）。SOES 仅检查返回值是否非零，不解析具体错误码数值。
+  - 源码事实：查阅 `soes/esc_foe.c` 中写入回调返回值检查与 `FOE_abort` 错误处理逻辑。SOES 仅检查返回值是否非零，不解析具体错误码数值。
 * **SOES 与核心机内存缓冲约束【已确定】**：
   1. **配置参数获取**：SOES 适配层必须获取当前工程配置的 `foe_cfg->buffer_size`，核心接口保持不变；
   2. **整倍数对齐约束**：SOES 的 `foe_cfg->buffer_size` **必须配置为各已启用目标 `write_unit` 的公倍数**（如片内 Flash 为 8 字节、SPI Flash 为 256 字节，则 `buffer_size` 须为 256 整数倍，如 512 或 1024 字节）；
@@ -150,9 +150,9 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
 
 #### 1. 切换握手核心原则【已确定】
 * **禁止通用库与 Bootloader 直接操作 ESC AL Status**：
-  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，lan9252.txt 第 31015 行）时，**绝对不向 ESC AL Status 寄存器 (`0130h-0131h`) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
+  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，见 LAN9252 手册 Section 12.14.1）时，**绝对不向 ESC AL Status 寄存器 (`0130h-0131h`) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
 * **由协议栈自行接管并确认**：
-  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（lan9252.txt 第 31109 行）完成握手响应。通用升级库核心与用户驱动**绝对不直接写 ESC 0130h 寄存器**。
+  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（见 LAN9252 手册 Section 12.14.2）完成握手响应。通用升级库核心与用户驱动**绝对不直接写 ESC 0130h 寄存器**。
 * **待验证与未核实事项**：
   - MCU 硬件复位后，ESC 内部寄存器与邮箱 SM（SyncManager）配置是否能够完好保留、从站协议栈启动后能否无缝接上当前待处理的 BOOT 请求标为 **【待验证】**。
   - SSC 协议栈在未确认状态下重启接管的具体行为标为 **【未核实（未读到 SSC 源码）】**。
@@ -344,31 +344,31 @@ sequenceDiagram
    在流式接收过程中，核心机以回调块为粒度持续检测累计接收偏移；当某一次回调数据使得 `rx_offset + block_len > Expected_Total` 时，**核心机立即整块拒绝，不再写入任何物理数据，并直接返回错误触发中止熔断**。
 6. **【待验证】Bootloader 启动时主动比对 0120h 与 0130h**：
    - **问题机理**：APP 在检测到 `INIT -> BOOT` 请求时通常会读取 AL Control 寄存器（`0120h`）。
-   - **协议栈源码出处**：查阅 SOES 源码 `/tmp/soes_src/soes/esc.c` 第 1095-1105 行，`ESC_state()` 中通过检查第 1100 行原文 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h 寄存器 Bit 0）来发现是否有待处理的状态转换请求；若该事件位未置位，函数直接在第 1109 行原文 `return;` 退出，根本不会主动读取 `0120h`。
-   - **事件清除条件出处**：LAN9252 手册关于 AL Event Request 寄存器（0220h）的 AL Control 事件位及清除条件，标记为 **【未核实（本地未读到 lan9252.txt 对应小节原文）】**。
+   - **协议栈源码出处**：查阅 SOES 源码 `esc.c` 中 `ESC_state()` 函数实现，通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h 寄存器 Bit 0）来发现是否有待处理的状态转换请求；若该事件位未置位，函数直接 `return;` 退出，根本不会主动读取 `0120h`。
+   - **事件清除条件出处**：LAN9252 手册关于 AL Event Request 寄存器（0220h）的 AL Control 事件位及清除条件，标记为 **【未核实（本地未读到对应小节原文）】**。
    - **应对规则【待验证】**：若 APP 先前读取 0120h 导致 0220h 事件位已被清除，新启动的从站协议栈轮询时将无法感知到待决请求，状态机将永远卡死在 INIT 无法进入 BOOT。因此 Bootloader 内部启动协议栈时，**协议栈或适配代码必须在初始化完成后主动读取 0120h 并与 0130h 比对**，若发现 `0120h == 0x0003` 且 `0130h != 0x0003`，必须由协议栈强制主动触发向 BOOT 的状态转换处理。
 7. **【建议，待验证】升级成功后的重启走暖切换（专用标志值）**：
-   - **时机判定【已确定，待真机验证】**：固件写入与校验成功后，由主站发起从 BOOT 到 INIT 的状态转换请求（`BOOT -> INIT`，依据 Infineon README 第 410-412 行）。
+   - **时机判定【已确定，待真机验证】**：固件写入与校验成功后，由主站发起从 BOOT 到 INIT 的状态转换请求（`BOOT -> INIT`，依据 Infineon 官方范例工程说明）。
    - **暖切换重启规则【建议，待验证】**：Bootloader 捕获到切回 INIT 状态后，建议在 Retention RAM 中写入专用的“固件升级成功就绪”魔数（如 `0x55504752U`，即 ASCII `'UPGR'`，及其取反码 `0xAAAFB8ADU`），调用 `NVIC_SystemReset()` 软复位系统进入 APP，**全程不拉低 ESC 复位 GPIO**。
    - **理由与冷启动代价**：若执行冷启动硬件复位 ESC，ESC 内部 PHY 将被迫掉电重启导致以太网链路掉线（Link Down），TwinCAT 主站会立刻报通信中断或从站拓扑丢失；而走暖切换可保持 ESC 供电与链路全程 Link Up，主站能无缝检测到从站重新在 INIT 态就绪，避免网络抖动。
 8. **【已确定】新会话清理规则与栈层中止通知缺口自愈**：
-   - **通知缺口成因**：查阅 SOES 源码 `esc_foe.c` 第 217-239 行，`FOE_abort()` 处理错误时直接重置协议栈并向主站回 ERR 包，绝不调用任何应用层写入钩子。因此从站核心协议机无法收到栈层主动下发的 `on_abort` 事件；
+   - **通知缺口成因**：查阅 SOES 源码 `esc_foe.c` 中 `FOE_abort()` 函数实现，处理错误时直接重置协议栈并向主站回 ERR 包，绝不调用任何应用层写入钩子。因此从站核心协议机无法收到栈层主动下发的 `on_abort` 事件；
    - **安全底线保证**：虽然核心机状态机产生残留，但由于首包解析通过后已提前调用了 `drv->invalidate()`，固件区已处于无效标记保护中，即使异常中断也不会变砖；
    - **核心自愈动作**：核心协议机在每次 `ecat_foe_core_on_wrq` 入口处强制执行清理检查：若发现上一次会话仍处于未闭环残留状态（如写状态），立即主动调用当前驱动的 `drv->abort()` 释放资源，并将核心上下文完整重置；同时，若适配层或主循环能够感知到从站退出 BOOT 状态，亦应主动调用 `ecat_foe_core_on_abort()` 提前释放驱动。
 
 ### 3.2 完整 FoE 错误码映射表与 SOES 协议栈限制
 
-本库定义的标准错误码严格取自 EtherCAT 规范（SOES 源码 `soes/esc.h` 第 262-274 行）。核心机内部完整保留细分错误枚举供本地诊断日志使用。在与原生 SOES 协议栈对接时，已确定采纳**候选 A：接受原生 SOES 错误码下发限制，不要求用户给 SOES 打补丁**：
+本库定义的标准错误码严格取自 EtherCAT 规范（依据 `soes/esc.h` 标准错误码定义）。核心机内部完整保留细分错误枚举供本地诊断日志使用。在与原生 SOES 协议栈对接时，已确定采纳**候选 A：接受原生 SOES 错误码下发限制，不要求用户给 SOES 打补丁**：
 
-| 错误码常量 (soes/esc.h) | 数值 | 出处行号 | 本库理论触发场景与失败原因 | SOES 适配层实际回给主站 |
+| 错误码常量 (`soes/esc.h`) | 数值 | 错误定义类别 | 本库理论触发场景与失败原因 | SOES 适配层实际回给主站 |
 | :--- | :--- | :--- | :--- | :--- |
-| `FOE_ERR_NOTFOUND` | `0x8001` | 第 263 行 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | `0x8001` (WRQ 阶段由 SOES 正常透传) |
-| `FOE_ERR_ACCESS` | `0x8002` | 第 264 行 | 收到 FoE RRQ 读请求（本库不支持读操作）；首包文件头与本地 Hardware ID 不符；本地硬件版本不在 `[hw_ver_min, hw_ver_max]` 区间；文件名与文件头字段交叉比对不一致。 | 数据阶段收敛为 `0x800B` |
-| `FOE_ERR_DISKFULL` | `0x8003` | 第 265 行 | `payload_length` 超过本地静态配置的分区容量上限 (`ECAT_FOE_xxx_MAX_SIZE`)；或回调块累加超过 64 位期望总长（多收溢出即时熔断）。 | `0x800B` (数据阶段收敛) |
-| `FOE_ERR_ILLEGAL` | `0x8004` | 第 266 行 | 文件名格式不对（无法逆向切分、非 .efw 后缀或版本格式错误）；魔数错误 (`magic != 0x57464345`)；格式版本不支持 (`format_version != 1`)；头部长度非法（<64、>本地上限或非 4 倍数）；保留标志位非零 (`flags != 0`)；`reserved` 区非全 0；版本倒置 (`hw_ver_min > hw_ver_max` 或 `min_allow_version > fw_version`)；防回滚开启时 `port_get_version_floor` 失败或触发版本倒退拦截。 | 数据阶段收敛为 `0x800B` |
-| `FOE_ERR_PACKETNO` | `0x8005` | 第 267 行 | FoE 数据包包号错乱或丢包（由协议栈底层检出）。 | `0x8005` (协议栈底层回复) |
-| `FOE_ERR_PROGERROR` | `0x800B` | 第 273 行 | 目标驱动硬件操作失败（`init`、`erase_to`、`write`、`read`、`finalize` 返回错误）；主站传输超时；传输中途物理断开。 | `0x800B` (原生支持) |
-| `FOE_ERR_CHECKSUM` | `0x800C` | 第 274 行 | `header_crc32` 校验不匹配；流 Payload CRC32 不匹配；物理回读比对 CRC32 不匹配。 | `0x800B` (数据阶段收敛) |
+| `FOE_ERR_NOTFOUND` | `0x8001` | 文件不存在/未找到 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | `0x8001` (WRQ 阶段由 SOES 正常透传) |
+| `FOE_ERR_ACCESS` | `0x8002` | 访问被拒绝/权限不足 | 收到 FoE RRQ 读请求（本库不支持读操作）；首包文件头与本地 Hardware ID 不符；本地硬件版本不在 `[hw_ver_min, hw_ver_max]` 区间；文件名与文件头字段交叉比对不一致。 | 数据阶段收敛为 `0x800B` |
+| `FOE_ERR_DISKFULL` | `0x8003` | 介质已满/容量溢出 | `payload_length` 超过本地静态配置的分区容量上限 (`ECAT_FOE_xxx_MAX_SIZE`)；或回调块累加超过 64 位期望总长（多收溢出即时熔断）。 | `0x800B` (数据阶段收敛) |
+| `FOE_ERR_ILLEGAL` | `0x8004` | 非法报文/参数格式错误 | 文件名格式不对（无法逆向切分、非 .efw 后缀或版本格式错误）；魔数错误 (`magic != 0x57464345`)；格式版本不支持 (`format_version != 1`)；头部长度非法（<64、>本地上限或非 4 倍数）；保留标志位非零 (`flags != 0`)；`reserved` 区非全 0；版本倒置 (`hw_ver_min > hw_ver_max` 或 `min_allow_version > fw_version`)；防回滚开启时 `port_get_version_floor` 失败或触发版本倒退拦截。 | 数据阶段收敛为 `0x800B` |
+| `FOE_ERR_PACKETNO` | `0x8005` | 数据包包号错误 | FoE 数据包包号错乱或丢包（由协议栈底层检出）。 | `0x8005` (协议栈底层回复) |
+| `FOE_ERR_PROGERROR` | `0x800B` | 介质编程/校验失败 | 目标驱动硬件操作失败（`init`、`erase_to`、`write`、`read`、`finalize` 返回错误）；主站传输超时；传输中途物理断开。 | `0x800B` (原生支持) |
+| `FOE_ERR_CHECKSUM` | `0x800C` | 校验和/CRC 不匹配 | `header_crc32` 校验不匹配；流 Payload CRC32 不匹配；物理回读比对 CRC32 不匹配。 | `0x800B` (数据阶段收敛) |
 
 * **防回滚持久化错误处理与时序规则【已确定】**：
   1. **防回滚开启时获取失败**：若 `port_get_version_floor` 返回非零，核心机在阶段 3 直接拒绝升级（回复错误，驱动不调用 `init`/`erase_to`）；
@@ -376,16 +376,16 @@ sequenceDiagram
   3. **持久化失败后果**：若 `finalize()` 已成功而 `port_set_version_floor` 返回非零，核心机向主站返回错误，但**固件保持物理有效状态，绝对不调用 `abort()`**（因为固件实体与元数据已写入且校验通过，固件可用）。
 
 > **SOES 协议栈限制依据【已核实】**：
-> 查阅 SOES 源码 `/tmp/soes_src/soes/esc_foe.c` 第 474-499 行，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`（第 477、485、498 行）。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
+> 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
 >
 > **0 长度包分支返回值忽略限制与拦截策略【已确定】**：
-> 查阅 SOES 源码 `esc_foe.c` 第 459-465 行，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），从站无法通过 FoE 回调向主站回复 `0x800B`。v1 架构确定接受此限制，依靠 `invalidate()` 保证不引导破损固件，并通过打包端末尾填充避开空包，以及在适配层通过 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`（详见第 1.2 节）。
+> 查阅 SOES 源码 `esc_foe.c` 0 长度包分支，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），从站无法通过 FoE 回调向主站回复 `0x800B`。v1 架构确定接受此限制，依靠 `invalidate()` 保证不引导破损固件，并通过打包端末尾填充避开空包，以及在适配层通过 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`（详见第 1.2 节）。
 
 ### 3.3 FOE_OP_BUSY 机制与阻塞模型语境说明
 
-* **出处定义**：`soes/esc.h` 第 281 行定义了 `#define FOE_OP_BUSY 6`。
+* **出处定义**：`soes/esc.h` 宏定义 `#define FOE_OP_BUSY 6`。
 * **协议栈现状说明**：
-  - **SOES【已核实】**：查阅 SOES 源码 `soes/esc_foe.c` 第 510-520 行，函数 `static void FOE_busy ()` 仅在使能了 `FOE_READ_SUPPORTED` 且状态处于 `FOE_WAIT_FOR_ACK`（即从站响应读请求等待主站 ACK）时调用；在写请求（WRQ）与数据包接收路径中，官方源码未内建从站主动发送 BUSY 的现成接口。SOES 写入侧目前**完全没有从站写 BUSY 机制**。
+  - **SOES【已核实】**：查阅 SOES 源码 `esc_foe.c`，函数 `static void FOE_busy ()` 仅在使能了 `FOE_READ_SUPPORTED` 且状态处于 `FOE_WAIT_FOR_ACK`（即从站响应读请求等待主站 ACK）时调用；在写请求（WRQ）与数据包接收路径中，官方源码未内建从站主动发送 BUSY 的现成接口。SOES 写入侧目前**完全没有从站写 BUSY 机制**。
   - **SSC【未核实】**：SSC 协议栈写入侧是否存在从站发 BUSY 机制标记为 **【未核实（未读到 SSC 源码）】**。
 * **架构语境澄清【已确定】**：
   “交还控制权服务协议栈、发送 FoE BUSY 报文拖住主站”的运行机制，**仅在适配层或协议栈支持延迟/异步处理时可用**；在原生 SOES 协议栈下，该机制完全不可用，从站必须遵循纯同步阻塞模型，单次回调最长耗时必须依赖 `erase_to` 压制在主站单包超时阈值之内。
@@ -546,39 +546,39 @@ typedef struct ecat_foe_target_driver {
 
 #### 2. MCU 通过 PDI 访问 SII EEPROM 的机制（依据 LAN9252 手册核实）
 * **0500h 小节**：
-  - 出处：`lan9252.txt` 第 33362 行 `12.14.47 EEPROM CONFIGURATION REGISTER`，偏移第 33366 行 `0500h`；
-  - Bit 0 原文（第 33409 行）：`PDI EEPROM Control`；第 33411 行原文：`1: Yes (PDI has EEPROM control)`。
+  - 出处：LAN9252 手册 `12.14.47 EEPROM CONFIGURATION REGISTER`（偏移 `0500h`）；
+  - Bit 0 原文：`PDI EEPROM Control`；原文说明：`1: Yes (PDI has EEPROM control)`。
 * **0501h 小节**：
-  - 出处：`lan9252.txt` 第 33431 行 `12.14.48 EEPROM PDI ACCESS STATE REGISTER`，偏移第 33435 行 `0501h`；
-  - Bit 0 原文（第 33454 行）：`Access to EEPROM`。
+  - 出处：LAN9252 手册 `12.14.48 EEPROM PDI ACCESS STATE REGISTER`（偏移 `0501h`）；
+  - Bit 0 原文：`Access to EEPROM`。
 * **PDI 控制 EEPROM 规则**：
-  - 出处：`lan9252.txt` 第 33465-33467 行（亦见第 33421-33423 行）；
-  - 原文（第 33467 行）：`Otherwise, PDI controls the EEPROM interface.`。
+  - 出处：LAN9252 手册 `12.14.48` 节规则说明；
+  - 原文：`Otherwise, PDI controls the EEPROM interface.`。
 * **0502h-0503h 小节**：
-  - 出处：`lan9252.txt` 第 33481 行 `12.14.49 EEPROM CONTROL/STATUS REGISTER`，偏移第 33485 行 `0502h-0503h`；
-  - Bit 15 原文（第 33496 行）：`Busy`；第 33498 行原文：`1: EEPROM interface is busy`；
-  - Bit 14 原文（第 33504 行）：`Error Write Enable`；
-  - Bit 13 原文（第 33518 行）：`Error Acknowledge/Command`；
-  - Bit 12 原文（第 33532 行）：`EEPROM Loading Status`；
-  - Bit 11 原文（第 33544 行）：`Checksum Error in ESC Configuration Area`；
-  - Bits 10:8 命令原文（第 33568 行）：`Command Register`；第 33574 行原文：`010: Write`；第 33575 行原文：`100: Reload`。
+  - 出处：LAN9252 手册 `12.14.49 EEPROM CONTROL/STATUS REGISTER`（偏移 `0502h-0503h`）；
+  - Bit 15 原文：`Busy`；原文说明：`1: EEPROM interface is busy`；
+  - Bit 14 原文：`Error Write Enable`；
+  - Bit 13 原文：`Error Acknowledge/Command`；
+  - Bit 12 原文：`EEPROM Loading Status`；
+  - Bit 11 原文：`Checksum Error in ESC Configuration Area`；
+  - Bits 10:8 命令原文：`Command Register`；说明：`010: Write`；`100: Reload`。
 * **0504h-0507h 小节**：
-  - 出处：`lan9252.txt` 第 33698 行 `12.14.50 EEPROM ADDRESS REGISTER`，偏移第 33702 行 `0504h-0507h`；
-  - 寻址单位原文（第 33717 行）：`Bit 0: First word (16-bit)`。
+  - 出处：LAN9252 手册 `12.14.50 EEPROM ADDRESS REGISTER`（偏移 `0504h-0507h`）；
+  - 寻址单位原文：`Bit 0: First word (16-bit)`。
 * **0508h-050Bh 小节**：
-  - 出处：`lan9252.txt` 第 33744 行 `12.14.51 EEPROM DATA REGISTER`，偏移第 33748 行 `0508h-050Bh`；
-  - 数据读写原文（第 33769 行）：`EEPROM Read/Write Data`。
+  - 出处：LAN9252 手册 `12.14.51 EEPROM DATA REGISTER`（偏移 `0508h-050Bh`）；
+  - 数据读写原文：`EEPROM Read/Write Data`。
 
 #### 3. SII 校验字的位置与算法【未核实】
 * **核实状态**：**【未核实】**。
 * **核实依据说明**：
-  LAN9252 官方手册第 33544 行定义了状态位 `Checksum Error in ESC Configuration Area`，但**手册全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法**。该项标记为【未核实】，待查实 ETG 官方规范后补充。
+  LAN9252 官方手册 Section 12.14.49 定义了状态位 `Checksum Error in ESC Configuration Area`，但**手册全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法**。该项标记为【未核实】，待查实 ETG 官方规范后补充。
 
 #### 4. 新内容何时生效（依据 LAN9252 手册核实）
-* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（lan9252.txt 第 33575 行），可触发 ESC 重新从 EEPROM 读取数据。
+* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 Section 12.14.49），可触发 ESC 重新从 EEPROM 读取数据。
 * **特定功能限制（仅限 Enhanced Link 与 MI Link）**：
-  - 依据 Note 11（lan9252.txt 第 31434 行），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection，第 31433 行）；
-  - 依据 Note 27（lan9252.txt 第 33980 行），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection，第 33979 行）；
+  - 依据 Note 11（LAN9252 手册 Section 12.8 Note 11），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
+  - 依据 Note 27（LAN9252 手册 Section 12.14.51 Note 27），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
   - 手册原文仅明确指出上述两项链路检测特性在手动 reload 时不会生效，**不能外推为全部寄存器或通用 Reload 规则**。
 
 #### 5. 写入 SII 前的防御校验项【已确定】
@@ -618,9 +618,9 @@ typedef struct ecat_foe_target_driver {
     - `0x0004` -> `EEPROM`（原 PARAM）
 11. **【已确定，已核实】SOES 适配层传输结束判定机制**：
     SOES 适配层以回调数据长度 `length < foe_cfg->buffer_size` 作为传输结束（EOF）的唯一定界标准：
-    - 依据 1（正常传输块）：`esc_foe.c` 第 158-163 行，缓冲填满才调用写入钩子，原文为第 158 行 `if(FOEvar.fbufposition >= foe_cfg->buffer_size)`，第 160 行 `failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，传入长度恒等于 `buffer_size`；
-    - 依据 2（最终结束块）：`esc_foe.c` 第 187-195 行，在 `FOE_fclose()` 关闭时调用写入钩子，原文为第 193 行 `failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，此时传入长度为缓冲区余量，严格满足 `length < foe_cfg->buffer_size`（若恰好对齐则余量为 0）；
-    - 依据 3（失败处理）：回调函数返回非零表示失败（第 160 行与第 193 行均将返回值赋予 `failed`，非零即中止传输）。
+    - 依据 1（正常传输块）：`esc_foe.c` 缓冲填满才调用写入钩子，原文为 `if(FOEvar.fbufposition >= foe_cfg->buffer_size)`，`failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，传入长度恒等于 `buffer_size`；
+    - 依据 2（最终结束块）：`esc_foe.c` 在 `FOE_fclose()` 关闭时调用写入钩子，原文为 `failed = foe_file->write_function (foe_file, foe_cfg->fbuffer, FOEvar.fbufposition);`，此时传入长度为缓冲区余量，严格满足 `length < foe_cfg->buffer_size`（若恰好对齐则余量为 0）；
+    - 依据 3（失败处理）：回调函数返回非零表示失败（均将返回值赋予 `failed`，非零即中止传输）。
 12. **【已确定，已核实】SOES 错误码处理策略**：
     选定候选 A：接受原生 SOES 数据阶段只回 `FOE_ERR_PROGERROR` (`0x800B`) 的行为，不要求用户给 SOES 打补丁。核心内部保留细分错误枚举供本地诊断，适配层在数据阶段统一返回非零由 SOES 下发 `0x800B`。
 13. **【已确定】物理回读校验（Readback）执行时机**：
