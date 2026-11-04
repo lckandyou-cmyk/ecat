@@ -798,6 +798,46 @@ def test_fixture_suite():
             f.write("\n```mermaid\nsequenceDiagram\nBL->>Stack: 触发 FOE_abort(0x800B)\n```\n")
         assert_case("Case 33.5: 权威文档 mermaid 图表块中出现 FOE_abort 放行", 0, "三方引文自动化核验通过", manifest, repo, soes)
 
+    # Case 34: 波浪线围栏 (~~~) 支持与路径包含 tools 子串回归测试
+    # 34.1: docs/x.md 波浪线围栏代码块 (~~~c) 中含未登记 ESCvar 拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        x_doc = os.path.join(repo, "docs/x.md")
+        with open(x_doc, "w", encoding="utf-8") as f:
+            f.write("~~~c\nESCvar.ALerror = 1;\n~~~\n")
+        assert_case("Case 34.1: docs/x.md 波浪线代码块未登记 ESCvar 拦截", 1, "发现未登记波浪线代码块(~~~)中的 SOES 符号引用", manifest, repo, soes)
+
+    # 34.2: docs/toolsmith/y.md 路径含 tools 子串未登记代码块拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        y_dir = os.path.join(repo, "docs/toolsmith")
+        os.makedirs(y_dir, exist_ok=True)
+        y_doc = os.path.join(y_dir, "y.md")
+        with open(y_doc, "w", encoding="utf-8") as f:
+            f.write("```c\nESCvar.ALerror = 1;\n```\n")
+        assert_case("Case 34.2: docs/toolsmith/y.md 路径含 tools 拦截", 1, "发现未登记围栏代码块中的 SOES 符号引用", manifest, repo, soes)
+
+    # 34.3: 权威文档波浪线围栏 (~~~c) 位于已登记 Quote 块内通过 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        doc_text = "<!-- quote-begin: TEST_Q1 -->\n~~~c\n"
+        for line in SAMPLE_SNIPPET:
+            doc_text += line + "\n"
+        doc_text += "~~~\n<!-- quote-end: TEST_Q1 -->\n"
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(doc_text)
+        assert_case("Case 34.3: 权威文档波浪线围栏登记 Quote 块通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
+    # 34.4: 顶层 tools/ 目录文档中的代码块放行 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        tool_doc = os.path.join(repo, "tools/my_tool.md")
+        os.makedirs(os.path.dirname(tool_doc), exist_ok=True)
+        with open(tool_doc, "w", encoding="utf-8") as f:
+            f.write("```c\nESCvar.ALerror = 1;\n```\n")
+        assert_case("Case 34.4: 顶层 tools/ 目录代码块放行", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")
     if test_passed == total_tests:

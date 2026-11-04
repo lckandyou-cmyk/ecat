@@ -118,7 +118,9 @@ def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, An
     tags_found: Dict[str, Dict[str, Any]] = {}
 
     for root, dirs, files in os.walk(repo_root):
-        if ".git" in root or ".gemini" in root:
+        rel_root = os.path.relpath(root, repo_root).replace("\\", "/")
+        parts = [p for p in os.path.normpath(rel_root).split("/") if p and p != "."]
+        if any(p in {".git", ".gemini"} for p in parts):
             continue
         for file in sorted(files):
             if not file.endswith(".md"):
@@ -166,18 +168,30 @@ def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, An
                     if active_qid != qid:
                         return False, {}, f"文档 {doc_rel} 第 {lidx} 行标记不匹配: 期望 quote-end: {active_qid}，实际为 {qid}"
 
-                    # 提取 fenced block 内部代码行
+                    # 提取 fenced block 内部代码行 (支持 ``` 与 ~~~ 围栏)
                     extracted: List[str] = []
-                    fence_count = 0
+                    in_block_fence = False
+                    block_fence_char = ""
+                    block_fence_len = 0
                     for c_line in code_buffer:
-                        if c_line.strip().startswith("```"):
-                            fence_count += 1
-                            continue
-                        if fence_count == 1:
+                        cs = c_line.strip()
+                        fm = re.match(r"^(`{3,}|~{3,})(.*)$", cs)
+                        if not in_block_fence:
+                            if fm:
+                                in_block_fence = True
+                                block_fence_char = fm.group(1)[0]
+                                block_fence_len = len(fm.group(1))
+                                continue
+                        else:
+                            if fm and fm.group(1)[0] == block_fence_char and len(fm.group(1)) >= block_fence_len and not fm.group(2).strip():
+                                in_block_fence = False
+                                block_fence_char = ""
+                                block_fence_len = 0
+                                continue
                             extracted.append(c_line)
 
-                    if fence_count < 2 or not extracted:
-                        return False, {}, f"文档 {doc_rel} 标记 '{active_qid}' 内部未包含有效的 Markdown 代码块 (```)"
+                    if not extracted:
+                        return False, {}, f"文档 {doc_rel} 标记 '{active_qid}' 内部未包含有效的 Markdown 代码块 (``` 或 ~~~)"
 
                     tags_found[active_qid] = {
                         "doc_rel": doc_rel,
@@ -338,7 +352,9 @@ def scan_unregistered_prose_lines(
         ex_index.setdefault(key, []).append((idx, ex))
 
     for root, dirs, files in os.walk(repo_root):
-        if ".git" in root or ".gemini" in root:
+        rel_root = os.path.relpath(root, repo_root).replace("\\", "/")
+        parts = [p for p in os.path.normpath(rel_root).split("/") if p and p != "."]
+        if any(p in {".git", ".gemini"} for p in parts):
             continue
         for file in sorted(files):
             if not file.endswith(".md"):
@@ -431,7 +447,7 @@ def scan_unquoted_code_block_symbols(
     """
     检查权威规范文档 (排除 docs/archive/ 归档路径) 中围栏代码块或整行反引号代码中的 SOES 源码/符号引用。
     - 检查符号: ESCvar, ESC_*, FOE_* (匹配正则 r"\b(ESCvar|ESC_[A-Za-z0-9_]+|FOE_[A-Za-z0-9_]+)\b")
-    - 围栏代码块 (非图表类语言如 mermaid) 或整行反引号代码必须位于 Quote 块内；
+    - 围栏代码块 (支持 ``` 与 ~~~ 围栏，非图表类语言如 mermaid) 或整行反引号代码必须位于 Quote 块内；
     - 普通正文中的行内标识符 (如 "SOES 的 `FOE_fclose` 函数") 属于常规说明，予以放行；
     - docs/archive/ 历史归档文档不在此强制范围内。
     """
@@ -445,10 +461,14 @@ def scan_unquoted_code_block_symbols(
     }
 
     for root, dirs, files in os.walk(repo_root):
-        if any(k in root for k in [".git", ".gemini", "tests", "tools"]):
-            continue
         rel_root = os.path.relpath(root, repo_root).replace("\\", "/")
-        parts = os.path.normpath(rel_root).split("/")
+        parts = [p for p in os.path.normpath(rel_root).split("/") if p and p != "."]
+        if any(p in {".git", ".gemini"} for p in parts):
+            continue
+        # 排除顶层非规范目录 tests/ 与 tools/ (按路径首段判定，避免误判 docs/toolsmith 等子目录)
+        if parts and parts[0] in {"tests", "tools"}:
+            continue
+        # 排除 docs/archive/ 历史归档目录
         if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "archive":
             continue
 
@@ -468,6 +488,8 @@ def scan_unquoted_code_block_symbols(
 
             in_quote = False
             in_fence = False
+            fence_char = ""
+            fence_len = 0
             fence_lang = ""
 
             for lno, raw_line in enumerate(lines, 1):
@@ -478,14 +500,22 @@ def scan_unquoted_code_block_symbols(
                 elif s.startswith("<!-- quote-end:"):
                     in_quote = False
                     continue
-                elif s.startswith("```"):
-                    if in_fence:
-                        in_fence = False
-                        fence_lang = ""
-                    else:
+
+                fm = re.match(r"^(`{3,}|~{3,})(.*)$", s)
+                if not in_fence:
+                    if fm:
                         in_fence = True
-                        fence_lang = s[3:].strip().lower()
-                    continue
+                        fence_char = fm.group(1)[0]
+                        fence_len = len(fm.group(1))
+                        fence_lang = fm.group(2).strip().lower()
+                        continue
+                else:
+                    if fm and fm.group(1)[0] == fence_char and len(fm.group(1)) >= fence_len and not fm.group(2).strip():
+                        in_fence = False
+                        fence_char = ""
+                        fence_len = 0
+                        fence_lang = ""
+                        continue
 
                 matches = symbol_re.findall(s)
                 if not matches:
@@ -500,7 +530,7 @@ def scan_unquoted_code_block_symbols(
                     if is_code_fence or is_whole_line:
                         stats["unquoted_violations"] += 1
                         symbol_list = ", ".join(sorted(set(matches)))
-                        context_type = "围栏代码块" if is_code_fence else "整行反引号代码"
+                        context_type = "波浪线代码块(~~~)" if (is_code_fence and fence_char == "~") else ("围栏代码块" if is_code_fence else "整行反引号代码")
                         errors.append(
                             f"权威文档 {doc_rel}:{lno} 发现未登记{context_type}中的 SOES 符号引用: [{symbol_list}]\n"
                             f"  行内容: {repr(s)}\n"
