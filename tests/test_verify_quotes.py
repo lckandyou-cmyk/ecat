@@ -257,12 +257,13 @@ def test_fixture_suite():
             f.write("\n正文中引述未核验代码: `esc_foe.c:999`\n")
         assert_case("Case 13: 未登记且未豁免的正文行号引用拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:999'", manifest, repo, soes)
 
-    # Case 14: 文档正文行号引用配置了有效豁免项通过
+    # Case 14: 归档文档正文行号引用配置了有效豁免项通过
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
-        doc_path = os.path.join(repo, "docs/test_doc.md")
-        ex_line_text = "正文中引述豁免代码: `esc_foe.c:999`"
-        with open(doc_path, "a", encoding="utf-8") as f:
+        doc_path = os.path.join(repo, "docs/archive/test_doc.md")
+        os.makedirs(os.path.dirname(doc_path), exist_ok=True)
+        ex_line_text = "归档历史文档中引述豁免代码: `esc_foe.c:999`"
+        with open(doc_path, "w", encoding="utf-8") as f:
             f.write(f"\n{ex_line_text}\n")
 
         # 查找实际行号并计算哈希
@@ -278,17 +279,17 @@ def test_fixture_suite():
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
         m["prose_line_exemptions"].append({
-            "doc_path": "docs/test_doc.md",
+            "doc_path": "docs/archive/test_doc.md",
             "doc_line": doc_line_no,
             "source_file": "esc_foe.c",
             "line_reference": "999",
             "line_text_hash": line_hash,
-            "verification_status": "LOCAL_MANUAL_VERIFIED",
+            "verification_status": "HISTORICAL_RESEARCH_REPORT_ARCHIVED",
             "reason": "Test fixture exemption"
         })
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
-        assert_case("Case 14: 正文行号引用豁免通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
+        assert_case("Case 14: 归档正文行号引用豁免通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
 
     # Case 15: 豁免项包含通配符 '*' 拦截
     with tempfile.TemporaryDirectory() as td:
@@ -296,7 +297,7 @@ def test_fixture_suite():
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
         m["prose_line_exemptions"].append({
-            "doc_path": "docs/test_doc.md",
+            "doc_path": "docs/archive/test_doc.md",
             "doc_line": 10,
             "source_file": "esc_foe.c",
             "line_reference": "*",
@@ -319,7 +320,8 @@ def test_fixture_suite():
     # Case 17: 豁免行文本被修改 (line_text_hash 不匹配) 拦截
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
-        doc_path = os.path.join(repo, "docs/test_doc.md")
+        doc_path = os.path.join(repo, "docs/archive/test_doc.md")
+        os.makedirs(os.path.dirname(doc_path), exist_ok=True)
         ex_line_text = "正文中引述豁免代码: `esc_foe.c:999`"
         with open(doc_path, "a", encoding="utf-8") as f:
             f.write(f"\n{ex_line_text}\n")
@@ -336,7 +338,7 @@ def test_fixture_suite():
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
         m["prose_line_exemptions"].append({
-            "doc_path": "docs/test_doc.md",
+            "doc_path": "docs/archive/test_doc.md",
             "doc_line": doc_line_no,
             "source_file": "esc_foe.c",
             "line_reference": "999",
@@ -361,7 +363,7 @@ def test_fixture_suite():
             m = json.load(f)
         # 缺少 doc_line 和 line_text_hash
         m["prose_line_exemptions"].append({
-            "doc_path": "docs/test_doc.md",
+            "doc_path": "docs/archive/test_doc.md",
             "source_file": "esc_foe.c",
             "line_reference": "999",
             "verification_status": "LOCAL_MANUAL_VERIFIED",
@@ -460,14 +462,14 @@ def test_fixture_suite():
     # Case 23: 裸文件名豁免项被带目录同名路径引用渗透反例拦截
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
-        # 增加裸文件名豁免
+        # 增加裸文件名豁免 (归档历史文档内)
         ex_line = "正文豁免行: `fake_dir/esc.c:1155`"
         ex_hash = hashlib.sha256(ex_line.strip().encode("utf-8")).hexdigest()
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
         m["prose_line_exemptions"] = [
             {
-                "doc_path": "docs/test_doc.md",
+                "doc_path": "docs/archive/test_doc.md",
                 "doc_line": 1,
                 "source_file": "esc.c",  # 清单写裸文件名
                 "line_reference": "1155",
@@ -478,24 +480,23 @@ def test_fixture_suite():
         ]
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
-        doc_path = os.path.join(repo, "docs/test_doc.md")
-        with open(doc_path, "r", encoding="utf-8") as f:
-            old_c = f.read()
+        doc_path = os.path.join(repo, "docs/archive/test_doc.md")
+        os.makedirs(os.path.dirname(doc_path), exist_ok=True)
         with open(doc_path, "w", encoding="utf-8") as f:
-            f.write(ex_line + "\n" + old_c)
+            f.write(ex_line + "\n")
         assert_case("Case 23: 裸文件名豁免项被带目录同名路径引用渗透拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
 
     # Case 24: 带目录豁免项被裸文件名同名引用渗透反例拦截
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
-        # 增加带目录豁免
+        # 增加带目录豁免 (归档历史文档内)
         ex_line = "正文裸文件名行: `esc.c:1155`"
         ex_hash = hashlib.sha256(ex_line.strip().encode("utf-8")).hexdigest()
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
         m["prose_line_exemptions"] = [
             {
-                "doc_path": "docs/test_doc.md",
+                "doc_path": "docs/archive/test_doc.md",
                 "doc_line": 1,
                 "source_file": "soes/esc.c",  # 清单写带目录路径
                 "line_reference": "1155",
@@ -506,12 +507,104 @@ def test_fixture_suite():
         ]
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
-        doc_path = os.path.join(repo, "docs/test_doc.md")
-        with open(doc_path, "r", encoding="utf-8") as f:
-            old_c = f.read()
+        doc_path = os.path.join(repo, "docs/archive/test_doc.md")
+        os.makedirs(os.path.dirname(doc_path), exist_ok=True)
         with open(doc_path, "w", encoding="utf-8") as f:
-            f.write(ex_line + "\n" + old_c)
+            f.write(ex_line + "\n")
         assert_case("Case 24: 带目录豁免项被裸文件名同名引用渗透拦截", 1, "发现未登记的正文行号引用", manifest, repo, soes)
+
+    # Case 25: 权威文档豁免反例拦截 (禁止权威规范文档配置正文行号豁免)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        ex_line = "权威文档中行号引用: `esc_foe.c:999`"
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{ex_line}\n")
+        doc_line_no = None
+        with open(doc_path, "r", encoding="utf-8") as f:
+            for lno, line in enumerate(f, 1):
+                if ex_line in line:
+                    doc_line_no = lno
+                    break
+        assert doc_line_no is not None
+        ex_hash = hashlib.sha256(ex_line.strip().encode("utf-8")).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"].append({
+            "doc_path": "docs/test_doc.md",
+            "doc_line": doc_line_no,
+            "source_file": "esc_foe.c",
+            "line_reference": "999",
+            "line_text_hash": ex_hash,
+            "verification_status": "LOCAL_MANUAL_VERIFIED",
+            "reason": "权威文档违规豁免"
+        })
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 25: 权威文档豁免反例拦截", 1, "位于权威规范文档", manifest, repo, soes)
+
+    # Case 26: 归档豁免与统计总数一致性测试
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_a_rel = "docs/archive/report_a.md"
+        doc_b_rel = "docs/archive/report_b.md"
+        doc_a = os.path.join(repo, doc_a_rel)
+        doc_b = os.path.join(repo, doc_b_rel)
+        os.makedirs(os.path.dirname(doc_a), exist_ok=True)
+        line_a = "历史归档 A 引用: `esc_foe.c:100`"
+        line_b = "历史归档 B 引用: `esc_foe.c:200`"
+        with open(doc_a, "w", encoding="utf-8") as f:
+            f.write(line_a + "\n")
+        with open(doc_b, "w", encoding="utf-8") as f:
+            f.write(line_b + "\n")
+
+        hash_a = hashlib.sha256(line_a.strip().encode("utf-8")).hexdigest()
+        hash_b = hashlib.sha256(line_b.strip().encode("utf-8")).hexdigest()
+
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"] = [
+            {
+                "doc_path": doc_a_rel,
+                "doc_line": 1,
+                "source_file": "esc_foe.c",
+                "line_reference": "100",
+                "line_text_hash": hash_a,
+                "verification_status": "HISTORICAL_ARCHIVE_A",
+                "reason": "归档 A 豁免"
+            },
+            {
+                "doc_path": doc_b_rel,
+                "doc_line": 1,
+                "source_file": "esc_foe.c",
+                "line_reference": "200",
+                "line_text_hash": hash_b,
+                "verification_status": "HISTORICAL_ARCHIVE_B",
+                "reason": "归档 B 豁免"
+            }
+        ]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+
+        res = run_verifier(manifest, repo, soes)
+        total_tests += 1
+        expected_patterns = [
+            "权威规范文档豁免项:         0 项 (权威文档未予任何行号豁免)",
+            "归档历史文档豁免项:         2 项 (仅限 docs/archive/ 历史记录)",
+            "正文行号显式清单豁免项总数:   2 项 (实测命中: 2 项)",
+            "豁免分类统计明细 (共 2 处引用):",
+            "HISTORICAL_ARCHIVE_A",
+            "HISTORICAL_ARCHIVE_B",
+            "三方引文自动化核验通过"
+        ]
+        ok = (res.returncode == 0) and all(p in res.stdout for p in expected_patterns)
+        if ok:
+            print("  [PASS] Case 26: 归档豁免与统计总数一致性通过 (Exit code: 0)")
+            test_passed += 1
+        else:
+            print(f"  [FAIL] Case 26: 期望成功且统计要素匹配，实际 exit={res.returncode}")
+            print(f"         stdout:\n{res.stdout}")
+            print(f"         stderr:\n{res.stderr}")
 
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")

@@ -350,6 +350,14 @@ def scan_unregistered_prose_lines(
             except Exception as e:
                 errors.append(f"读取文档失败: {doc_rel} ({e})")
 
+    # 规则核验：权威规范文档 (非 docs/archive) 严格禁止使用行号豁免，源码引用必须通过 quotes 注册正式引文块
+    for idx, ex in enumerate(exemptions):
+        doc_p = os.path.normpath(ex.get("doc_path", "")).replace("\\", "/")
+        if not doc_p.startswith("docs/archive"):
+            errors.append(
+                f"豁免项 #{idx} 位于权威规范文档 '{doc_p}'：正文行号豁免仅允许用于归档历史文档 (docs/archive/)，权威文档中引用源码必须在 quotes 中注册正式 Quote 块"
+            )
+
     # 反向检查：豁免清单中的条目必须真实命中，杜绝悬垂或幽灵豁免
     for idx, ex in enumerate(exemptions):
         if idx not in matched_exemptions:
