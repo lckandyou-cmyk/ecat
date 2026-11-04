@@ -1,0 +1,64 @@
+{
+  "pdf_path": "/Users/milo/ecat-sources/00001909A.pdf",
+  "pdf_sha256": "f9b73097c21a1ad5e9b1a23ba10002c6bbeb7836422376c646e84313294e96c6",
+  "metadata": {
+    "title": "Microchip LAN9252 Datasheet DS00001909A",
+    "verified_tool": "pdftotext"
+  },
+  "quotes": [
+    {
+      "id": "PDF_Q1_RESET_TABLE_6_1",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 262,
+      "pdf_page": 38,
+      "section_number": "TABLE 6-1",
+      "section_title": "RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY",
+      "snippet": "EEPROM Loader Run"
+    },
+    {
+      "id": "PDF_Q2_RST_PIN_RESET",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 263,
+      "pdf_page": 39,
+      "section_number": "6.2.1.2",
+      "section_title": "RST# Pin Reset",
+      "snippet": "Driving the RST# input pin low initiates a chip-level reset."
+    },
+    {
+      "id": "PDF_Q3_AL_CONTROL_REG",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 264,
+      "pdf_page": 239,
+      "section_number": "12.14.20",
+      "section_title": "AL CONTROL REGISTER",
+      "snippet": "12.14.20 AL CONTROL REGISTER"
+    },
+    {
+      "id": "PDF_Q4_AL_STATUS_REG",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 265,
+      "pdf_page": 240,
+      "section_number": "12.14.21",
+      "section_title": "AL STATUS REGISTER",
+      "snippet": "12.14.21 AL STATUS REGISTER"
+    },
+    {
+      "id": "PDF_Q5_AL_STATUS_CODE_REG",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 266,
+      "pdf_page": 240,
+      "section_number": "12.14.22",
+      "section_title": "AL STATUS CODE REGISTER",
+      "snippet": "12.14.22 AL STATUS CODE REGISTER"
+    },
+    {
+      "id": "PDF_Q6_AL_EVENT_CLEAR_PDI",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "doc_line": 267,
+      "pdf_page": 253,
+      "section_number": "12.14.34",
+      "section_title": "AL EVENT REQUEST REGISTER",
+      "snippet": "This bit is cleared by reading the AL Control Register from PDI."
+    }
+  ]
+}

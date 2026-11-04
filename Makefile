@@ -13,8 +13,10 @@ TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 TEST_CORE_BIN = tests/test_runner_core
 
 SOES_DIR ?= /tmp/soes_src/soes
+PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
+PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan vectors check-quotes
+.PHONY: all clean test test-asan vectors check-quotes check-pdf-quotes
 
 all: test
 
@@ -36,11 +38,20 @@ check-quotes:
 	fi
 	@$(PYTHON) tools/verify_soes_quotes.py --soes-dir $(SOES_DIR)
 
+check-pdf-quotes:
+	@echo ">>> 执行厂商 PDF 引文与跨页章节归属严格核验 <<<"
+	@if [ ! -f "$(PDF_FILE)" ]; then \
+		echo "[FATAL] 厂商 PDF 不存在: $(PDF_FILE)"; \
+		exit 1; \
+	fi
+	@$(PYTHON) tools/verify_pdf_quotes.py --pdf-path $(PDF_FILE)
+
 test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
 	@./$(TEST_CORE_BIN)
 	@$(PYTHON) tests/test_verify_quotes.py
+	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
 test-asan:
 	$(MAKE) clean
