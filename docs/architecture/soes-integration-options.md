@@ -303,18 +303,25 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
 
-**官方文档获取与访问策略说明**：
-- ET9300 为 Beckhoff 官方从站协议栈（Slave Stack Code, SSC）开发包代码，其配套应用笔记（Application Note ET9300）面向 EtherCAT Technology Group (ETG) 会员及官方受控渠道分发；
-- Beckhoff 官方未开放公开匿名直接下载链接，官方服务对自动化脚本匿名抓取实施了访问控制；
-- 状态判定：本地无源文件，未核验。文档内不保留任何未经官方验证的猜测下载路径，严格保留为未核验状态，绝不伪造核验结论。
+**交接文档下载链接与本机实测核查说明**：
+- 交接文档官方链接 1 (v1i10): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i10.pdf`
+  - 本机实测结果: `curl -sIL --max-time 15` 返回 `HTTP/2 403 Forbidden` (CloudFront 错误页面，HTML 919 字节)；
+  - 浏览器访问实况: 浏览器匿名访问未核实 (受本地自动化脚本执行环境限制，未在真实图形浏览器中核验匿名访问情况)；
+- 交接文档官方链接 2 (v1i8): `https://download.beckhoff.com/download/document/io/ethercat-development-products/an_et9300_v1i8.pdf`
+  - 本机实测结果: `curl -sIL --max-time 15` 返回 `HTTP/2 403 Forbidden` (CloudFront 错误页面，HTML 919 字节)；
+  - 浏览器访问实况: 浏览器匿名访问未核实；
+- 状态判定: 本地无源文件，未核验。此前关于“会员受控/不开放匿名”的描述缺乏直接证据，予以更正。当前严格保留为未核验状态，绝不伪造核验结论。
 
 | 文档出处 | 章节与描述内容 | 核验状态与说明 |
 | :--- | :--- | :--- |
-| 历史记录行号 | 第 15 章 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无 `an_et9300.txt`，属历史记录) |
-| 历史记录行号 | 第 15 章 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** (Beckhoff 官方限制匿名下载，本地无源文件) |
+| 历史记录行号 | 第 15 章 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (本机 curl 报 403，浏览器匿名未核实，本地无源文件) |
+| 历史记录行号 | 第 15 章 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** (本机 curl 报 403，浏览器匿名未核实，本地无源文件) |
 
 ### 6.4 ETG 官方规范引用
 | 规范编号 | 引用主题 | 核验状态与说明 |
 | :--- | :--- | :--- |
 | `ETG.1000.6` | EtherCAT 应用层服务规范 (FoE 传输机制) | **【本地无源文件 / 未核验】** (外部标准，本地无官方 PDF) |
 | `ETG.2010` | EtherCAT 从站架构与 ID 识别要求 | **【本地无源文件 / 未核验】** (外部标准，本地无官方 PDF) |
+
+### 6.5 嵌入式 MCU 资源占用与硬件局限
+- **MCU 足迹未测**：当前代码仅在 macOS 宿主机通过 Clang 针对宿主环境构建并进行单元测试；未在嵌入式交叉编译器（如 `arm-none-eabi-gcc`）下进行目标固件编译与尺寸测量。核心机与适配层的实际 Flash 代码体积、常量占用、静态 RAM 与运行时最大调用栈深度均处于未测状态，明确标记为“MCU 足迹未测”。

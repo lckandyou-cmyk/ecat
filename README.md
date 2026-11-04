@@ -60,7 +60,8 @@
 以下事项受限于当前开发阶段，**尚未在物理硬件上完成实机测试**：
 1. **【待真机验证】MCU 片内 Flash 擦写总线冻结 (Bus Stall)**：片内 Flash 擦除时可能导致 CPU 停止响应中断或协议栈丢包，需实测确认主站超时时间与单步擦除粒度；
 2. **【待真机验证】外部低速 SPI Flash 物理全量回读耗时**：大容量固件（如 2MB~4MB FPGA 镜像）在最后一次回调中同步回读并计算 CRC32 的总耗时是否会突破 TwinCAT 单包超时阈值；
-3. **【待真机验证】真实 ESC 芯片与主站联调**：如 Beckhoff ET1100、AX58100 或 LAN9252 芯片与 TwinCAT/EtherCAT 运动控制器之间的现场升级。
+3. **【待真机验证】真实 ESC 芯片与主站联调**：如 Beckhoff ET1100、AX58100 或 LAN9252 芯片与 TwinCAT/EtherCAT 运动控制器之间的现场升级；
+4. **【待真机验证】MCU 足迹未测 (Footprint)**：代码与适配层在真实嵌入式交叉编译器（如 GCC ARM Embedded / armclang）下的实际 Flash 占用（`.text` + `.rodata`）、静态 RAM 占用（`.data` + `.bss`）以及运行时栈深度尚未经过实机测量，明确处于“MCU 足迹未测”状态。
 
 ---
 
