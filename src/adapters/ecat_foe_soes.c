@@ -24,7 +24,15 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->buffer_size = buffer_size;
     adapter->last_commit_failed = false;
     adapter->last_al_error = 0;
+    adapter->al_error_fn = NULL;
     s_active_adapter = adapter;
+}
+
+void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
+{
+    if (adapter != NULL) {
+        adapter->al_error_fn = al_error_fn;
+    }
 }
 
 int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename, size_t filename_len)
@@ -79,16 +87,19 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
     }
 
     /* 依据 SAD 1.2 缓解措施 2: 检测 BOOT -> INIT 迁移 (0x13)
-     * 时序说明：
+     * 时序与物理限制明确说明：
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
-     * 2. 若在此处改写 *an 为 BOOT|Error 并记录 AL 错误码 0x0014 (ALERR_NOVALIDFIRMWARE)，
-     *    可阻断从站进入 INIT 正常通信态；
-     * 3. 局限性说明：当前为适配桩单测验证，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
-     *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程。
+     * 2. 若在此处改写 *an 为 BOOT|Error 并调用注入的 al_error_fn(0x0014) (在真实 SOES 中对应 ESC_ALerror)，
+     *    可向 0x134 写入 AL Status Code 并阻断从站进入 INIT 正常通信态；
+     * 3. 局限性说明：当前为测试桩仿真验证，真实 SOES 源码尚未集成编译，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
+     *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
      */
     if (*as == 0x13U && adapter->last_commit_failed) {
         /* 改写目标状态为 BOOT + Error (0x03 | 0x10 = 0x13) */
         *an = 0x03U | 0x10U;
         adapter->last_al_error = 0x0014U; /* ALERR_NOVALIDFIRMWARE (0x0014) */
+        if (adapter->al_error_fn != NULL) {
+            adapter->al_error_fn(0x0014U);
+        }
     }
 }

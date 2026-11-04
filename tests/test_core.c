@@ -770,6 +770,14 @@ static void test_anti_rollback_full_behavior(void)
 }
 
 /* 17. SOES 适配层短包与 0 长度包及 post hook 状态拦截 */
+static uint16_t s_mock_al_error_val = 0;
+static int s_mock_al_error_calls = 0;
+static void mock_al_error_cb(uint16_t errornumber)
+{
+    s_mock_al_error_val = errornumber;
+    s_mock_al_error_calls++;
+}
+
 static void test_soes_adapter_short_packet_and_post_hook(void)
 {
     mock_driver_t mcu;
@@ -797,6 +805,9 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     ecat_foe_soes_init(&adapter, &core, 512);
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
 
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     efw[63] ^= 0xFF; /* 破坏 CRC */
@@ -809,24 +820,33 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, 0x13U, "post hook 改写为 BOOT + Error (0x13)");
     TEST_ASSERT_EQ_INT(adapter.last_al_error, 0x0014U, "记录 AL 状态错误码 0x0014 ALERR_NOVALIDFIRMWARE");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "al_error_fn 注入回调被调用且仅调用 1 次");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_val, 0x0014U, "向 al_error_fn 传入的错误码为 0x0014");
 
-    /* 验证非 BOOT_TO_INIT 迁移时不拦截 */
+    /* 验证非 BOOT_TO_INIT 迁移时不拦截且不调用 al_error_fn */
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
     as = 0x12U; /* PREOP_TO_BOOT 或其他状态 */
     an = 0x03U;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, 0x03U, "非 BOOT_TO_INIT 迁移不予拦截改写");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "非 BOOT_TO_INIT 迁移不调用 al_error_fn");
 
-    /* 验证提交成功时正常允许迁移至 INIT */
+    /* 验证提交成功时正常允许迁移至 INIT 且不调用 al_error_fn */
     adapter.last_commit_failed = false;
+    s_mock_al_error_val = 0;
+    s_mock_al_error_calls = 0;
     as = 0x13U;
     an = 0x01U;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, 0x01U, "提交成功时允许正常迁移至 INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "提交成功时不调用 al_error_fn");
 
     /* 验证空指针健壮性 */
     ecat_foe_soes_post_state_hook(NULL, &as, &an);
     ecat_foe_soes_post_state_hook(&adapter, NULL, &an);
     ecat_foe_soes_post_state_hook(&adapter, &as, NULL);
+    ecat_foe_soes_set_al_error_fn(NULL, mock_al_error_cb);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -886,6 +906,37 @@ static void test_config_validation_rules(void)
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), -1, "32 字节超长项目名必须返回 -1 拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME, "超长项目名错误码匹配");
     cfg.project_name = "SERVO_DRV";
+
+    /* B4. 测试首次 core 填充 0xA5 和 0x02 脏内存，传入无效配置时在 UBSan 下无非法 bool 读取 */
+    ecat_foe_core_t dirty_a5;
+    memset(&dirty_a5, 0xA5, sizeof(dirty_a5));
+    ecat_foe_core_cfg_t bad_cfg = cfg;
+    bad_cfg.project_name = NULL;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&dirty_a5, &bad_cfg), -1, "脏内存 core (0xA5) 传入 NULL 项目名必须返回 -1");
+    TEST_ASSERT(!dirty_a5.is_configured, "失败后 is_configured 为 false");
+    TEST_ASSERT_EQ_INT(dirty_a5.state, ECAT_FOE_STATE_ERROR, "失败后 state 为 ERROR");
+
+    ecat_foe_core_t dirty_02;
+    memset(&dirty_02, 0x02, sizeof(dirty_02));
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&dirty_02, &bad_cfg), -1, "脏内存 core (0x02) 传入 NULL 项目名必须返回 -1");
+    TEST_ASSERT(!dirty_02.is_configured, "失败后 is_configured 为 false");
+    TEST_ASSERT_EQ_INT(dirty_02.state, ECAT_FOE_STATE_ERROR, "失败后 state 为 ERROR");
+
+    /* B5. 已初始化 core 再传独立 NULL 名配置也须失败且不能发起 WRQ */
+    ecat_foe_core_t reinit_core;
+    setup_default_core(&reinit_core, &mcu, NULL, NULL);
+    TEST_ASSERT(reinit_core.is_configured, "reinit_core 初始合规配置成功");
+
+    ecat_foe_core_cfg_t null_name_cfg = cfg;
+    null_name_cfg.project_name = NULL;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&reinit_core, &null_name_cfg), -1, "已初始化 core 传入独立 NULL 名配置必须失败返回 -1");
+    TEST_ASSERT(!reinit_core.is_configured, "重初始化失败后 core 必须标记为不可用 (is_configured == false)");
+    TEST_ASSERT_EQ_INT(reinit_core.state, ECAT_FOE_STATE_ERROR, "状态必须变为 ERROR");
+
+    /* 验证不能发起 WRQ */
+    int ret_reinit_wrq = test_wrq(&reinit_core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT(ret_reinit_wrq != 0, "不可用 core 发起 WRQ 必须被拒绝");
+    TEST_ASSERT_EQ_INT(reinit_core.last_error, ECAT_FOE_CORE_ERR_INVALID_STATE, "不可用 core 错误码为 ERR_INVALID_STATE");
 
     /* C. max_header_size 下限/对齐/上限检查 */
     cfg.max_header_size = 60U; /* < 64 */
@@ -1364,12 +1415,15 @@ static void test_self_referential_pointer_elimination_and_idle_copy(void)
     TEST_ASSERT((const void *)core.cfg.project_name != (const void *)core.local_project_name, "杜绝内部自身指针指向");
     TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "安全接口返回正确内部项目名");
 
-    /* 1.1 验证使用 &core.cfg (project_name=NULL) 重新初始化可安全回退并保留 local_project_name */
+    /* 1.1 明确 &core.cfg 因其 project_name 为 NULL 不被支持，必须返回 -1 拒绝 */
     int ret_reinit = ecat_foe_core_init(&core, &core.cfg);
-    TEST_ASSERT_EQ_INT(ret_reinit, 0, "使用 &core.cfg 重新初始化成功");
-    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "重新初始化后保留原有项目名");
-    TEST_ASSERT(core.cfg.project_name == NULL, "重新初始化后 cfg.project_name 仍为 NULL 消除自指针");
-    TEST_ASSERT(core.is_configured, "重新初始化后核心依然处于 configured");
+    TEST_ASSERT_EQ_INT(ret_reinit, -1, "传入 &core.cfg (project_name 为 NULL) 重初始化必须返回 -1 拒绝");
+    TEST_ASSERT(!core.is_configured, "失败后 core 置为不可用 (is_configured == false)");
+
+    /* 重新使用合规独立的配置重新初始化恢复 core */
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT(core.is_configured, "使用独立合法配置重新初始化成功");
+    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "恢复后内部项目名完好");
 
     /* 2. 验证非活跃状态下结构体支持按值复制/模板分发 */
     ecat_foe_core_t core_copy = core;

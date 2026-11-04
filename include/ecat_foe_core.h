@@ -201,10 +201,13 @@ typedef struct {
 /**
  * @brief 初始化并校验核心机静态配置
  *
- * 【内存与安全保证】：
+ * 【内存、校验与生命周期契约】：
  * - 纯 C99 实现，零动态内存分配 (malloc)；
- * - 会将 cfg->project_name 深拷贝到内部 local_project_name 数组中，调用完成后外部字符串即可安全释放；
- * - 严禁浅拷贝 core 结构体实例（见 ecat_foe_core_t 的 Non-movable 契约）。
+ * - 校验通过前严禁读取未初始化的 core（如 is_configured），防止未初始化脏内存引发 UBSan 非法 bool 读取未定义行为；
+ * - cfg->project_name 为 NULL 或非法时一律返回 -1 拒绝，失败后 core 重置并标记为不可用 (is_configured == false)；
+ * - 校验通过后将 cfg->project_name 深拷贝到内部 local_project_name 静态数组，同时将 core->cfg.project_name 置为 NULL（消除内部自身指针与悬垂引用）；
+ * - 【重要契约】：因 core->cfg.project_name 为 NULL，不支持直接传入 &core->cfg 重新初始化；重新初始化必须传入包含非空 project_name 的独立合法配置；
+ * - 升级会话异常中断后，由 ecat_foe_core_on_wrq 入口执行会话级精细自愈，无需外部重复调用 init。
  *
  * @param core 核心机上下文指针
  * @param cfg  静态配置指针

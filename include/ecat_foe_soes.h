@@ -13,11 +13,17 @@
 extern "C" {
 #endif
 
+/**
+ * @brief AL 错误码上报函数原型 (在真实 SOES 中对应 ESC_ALerror(uint16_t errornumber))
+ */
+typedef void (*ecat_foe_al_error_fn_t)(uint16_t errornumber);
+
 typedef struct {
-    ecat_foe_core_t *core;
-    uint32_t         buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
-    bool             last_commit_failed; /**< 记录最后提交失败状态 (用于 BOOT->INIT 拦截) */
-    uint16_t         last_al_error;      /**< 记录设置的 AL 错误码 (如 0x0014 ALERR_NOVALIDFIRMWARE) */
+    ecat_foe_core_t        *core;
+    uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
+    bool                    last_commit_failed; /**< 记录最后提交失败状态 (用于 BOOT->INIT 拦截) */
+    uint16_t                last_al_error;      /**< 记录设置的 AL 错误码 (如 0x0014 ALERR_NOVALIDFIRMWARE) */
+    ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
 } ecat_foe_soes_adapter_t;
 
 /**
@@ -27,6 +33,13 @@ typedef struct {
  * @param buffer_size SOES 配置的 fbuffer 尺寸
  */
 void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core, uint32_t buffer_size);
+
+/**
+ * @brief 设置 AL 错误上报注入回调函数 (真实 SOES 中传入 ESC_ALerror，单测传入桩函数)
+ * @param adapter 适配层上下文
+ * @param al_error_fn 错误上报函数指针
+ */
+void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn);
 
 /**
  * @brief SOES WRQ 检查钩子 (在主站发起 WRQ 时调用)

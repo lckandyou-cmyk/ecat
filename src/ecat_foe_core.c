@@ -220,14 +220,11 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         return -1;
     }
 
-    /* 兼容性与自愈支持: 若用户传入 &core->cfg 重初始化，且 project_name 为空但本地已有有效项目名，采信本地名 */
-    const char *pname_input = cfg->project_name;
-    if (pname_input == NULL && core->is_configured && core->local_project_name[0] != '\0') {
-        pname_input = core->local_project_name;
-    }
-
-    /* 1. 严格校验 project_name: 非空、严格以 '\0' 结尾且长度 <= 31 字节，超长严拒绝不截断 */
-    if (pname_input == NULL) {
+    /* 1. 严格校验 project_name: 必须非空且有效。
+     * 注意：验证配置前不得读取未初始化 core（禁止读取 core->is_configured），NULL 项目名一律拒绝。
+     * 因消除自身指针后 core->cfg.project_name 为 NULL，故不支持直接传入 &core->cfg 重新初始化 */
+    if (cfg->project_name == NULL) {
+        memset(core, 0, sizeof(*core));
         core->state = ECAT_FOE_STATE_ERROR;
         core->is_configured = false;
         core->last_error = ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME;
@@ -235,20 +232,21 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     }
 
     size_t plen = 0;
-    while (plen <= ECAT_FOE_MAX_FILENAME_LEN && pname_input[plen] != '\0') {
+    while (plen <= ECAT_FOE_MAX_FILENAME_LEN && cfg->project_name[plen] != '\0') {
         plen++;
     }
     if (plen == 0 || plen > ECAT_FOE_MAX_FILENAME_LEN) {
-        /* 超出 31 字符上限坚决拒绝初始化，严禁截断 */
+        /* 空字符串或超出 31 字符上限坚决拒绝初始化，严禁截断 */
+        memset(core, 0, sizeof(*core));
         core->state = ECAT_FOE_STATE_ERROR;
         core->is_configured = false;
         core->last_error = ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME;
         return -1;
     }
 
-    /* 暂存项目名与配置到栈，防御自身内存清零 */
+    /* 先安全暂存配置与有效项目名至栈帧，防御自身内存清零或 cfg 位于 core 内部 */
     char temp_pname[ECAT_FOE_MAX_FILENAME_LEN + 1];
-    memcpy(temp_pname, pname_input, plen);
+    memcpy(temp_pname, cfg->project_name, plen);
     temp_pname[plen] = '\0';
     ecat_foe_core_cfg_t local_cfg = *cfg;
 
@@ -256,6 +254,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     if (local_cfg.max_header_size < 64U ||
         (local_cfg.max_header_size % 4U) != 0 ||
         local_cfg.max_header_size > ECAT_FOE_HEADER_BUF_MAX) {
+        memset(core, 0, sizeof(*core));
         core->state = ECAT_FOE_STATE_ERROR;
         core->is_configured = false;
         core->last_error = ECAT_FOE_CORE_ERR_CFG_HEADER_BUF;
@@ -274,18 +273,21 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
                 t->driver->read == NULL ||
                 t->driver->finalize == NULL ||
                 t->driver->abort == NULL) {
+                memset(core, 0, sizeof(*core));
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->is_configured = false;
                 core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
                 return -1;
             }
             if (t->write_unit < 1U || t->write_unit > ECAT_FOE_MAX_WRITE_UNIT) {
+                memset(core, 0, sizeof(*core));
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->is_configured = false;
                 core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
                 return -1;
             }
             if (t->max_payload_size == 0 || (t->max_payload_size % t->write_unit) != 0) {
+                memset(core, 0, sizeof(*core));
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->is_configured = false;
                 core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
@@ -294,7 +296,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         }
     }
 
-    /* 安全清空核心机并装载已校验配置 */
+    /* 全部校验通过后，清空核心机并装载已校验配置 */
     memset(core, 0, sizeof(*core));
     core->cfg = local_cfg;
     memcpy(core->local_project_name, temp_pname, plen);
