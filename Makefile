@@ -58,9 +58,13 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
+# ASan 内存与未定义行为核验目标
+# 历史说明: 早期测试夹具 mock_driver_t 内部包含 1MB 模拟内存缓冲区，在测试用例作为局部变量定义时，
+# Clang -O2 将数十个测试用例内联至 main()，叠加 ASan 栈红色区导致主线程栈帧超过 macOS 默认 8MB 限制引发 stack-overflow (退出码 134)。
+# 本库核心代码本身为零动态分配且各函数栈帧极小。测试套件已将 1MB 模拟硬件缓冲区置入静态存储区 (BSS)，不再依赖 -fno-inline。
 test-asan:
 	$(MAKE) clean
-	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g -fno-inline"
+	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 
 clean:
 	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw

@@ -75,17 +75,8 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
   - 核心语义：核心协议机显式支持 `chunk_len == 0`。当传入 `chunk_len == 0` 时，核心协议机直接将其视为传输结束定界符（EOF），并在内部自动触发完整的 `on_end` 校验与提交流程（包含补齐写入、流 CRC 比对、物理回读校验与 `finalize()` 标记有效）；
   - 适配层定界简化：适配层在 `write_function` 回调中，当 `length < foe_cfg->buffer_size` 时（无论 `length > 0` 还是 `length == 0`），均可直接调用 `ecat_foe_core_on_data`。若 `length == 0`，核心自动触发结束流程闭环；若 `length > 0`，适配层在送入尾块后亦可显式调用 `ecat_foe_core_on_end()`。
 * **0 长度包分支 `FOE_fclose` 返回值被 SOES 忽略的处理策略【已确定】**：
-  - **源码出处与事实**：查阅 `soes/esc_foe.c` 0 长度包结束分支逻辑：
-    ```c
-    else if (data_len == 0)
-    {
-       DPRINT("FOE_data completed\n");
-       FOE_fclose ();
-       res = FOE_send_ack ();
-       FOE_init ();
-    }
-    ```
-    在 0 长度包结束分支中，`FOE_fclose()` 的返回值（即 `write_function` 回调的返回值）被**完全忽略**，SOES 未对返回值做任何检查，直接执行 `FOE_send_ack()` 向主站回复成功 ACK 并通过 `FOE_init()` 重置状态机（对比短包分支中明确检查了返回值 `if ((ncopied != data_len) || FOE_fclose ())`）。
+  - **源码出处与事实**：查阅 `soes/esc_foe.c` 0 长度包结束分支逻辑（详见 `soes-integration-options.md` 中已登记引文 Q2_ESC_FOE_ZERO_LEN_CLOSE）：
+    在该分支中，SOES 执行 `FOE_fclose()`、`res = FOE_send_ack()` 与 `FOE_init()`，但 `FOE_fclose()` 的返回值（即 `write_function` 回调的返回值）被**完全忽略**，SOES 未对返回值做任何检查，直接执行 `FOE_send_ack()` 向主站回复成功 ACK 并通过 `FOE_init()` 重置状态机（对比短包分支中明确检查了返回值 `if ((ncopied != data_len) || FOE_fclose ())`）。
   - **空包路径出现条件**：独立 0 长度包只在传输总字节数（`header_length + payload_length`）**恰好等于底层 FoE 数据包单包容量（`ESC_FOE_DATA_SIZE`）的整数倍时才会出现**；这纯粹属于以太网 FoE 协议层分包规则，**与应用层配置的 `foe_cfg->buffer_size` 缓冲大小完全无关**。（注：TwinCAT 等主流主站在整倍数时实际下发 0 长度包的行为标记为 **【未核实】**）。
   - **架构决策【已确定】**：v1 架构确定**完全接受此限制，不给 SOES 打源码补丁**。
   - **安全性保证（防变砖）**：
@@ -345,19 +336,7 @@ sequenceDiagram
 6. **【推断，未验证】Bootloader 启动时主动比对 0120h 与 0130h 及 AL Control 事件联动**：
    - **问题推断与机理【推断，未验证】**：APP 在检测到 `INIT -> BOOT` 请求时通常会读取 AL Control 寄存器（`0120h`）。
    - **手册依据**：依据 LAN9252 官方手册 [pdf:PDF_Q6_AL_EVENT_CLEAR_PDI]，Bit 0 为 AL Control Event，其注释注明：`This bit is cleared by reading the AL Control Register from PDI.`。证实 PDI 读取 0120h 时硬件会自动清除 0220h 寄存器中的该事件标志。
-   - **协议栈源码事实**：查阅 SOES 源码中 `ESC_state()` 函数实现（见架构分析 Q9_ESC_C_ESC_STATE_ALEVENT_CHECK 引用）：
-     ```c
-     if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)
-     {
-        ESC_read (ESCREG_ALCONTROL, (void *) &ESCvar.ALcontrol,
-                  sizeof (ESCvar.ALcontrol));
-        ESCvar.ALcontrol = etohs (ESCvar.ALcontrol);
-     }
-     else
-     {
-        return;
-     }
-     ```
+   - **协议栈源码事实**：查阅 SOES 源码中 `ESC_state()` 函数实现（详见 `soes-integration-options.md` 中已登记引文 Q9_ESC_C_ESC_STATE_ALEVENT_CHECK）：
      函数通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h Bit 0）判定是否有待处理状态转换；若该标志位未置位，直接执行 `return;` 退出，根本不会主动读取 `0120h`。
    - **设计要求**：若 APP 先前读取 0120h 导致硬件自动清除了 0220h 事件位，Bootloader 启动的新协议栈轮询时将无法感知待决请求。设计上要求 Bootloader 在协议栈初始化后，需保证挂起的 BOOT 状态转换能够被正常触发处理。
    - **触发办法候选（只评估不实现）**：

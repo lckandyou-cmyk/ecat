@@ -1,6 +1,13 @@
 /**
  * @file test_core.c
- * @brief EtherCAT FoE 核心状态机与 SOES 适配层全量功能测试套件 (阶段 B)
+ * @brief EtherCAT FoE 核心状态机与 SOES 适配层测试套件 (阶段 B)
+ *
+ * 测试夹具内存说明:
+ * mock_driver_t 内部包含 1MB 模拟闪存缓冲区 (MOCK_DRIVER_MEM_SIZE)。
+ * 早期测试若将 mock_driver_t 作为栈局部变量分配，在 Clang -O2 内联数十个测试函数到 main() 时，
+ * 叠加 AddressSanitizer 栈红区 (redzones)，会导致 main 栈帧膨胀至 50MB 以上，击穿 macOS 默认 8MB 栈上限
+ * 触发 ASan stack-overflow (退出码 134)。此现象属于测试夹具局部变量体积过大，而非核心库自身缺陷
+ * (核心库为零动态分配且函数最大栈帧极小)。测试套件统一采用静态存储区 (BSS) 的 s_driver 模拟夹具。
  */
 
 #include <stdio.h>

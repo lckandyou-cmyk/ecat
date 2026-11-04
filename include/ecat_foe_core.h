@@ -160,7 +160,6 @@ typedef struct {
 
     /* 会话生命周期与驱动调用保护标记 */
     uint32_t            target_incomplete_mask; /**< 按目标跟踪的未闭环位掩码 (bit T-1 表示目标 T 驱动已 init 但未成功 finalize) */
-    bool                upgrade_incomplete;    /**< 固件升级未闭环标志 (存在任一未完成目标为 true) */
     bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */

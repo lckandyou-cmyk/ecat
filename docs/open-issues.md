@@ -110,7 +110,47 @@
    - 出处：`docs/architecture/SAD-v0.1.md` 第 5.1 节第 14 条。
 
 3. **BOOT→INIT 拦截后主站二次请求处理策略【待决策，不实现】**：
-   - 现状事实：当固件升级中途断开、校验失败或未成功闭环时（`upgrade_incomplete == true`），适配层后置钩子会拦截主站发起的 `BOOT -> INIT` 状态迁移，将目标状态改写为 `BOOT | Error`（`0x13`）并设置 AL Status Code 为 `0x0014`。
+   - 现状事实：当固件升级中途断开、校验失败或未成功闭环时（`ecat_foe_core_upgrade_incomplete()` 为真），适配层后置钩子会拦截主站发起的 `BOOT -> INIT` 状态迁移，将目标状态改写为 `BOOT | Error`（`0x13`）并设置 AL Status Code 为 `0x0014`。
+   - 源码依据（`esc.c:1111-1135`）：
+<!-- quote-begin: Q10_ESC_C_ALCONTROL_INIT_ERRACK -->
+```c
+   /* Mask state request bits + Error ACK */
+   ac = ESCvar.ALcontrol & ESCREG_AL_STATEMASK;
+   as = ESCvar.ALstatus & ESCREG_AL_STATEMASK;
+   an = as;
+   if (((ac & ESCerror) || (ac == ESCinit)))
+   {
+      /* if error bit confirmed reset */
+      ac &= ESCREG_AL_ERRACKMASK;
+      an &= ESCREG_AL_ERRACKMASK;
+   }
+
+   /* Error state not acked, leave original */
+   if ((an & ESCerror) && ((ac & ESCerror) == 0))
+   {
+      return;
+   }
+
+   /* Mask high bits ALcommand, low bits ALstatus */
+   as = (uint8_t)((ac << 4) | (as & 0x0f));
+
+   /* Call post state change hook case it have been configured  */
+   if (ESCvar.pre_state_change_hook != NULL)
+   {
+      ESCvar.pre_state_change_hook (&as, &an);
+   }
+```
+<!-- quote-end: Q10_ESC_C_ALCONTROL_INIT_ERRACK -->
+   - SOES 源码机制分析【推断，未验证】：
+     - 当主站发送状态切换请求时，SOES 在上述引文第 1115 行判断 `if (((ac & ESCerror) || (ac == ESCinit)))`。若主站请求进入 INIT 状态（`ac == ESCinit`），SOES 将其视同错误确认（Error ACK），在第 1118-1119 行执行 `ac &= ESCREG_AL_ERRACKMASK; an &= ESCREG_AL_ERRACKMASK;`，清除目标状态的错误位（即清除了 AL 状态错误位，但不直接清除 `ESCvar.ALerror` 寄存器变量）。
+     - 随后在第 1123 行跳过未确认错误检查，在状态迁移匹配中进入 `case BOOT_TO_INIT:`，执行 `ESC_stopmbx()` 并置 `an = ESCinit`。
+     - 此后调用的 `post_state_change_hook`（第 1305 行）若介入拦截，会将 `*an` 改写为 `ESCboot | ESCerror` 并调用 `ESC_ALerror(ALERR_INVALIDSTATECHANGE)`。
+     - 在第 1310-1314 行，由于 `an & ESCerror` 保持为真，SOES 不会执行 `ESC_ALerror(ALERR_NONE)` 清除错误码。最终第 1321 行 `ESC_ALstatus(an)` 将带错误位的状态写入硬件寄存器。
+   - 时序推演：首次 BOOT→INIT 被拦 → 主站再次请求 INIT → SOES 行为 → 钩子是否再拦【推断，未验证】：
+     1. 首次 BOOT→INIT 被拦：固件升级未闭环时，主站请求进入 INIT；SOES 准备迁移至 `ESCinit`；适配层 `post_state_change_hook` 拦截，将目标状态改写为 `ESCboot | ESCerror` 并设置 ALerror；从站停留在 BOOT+Error 态。
+     2. 主站再次请求 INIT：主站向 `ALcontrol` 再次写入 `ESCinit`（`0x01`）。
+     3. SOES 行为：SOES 在第 1115 行因 `ac == ESCinit` 成立，执行 `an &= ESCREG_AL_ERRACKMASK` 清除错误位；在第 1123 行跳过检查；因从站当前实际状态仍为 `ESCboot`，再次判断为 `BOOT_TO_INIT` 迁移；再次执行 `ESC_stopmbx()` 并设 `an = ESCinit`。
+     4. 钩子是否再拦：执行到第 1305 行 `post_state_change_hook` 时，由于核心机未完成状态由单一真值源 `target_incomplete_mask` 保持，`ecat_foe_core_upgrade_incomplete()` 仍为真，且状态迁移仍为从 BOOT 到 INIT，钩子拦截条件再次满足，再次改写为 `*an = ESCboot | ESCerror` 并设置 ALerror。从站将持续被拦截在 BOOT+Error 态，不会误进入 INIT。
    - 待决策问题：在主站确认错误（Error Acknowledge）后，若主站未重新发起 FoE 固件写入，而是再次发送 `BOOT -> INIT` 状态切换命令，从站协议栈是否应继续拦截。
    - 候选方案（保留供后续决策，本版本不替用户做选择）：
      - 候选 1：持续拦截。只要固件未成功闭环，后续每次 `BOOT -> INIT` 均拒绝并保持在 BOOT 错误态。优点是避免残缺固件引导；制约是主站若仅需执行只读诊断或网络拓扑复位时可能受阻。
@@ -138,7 +178,7 @@
        - 需要验证的点：增加邮箱包前置解析耗时与时序同步复杂度。
    - 参考依据：
      - Beckhoff TwinCAT 体系中，`FB_EcFoeWriteFile` 功能块的 `sFoEPathName` 参数专门表示从站侧文件名，独立于 PC 侧本地文件名。
-     - 官方参考链接：https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/1058204683.html
+     - 官方参考链接：https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/16248044683.html
    - 状态：【待决策，不实现】。
 
 5. **升级未闭环状态在 deinit/reinit 与断电重启后的已知局限【已知局限】**：
