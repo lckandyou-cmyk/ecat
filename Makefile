@@ -12,7 +12,9 @@ SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 TEST_CORE_BIN = tests/test_runner_core
 
-.PHONY: all clean test test-asan vectors
+SOES_DIR ?= /tmp/soes_src/soes
+
+.PHONY: all clean test test-asan vectors check-quotes
 
 all: test
 
@@ -25,10 +27,14 @@ $(TEST_EFW_BIN): $(SRC_EFW) $(TEST_EFW_SRC) include/ecat_foe_efw.h
 $(TEST_CORE_BIN): $(SRC_CORE) $(TEST_CORE_SRC) include/ecat_foe_core.h include/ecat_foe_target.h include/ecat_foe_soes.h tests/mock_driver.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_CORE) $(TEST_CORE_SRC)
 
+check-quotes:
+	@$(PYTHON) tools/verify_soes_quotes.py --soes-dir $(SOES_DIR)
+
 test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
 	@./$(TEST_CORE_BIN)
+	@if [ -d "$(SOES_DIR)" ]; then $(PYTHON) tools/verify_soes_quotes.py --soes-dir $(SOES_DIR); fi
 
 test-asan:
 	$(MAKE) clean
