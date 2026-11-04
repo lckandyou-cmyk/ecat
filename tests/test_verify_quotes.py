@@ -756,10 +756,52 @@ def test_fixture_suite():
             json.dump(m, f)
         assert_case("Case 32: 多级归档路径 docs/archive/sub/report.md 通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
 
+    # Case 33: 权威文档代码块与整行反引号未登记 SOES 符号引用及正反例
+    # 33.1: 权威文档围栏代码块出现未登记 ESCvar 拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n```c\nESCvar.ALcontrol = 0;\n```\n")
+        assert_case("Case 33.1: 权威文档围栏代码块未登记 ESCvar 拦截", 1, "发现未登记围栏代码块中的 SOES 符号引用", manifest, repo, soes)
+
+    # 33.2: 权威文档整行反引号出现未登记 ESC_state 拦截 (Exit 1)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n`ESC_state();`\n")
+        assert_case("Case 33.2: 权威文档整行反引号未登记 ESC_state 拦截", 1, "发现未登记整行反引号代码中的 SOES 符号引用", manifest, repo, soes)
+
+    # 33.3: 权威文档正文行内常规标识符描述放行 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n正文中引用 `ESCvar.ALcontrol` 变量与 `FOE_fclose` 函数常规说明。\n")
+        assert_case("Case 33.3: 权威文档正文行内常规标识符描述放行", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
+    # 33.4: 归档历史文档 docs/archive/ 围栏代码块放行 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        arch_doc = os.path.join(repo, "docs/archive/legacy.md")
+        os.makedirs(os.path.dirname(arch_doc), exist_ok=True)
+        with open(arch_doc, "w", encoding="utf-8") as f:
+            f.write("```c\nESCvar.ALcontrol = 0;\n```\n")
+        assert_case("Case 33.4: 归档历史文档 docs/archive/ 围栏代码块放行", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
+    # 33.5: 权威文档 mermaid 图表块中出现 FOE_abort 放行 (Exit 0)
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n```mermaid\nsequenceDiagram\nBL->>Stack: 触发 FOE_abort(0x800B)\n```\n")
+        assert_case("Case 33.5: 权威文档 mermaid 图表块中出现 FOE_abort 放行", 0, "三方引文自动化核验通过", manifest, repo, soes)
+
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")
     if test_passed == total_tests:
-        print(f">>> 校验器 {total_tests} 项全场景夹具测试全部通过！<<<")
+        print(f">>> 校验器 {total_tests} 项多场景夹具测试全部通过！<<<")
         return 0
     else:
         print(">>> 夹具测试存在失败项！<<<")

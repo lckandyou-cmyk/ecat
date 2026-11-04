@@ -425,6 +425,92 @@ def scan_unregistered_prose_lines(
 
     return (len(errors) == 0), errors, stats
 
+def scan_unquoted_code_block_symbols(
+    repo_root: str,
+) -> Tuple[bool, List[str], Dict[str, int]]:
+    """
+    检查权威规范文档 (排除 docs/archive/ 归档路径) 中围栏代码块或整行反引号代码中的 SOES 源码/符号引用。
+    - 检查符号: ESCvar, ESC_*, FOE_* (匹配正则 r"\b(ESCvar|ESC_[A-Za-z0-9_]+|FOE_[A-Za-z0-9_]+)\b")
+    - 围栏代码块 (非图表类语言如 mermaid) 或整行反引号代码必须位于 Quote 块内；
+    - 普通正文中的行内标识符 (如 "SOES 的 `FOE_fclose` 函数") 属于常规说明，予以放行；
+    - docs/archive/ 历史归档文档不在此强制范围内。
+    """
+    symbol_re = re.compile(r"\b(ESCvar|ESC_[A-Za-z0-9_]+|FOE_[A-Za-z0-9_]+)\b")
+    errors: List[str] = []
+    stats = {
+        "authoritative_md_files": 0,
+        "quoted_code_lines": 0,
+        "prose_inline_symbol_lines": 0,
+        "unquoted_violations": 0,
+    }
+
+    for root, dirs, files in os.walk(repo_root):
+        if any(k in root for k in [".git", ".gemini", "tests", "tools"]):
+            continue
+        rel_root = os.path.relpath(root, repo_root).replace("\\", "/")
+        parts = os.path.normpath(rel_root).split("/")
+        if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "archive":
+            continue
+
+        for f in sorted(files):
+            if not f.endswith(".md"):
+                continue
+            full_path = os.path.join(root, f)
+            doc_rel = os.path.relpath(full_path, repo_root).replace("\\", "/")
+            stats["authoritative_md_files"] += 1
+
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as fp:
+                    lines = fp.readlines()
+            except Exception as e:
+                errors.append(f"读取文档失败: {doc_rel} ({e})")
+                continue
+
+            in_quote = False
+            in_fence = False
+            fence_lang = ""
+
+            for lno, raw_line in enumerate(lines, 1):
+                s = raw_line.strip()
+                if s.startswith("<!-- quote-begin:"):
+                    in_quote = True
+                    continue
+                elif s.startswith("<!-- quote-end:"):
+                    in_quote = False
+                    continue
+                elif s.startswith("```"):
+                    if in_fence:
+                        in_fence = False
+                        fence_lang = ""
+                    else:
+                        in_fence = True
+                        fence_lang = s[3:].strip().lower()
+                    continue
+
+                matches = symbol_re.findall(s)
+                if not matches:
+                    continue
+
+                if in_quote:
+                    stats["quoted_code_lines"] += 1
+                else:
+                    is_code_fence = in_fence and (fence_lang not in ["mermaid", "flowchart", "plantuml", "sequencediagram"])
+                    is_whole_line = (not in_fence) and (s.startswith("`") and s.endswith("`") and s.count("`") == 2 and len(s) > 2)
+
+                    if is_code_fence or is_whole_line:
+                        stats["unquoted_violations"] += 1
+                        symbol_list = ", ".join(sorted(set(matches)))
+                        context_type = "围栏代码块" if is_code_fence else "整行反引号代码"
+                        errors.append(
+                            f"权威文档 {doc_rel}:{lno} 发现未登记{context_type}中的 SOES 符号引用: [{symbol_list}]\n"
+                            f"  行内容: {repr(s)}\n"
+                            f"  (必须在 quotes 中注册正式 Quote 块或作为正文行内常规标识符说明)"
+                        )
+                    else:
+                        stats["prose_inline_symbol_lines"] += 1
+
+    return (len(errors) == 0, errors, stats)
+
 def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("============================================================")
     print(" SOES 源码引用三方严格核验工具 (Three-way Quote Verifier)")
@@ -490,7 +576,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         return 1
 
     # 4. 校验 SOES 本地散文件 SHA-256 基线
-    print("[1/5] 校验本地 SOES 源码文件 SHA-256 完整性基线...")
+    print("[1/6] 校验本地 SOES 源码文件 SHA-256 完整性基线...")
     if source_meta:
         print(f"      [出处说明] {source_meta.get('origin_statement', '')}")
         print(f"      [上游版本] Commit: {source_meta.get('upstream_commit', 'UNKNOWN')}")
@@ -505,7 +591,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         print("  [WARN] 清单未指定 file_checksums，跳过源码哈希比对")
 
     # 5. 反向扫描全仓库 Markdown 文档中的全部 quote 标记
-    print("[2/5] 扫描仓库全部 Markdown 文档标记结构 (检查未配对/嵌套/重复)...")
+    print("[2/6] 扫描仓库全部 Markdown 文档标记结构 (检查未配对/嵌套/重复)...")
     scan_ok, doc_tags_map, scan_err = scan_all_markdown_tags(repo_root)
     if not scan_ok:
         print(f"  [FAIL] 文档标记反向扫描失败: {scan_err}")
@@ -513,7 +599,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print(f"  [OK] 文档扫描完成，共捕获 {len(doc_tags_map)} 处配对标记")
 
     # 6. 反向核验：检查文档中是否有未知 ID 或出现在非指定文档中
-    print("[3/5] 反向交叉校验 (检查文档标记是否超出清单或位置错乱)...")
+    print("[3/6] 反向交叉校验 (检查文档标记是否超出清单或位置错乱)...")
     for doc_qid, tag_info in doc_tags_map.items():
         if doc_qid not in manifest_map:
             print(f"  [FAIL] 反向拦截: 文档 {tag_info['doc_rel']}:{tag_info['line_no']} 存在清单未登记的未知 ID '{doc_qid}'")
@@ -526,7 +612,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("  [OK] 反向交叉校验通过，文档标记无遗留或错位")
 
     # 7. 三方比对 (Manifest vs Doc vs Source)
-    print(f"[4/5] 执行三方逐行内容核验 (共 {len(manifest_quotes)} 处登记条目)...")
+    print(f"[4/6] 执行三方逐行内容核验 (共 {len(manifest_quotes)} 处登记条目)...")
     print("------------------------------------------------------------")
 
     failures = 0
@@ -593,7 +679,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         return 1
 
     # 8. 全库 Markdown 未登记正文行号与文本哈希严格核验
-    print(f"[5/5] 扫描全库 Markdown 正文行号引用 (严密比对 doc_line 与文本 SHA-256)...")
+    print(f"[5/6] 扫描全库 Markdown 正文行号引用 (严密比对 doc_line 与文本 SHA-256)...")
     prose_ok, prose_errs, stats = scan_unregistered_prose_lines(
         repo_root, manifest_map, doc_tags_map, prose_exemptions
     )
@@ -602,6 +688,15 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
             print(f"  [FAIL] {err}")
         return 1
     print("  [OK] 全库 Markdown 正文行号扫描通过，未发现未登记、未豁免、通配符或文本哈希不匹配项")
+
+    # 9. 权威文档围栏代码块与整行代码中的未登记 SOES 源码/符号引用核验
+    print(f"[6/6] 扫描权威文档代码块与整行代码中的 SOES 符号引用 (ESCvar/ESC_*/FOE_*)...")
+    sym_ok, sym_errs, sym_stats = scan_unquoted_code_block_symbols(repo_root)
+    if not sym_ok:
+        for err in sym_errs:
+            print(f"  [FAIL] {err}")
+        return 1
+    print("  [OK] 权威文档代码块符号扫描通过，未发现未登记的围栏代码块或整行反引号源码引用")
 
     print("------------------------------------------------------------")
     print(f" 核验统计与覆盖范围客观汇报:")
@@ -614,8 +709,9 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         print(f"   * 豁免分类统计明细 (共 {sum(stats['exemption_status_counts'].values())} 处引用):")
         for st, cnt in sorted(stats['exemption_status_counts'].items()):
             print(f"     - {st:36s}: {cnt} 处引用")
-    print(" - 正则覆盖局限说明: 本工具基于正则表达式匹配显式文件行号引用，无法识别无行号自然语言引述或非常规引用语法")
-    print(" - 外部未核验说明: Beckhoff ET9300 官方受限无法获取；ETG 规范为外部标准，均已严格标注未核验")
+    print(f" - 权威文档代码块符号核验: 无未登记的 ESCvar/ESC_*/FOE_* 围栏代码或整行代码引用 (已登记代码行: {sym_stats['quoted_code_lines']} 行，正文行内常规标识符: {sym_stats['prose_inline_symbol_lines']} 处)")
+    print(" - 正则覆盖局限说明: 本工具基于正则表达式匹配显式文件行号引用与特定代码块前缀符号，无法识别无行号自然语言引述或非常规引用语法")
+    print(" - 外部未核验说明: Beckhoff ET9300 本机 curl 报 403、浏览器匿名访问未核实；ETG 规范为外部标准，均已严格标注未核验")
     print(">>> 三方引文自动化核验通过 (承诺范围仅限上述已登记条目) <<<")
     return 0
 
