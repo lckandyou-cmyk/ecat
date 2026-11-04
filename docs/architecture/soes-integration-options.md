@@ -223,12 +223,15 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 6.1 SOES 协议栈源码引用 (本地 `/tmp/soes_src/soes/`)
 
-**本地源文件基线与 SHA-256 (防止版本漂移)**：
-- 来源仓库: OpenEtherCATsociety/SOES (本地路径: `/tmp/soes_src/soes/`)
-- `esc.c`: `1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c`
-- `esc.h`: `9c76c2d4a20b4f827539a4416383354cb45e95a9d086f444a26a0bbb5ff9a579`
-- `esc_foe.c`: `cd1709f103e5c4b786fb0be2857760f0e180c9123a553a2efa410accbf17a2b7`
-- `esc_foe.h`: `84f5011c258d1e25d8d9ab22bfb74f4ab45b1e6b01f3a6be13e5cf2138034eb7`
+**本地源文件基线与 SHA-256 (防版本漂移与基线锚定)**：
+- 来源路径: 本地散文件目录 `/tmp/soes_src/soes/`
+- 版本元数据: 目录无 `.git` 版本仓库，上游确切 Git Commit ID 未知 (UNKNOWN)。
+- 散文件基线 SHA-256：
+  - `esc.c`: `1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c`
+  - `esc.h`: `9c76c2d4a20b4f827539a4416383354cb45e95a9d086f444a26a0bbb5ff9a579`
+  - `esc_foe.c`: `cd1709f103e5c4b786fb0be2857760f0e180c9123a553a2efa410accbf17a2b7`
+  - `esc_foe.h`: `84f5011c258d1e25d8d9ab22bfb74f4ab45b1e6b01f3a6be13e5cf2138034eb7`
+*注意：上述 SHA-256 仅代表当前本地散文件环境的比对基线，绝不能当作上游官方 Release 认证。*
 
 | 源码文件与行号 | 引用内容或用途 | 核验模式与状态 |
 | :--- | :--- | :--- |
@@ -247,26 +250,39 @@ void ESC_ALerror (uint16_t errornumber);
 | `esc.c:1197-1202` | 非 INIT 状态切入 BOOT 直接报错设置 | **【本地人工核对】** 对照本地源文件确认 |
 
 ### 6.2 Microchip LAN9252 数据手册引用 (`lan9252.txt`)
-| 文档行号出处 | 手册章节与描述内容 | 核验状态与说明 |
+
+**官方数据手册下载与核验实况 (`/tmp/vendor_docs/`)**：
+- 官方来源: Microchip 官网 `https://ww1.microchip.com/downloads/en/DeviceDoc/00001909A.pdf`
+- 本地下载文件: `/tmp/vendor_docs/00001909A.pdf` (SHA-256: `f9b73097c21a1ad5e9b1a23ba10002c6bbeb7836422376c646e84313294e96c6`)
+- 文本转换文件: `/tmp/vendor_docs/lan9252.txt` (40,871 行, SHA-256: `e9839ad1bbd0ee4fe725584b0d2fa8fd545693a6f974ff4f9e193f698790b2e1`)
+- 核验比对说明：本表此前记录的历史行号源于早期不同工具转换生成的文本；经对照官方原版 DS00001909A PDF 及其文本核实，文档章节、寄存器名称与位定义语义完全吻合，最新转换行号微幅偏移（见下表核对说明）。
+
+| 文档行号出处 | 手册章节与描述内容 | 官方原版核对实况说明 |
 | :--- | :--- | :--- |
-| 第 4758 行 | 表 6-1: EEPROM Loader Run 对应 RST# Pin 列为 YES | **【本地无源文件 / 未核验】** (本地无 `lan9252.txt`，属历史记录) |
-| 第 4874, 4875 行 | 第 6.2.1.2 节: RST# 引脚拉低触发芯片级复位 | **【本地无源文件 / 未核验】** |
-| 第 31434 行 | Note 11: Enhanced Link 限制说明 | **【本地无源文件 / 未核验】** |
-| 第 33481, 33485 行 | 0502h-0503h EEPROM CONTROL/STATUS REGISTER | **【本地无源文件 / 未核验】** |
-| 第 33496, 33498 行 | Bit 15: EEPROM Busy 状态位 | **【本地无源文件 / 未核验】** |
-| 第 33504 行 | Bit 14: Error Write Enable | **【本地无源文件 / 未核验】** |
-| 第 33518 行 | Bit 13: Error Acknowledge/Command | **【本地无源文件 / 未核验】** |
-| 第 33532 行 | Bit 12: EEPROM Loading Status | **【本地无源文件 / 未核验】** |
-| 第 33544 行 | Bit 11: Checksum Error in ESC Config Area | **【本地无源文件 / 未核验】** |
-| 第 33568, 33574, 33575 行 | Bits 10:8: Command (Write 010, Reload 100) | **【本地无源文件 / 未核验】** |
-| 第 33698, 33702, 33717 行 | 0504h-0507h EEPROM ADDRESS REGISTER | **【本地无源文件 / 未核验】** |
-| 第 33744, 33748, 33769 行 | 0508h-050Bh EEPROM DATA REGISTER | **【本地无源文件 / 未核验】** |
-| 第 33980 行 | Note 27: MI link 限制说明 | **【本地无源文件 / 未核验】** |
+| 第 4758 行 | 表 6-1: EEPROM Loader Run 对应 RST# Pin 列为 YES | **【官方 PDF 已核对】** 对应官方原版第 48 页 Table 6-1 (最新文本第 4718 行) |
+| 第 4874, 4875 行 | 第 6.2.1.2 节: RST# 引脚拉低触发芯片级复位 | **【官方 PDF 已核对】** 对应官方原版第 49 页 6.2.1.2 节 (最新文本第 4869 行) |
+| 第 31434 行 | Note 11: Enhanced Link 限制说明 | **【官方 PDF 已核对】** 对应官方原版第 201 页 Note 11 (最新文本第 31430 行) |
+| 第 33481, 33485 行 | 0502h-0503h EEPROM CONTROL/STATUS REGISTER | **【官方 PDF 已核对】** 对应官方原版第 260 页 12.14.49 节 (最新文本第 33483 行) |
+| 第 33496, 33498 行 | Bit 15: EEPROM Busy 状态位 | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 15 (最新文本第 33506 行) |
+| 第 33504 行 | Bit 14: Error Write Enable | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 14 (最新文本第 33518 行) |
+| 第 33518 行 | Bit 13: Error Acknowledge/Command | **【官方 PDF 已核对】** 对应官方原版第 260 页 Bit 13 (最新文本第 33531 行) |
+| 第 33532 行 | Bit 12: EEPROM Loading Status | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bit 12 (最新文本第 33550 行) |
+| 第 33544 行 | Bit 11: Checksum Error in ESC Config Area | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bit 11 (最新文本第 33563 行) |
+| 第 33568, 33574, 33575 行 | Bits 10:8: Command (Write 010, Reload 100) | **【官方 PDF 已核对】** 对应官方原版第 261 页 Bits 10:8 (最新文本第 33593-33599 行) |
+| 第 33698, 33702, 33717 行 | 0504h-0507h EEPROM ADDRESS REGISTER | **【官方 PDF 已核对】** 对应官方原版第 262 页 12.14.50 节 (最新文本第 33698 行) |
+| 第 33744, 33748, 33769 行 | 0508h-050Bh EEPROM DATA REGISTER | **【官方 PDF 已核对】** 对应官方原版第 263 页 12.14.51 节 (最新文本第 33751 行) |
+| 第 33980 行 | Note 27: MI link 限制说明 | **【官方 PDF 已核对】** 对应官方原版第 265 页 Note 27 (最新文本第 33978 行) |
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
+
+**官方文档获取实况说明**：
+- 厂商官方地址: `https://download.beckhoff.com/download/document/Application_Notes/an_et9300_v1i10.pdf`
+- 访问实测状态: Beckhoff 官方 CloudFront CDN 返回 HTTP 403 / 404 (Access Denied / Not Found)，受厂商权限与下载限制保护，外部无法匿名只读下载；
+- 状态判定: 本地无源文件，未核验。严格保留为未验证项，绝不伪造核验结论。
+
 | 文档行号出处 | 章节与描述内容 | 核验状态与说明 |
 | :--- | :--- | :--- |
-| 第 9725 行 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (本地无 `an_et9300.txt`，属历史记录) |
+| 第 9725 行 | 第 15 章 第 129 页 `BOOTSTRAPMODE_SUPPORTED` 宏开关说明 | **【本地无源文件 / 未核验】** (Beckhoff 官方限制下载，本地无 `an_et9300.txt`，属历史记录) |
 | 第 9728 行 | 第 15 章 第 129 页 `Which mechanism is implement is up to the slave vendor.` | **【本地无源文件 / 未核验】** |
 
 ### 6.4 ETG 官方规范引用

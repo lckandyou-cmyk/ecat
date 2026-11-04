@@ -10,12 +10,14 @@ tools/verify_soes_quotes.py
 3. 本地真实 SOES 源码文件 (按照行号范围提取的代码片段)
 
 【严密防御与拦截机制】：
-- 清单为空列表时直接失败；
-- 清单内部重复 ID 直接失败；
-- 文档标记未配对 (有 begin 缺 end，或有 end 缺 begin) 直接失败；
-- 文档标记嵌套 (begin 内部再出现 begin) 直接失败；
-- 全库 Markdown 反向扫描：文档内出现未知 ID、重复标记或位置与清单 doc_path 不符直接失败；
-- 三方文本字符逐字逐行比对，任何差异直接失败。
+- 清单为空列表时直接失败 (退出码 2)；
+- 清单内部重复 ID 直接失败 (退出码 2)；
+- 本地 SOES 源码文件 SHA-256 校验不匹配直接失败 (退出码 1)；
+- 文档标记未配对 (有 begin 缺 end，或有 end 缺 begin) 直接失败 (退出码 1)；
+- 文档标记嵌套 (begin 内部再出现 begin) 直接失败 (退出码 1)；
+- 全库 Markdown 反向扫描：文档内出现未知 ID、重复标记或位置与清单 doc_path 不符直接失败 (退出码 1)；
+- 全库 Markdown 正文行号扫描：出现未在 quotes 登记且未在 exemptions 显式精确豁免的行号引用直接失败 (退出码 1)；
+- 三方文本字符逐字逐行比对，任何差异直接失败 (退出码 1)。
 
 【覆盖范围与承诺边界】：
 本工具仅针对外部清单文件显式登记的条目执行核验并作出真实性承诺，
@@ -26,8 +28,37 @@ import os
 import sys
 import json
 import re
+import hashlib
 import argparse
 from typing import List, Dict, Any, Tuple, Set
+
+def compute_file_sha256(filepath: str) -> str:
+    """计算文件的 SHA-256 哈希字符串"""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+def verify_source_checksums(soes_dir: str, file_checksums: Dict[str, str]) -> Tuple[bool, List[str]]:
+    """校验 SOES 本地源文件的 SHA-256 完整性"""
+    errors: List[str] = []
+    if not file_checksums:
+        return True, []
+
+    for fname, expected_hash in file_checksums.items():
+        full_path = os.path.join(soes_dir, fname)
+        if not os.path.isfile(full_path):
+            errors.append(f"基线源文件不存在: {full_path}")
+            continue
+        actual_hash = compute_file_sha256(full_path)
+        if actual_hash.lower() != expected_hash.lower():
+            errors.append(f"源文件 SHA-256 校验失败: {fname} (期望: {expected_hash}, 实际: {actual_hash})")
+
+    return (len(errors) == 0), errors
 
 def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, Any]], str]:
     """
@@ -62,7 +93,6 @@ def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, An
             active_qid = None
             active_begin_line = None
             code_buffer: List[str] = []
-            in_code_fenced = False
 
             for lidx, raw_line in enumerate(lines, 1):
                 line = raw_line.rstrip("\r\n")
@@ -85,7 +115,6 @@ def scan_all_markdown_tags(repo_root: str) -> Tuple[bool, Dict[str, Dict[str, An
                     active_qid = qid
                     active_begin_line = lidx
                     code_buffer = []
-                    in_code_fenced = False
                     continue
 
                 if e_match:
@@ -142,6 +171,86 @@ def extract_quote_from_source(source_path: str, start_line: int, end_line: int) 
     snippet = all_lines[start_line - 1 : end_line]
     return True, snippet, ""
 
+def is_line_covered_by_quote(src_basename: str, line_ref: str, quotes: List[Dict[str, Any]]) -> bool:
+    """检查一个正文行号引用是否被已登记的 Quote 块完整覆盖"""
+    parts = line_ref.split("-")
+    try:
+        if len(parts) == 1:
+            s = e = int(parts[0])
+        else:
+            s, e = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+
+    for q in quotes:
+        q_src = os.path.basename(q.get("source_file", ""))
+        q_s = q.get("start_line", 0)
+        q_e = q.get("end_line", 0)
+        if q_src == src_basename and q_s <= s and e <= q_e:
+            return True
+    return False
+
+def is_line_exempted(doc_rel: str, src_basename: str, line_ref: str, exemptions: List[Dict[str, Any]]) -> bool:
+    """检查正文行号引用是否在显式豁免清单中"""
+    for ex in exemptions:
+        ex_doc = ex.get("doc_path", "")
+        ex_src = ex.get("source_file", "")
+        ex_ref = ex.get("line_reference", "")
+
+        if ex_doc != "*" and os.path.normpath(ex_doc) != os.path.normpath(doc_rel):
+            continue
+        if ex_src != "*" and ex_src != src_basename:
+            continue
+        if ex_ref != "*" and ex_ref != line_ref:
+            continue
+        return True
+    return False
+
+def scan_unregistered_prose_lines(
+    repo_root: str,
+    quotes: List[Dict[str, Any]],
+    exemptions: List[Dict[str, Any]]
+) -> Tuple[bool, List[str]]:
+    """
+    全量扫描仓库 Markdown 正文中包含的行号引用，
+    严密拦截任何未在 quotes 登记且未在 exemptions 中显式精确豁免的行号引用。
+    """
+    p1 = re.compile(r"([a-zA-Z0-9_\-\./]+\.(?:c|h|txt|pdf))[:：](\d+(?:-\d+)?)")
+    p2 = re.compile(r"[`]?([a-zA-Z0-9_\-\./]+\.(?:c|h|txt|pdf))[`]?\s*第\s*(\d+(?:-\d+)?)\s*行")
+
+    unregistered_errors: List[str] = []
+
+    for root, dirs, files in os.walk(repo_root):
+        if ".git" in root or ".gemini" in root:
+            continue
+        for file in sorted(files):
+            if not file.endswith(".md"):
+                continue
+            full_path = os.path.join(root, file)
+            doc_rel = os.path.relpath(full_path, repo_root)
+
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    for lno, line in enumerate(f, 1):
+                        found_refs: List[Tuple[str, str]] = []
+                        for m in p1.findall(line):
+                            found_refs.append((os.path.basename(m[0]), m[1]))
+                        for m in p2.findall(line):
+                            found_refs.append((os.path.basename(m[0]), m[1]))
+
+                        for src_base, lref in found_refs:
+                            if is_line_covered_by_quote(src_base, lref, quotes):
+                                continue
+                            if is_line_exempted(doc_rel, src_base, lref, exemptions):
+                                continue
+                            unregistered_errors.append(
+                                f"文档 {doc_rel}:{lno} 发现未登记的正文行号引用: '{src_base}:{lref}' (必须在清单 quotes 中注册或在 exemptions 中精确豁免并说明理由)"
+                            )
+            except Exception as e:
+                unregistered_errors.append(f"读取文档失败: {doc_rel} ({e})")
+
+    return (len(unregistered_errors) == 0), unregistered_errors
+
 def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("============================================================")
     print(" SOES 源码引用三方严格核验工具 (Three-way Quote Verifier)")
@@ -157,24 +266,35 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
 
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest_data = json.load(f)
+            manifest_json = json.load(f)
     except Exception as e:
         print(f"[FATAL] 解析清单 JSON 失败: {e}")
         return 2
 
-    if not isinstance(manifest_data, list):
-        print(f"[FATAL] 清单根结构必须为 JSON Array")
+    # 兼容支持根为 List 或根为 Dict 的 JSON 结构
+    if isinstance(manifest_json, list):
+        manifest_quotes = manifest_json
+        file_checksums: Dict[str, str] = {}
+        prose_exemptions: List[Dict[str, Any]] = []
+        source_meta: Dict[str, Any] = {}
+    elif isinstance(manifest_json, dict):
+        manifest_quotes = manifest_json.get("quotes", [])
+        file_checksums = manifest_json.get("file_checksums", {})
+        prose_exemptions = manifest_json.get("prose_line_exemptions", [])
+        source_meta = manifest_json.get("source_metadata", {})
+    else:
+        print(f"[FATAL] 清单根结构必须为 JSON Object 或 JSON Array")
         return 2
 
     # 2. 空清单直接判定失败
-    if len(manifest_data) == 0:
+    if len(manifest_quotes) == 0:
         print(f"[FATAL] 清单内容为空列表 []，无核验条目")
         return 2
 
     manifest_map: Dict[str, Dict[str, Any]] = {}
     duplicate_ids: Set[str] = set()
 
-    for item in manifest_data:
+    for item in manifest_quotes:
         qid = item.get("id")
         if not qid:
             print(f"[FATAL] 清单存在无 ID 条目: {item}")
@@ -187,16 +307,31 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
         print(f"[FATAL] 清单中存在重复 ID: {sorted(list(duplicate_ids))}")
         return 2
 
-    # 3. 反向扫描全仓库 Markdown 文档中的全部标记
-    print("[1/3] 扫描仓库全部 Markdown 文档标记结构 (检查未配对/嵌套/重复)...")
+    # 3. 校验 SOES 本地散文件 SHA-256 基线
+    print("[1/5] 校验本地 SOES 源码文件 SHA-256 完整性基线...")
+    if source_meta:
+        print(f"      [出处说明] {source_meta.get('origin_statement', '')}")
+        print(f"      [上游版本] Commit: {source_meta.get('upstream_commit', 'UNKNOWN')}")
+    chk_ok, chk_errs = verify_source_checksums(soes_dir, file_checksums)
+    if not chk_ok:
+        for err in chk_errs:
+            print(f"  [FAIL] {err}")
+        return 1
+    if file_checksums:
+        print(f"  [OK] {len(file_checksums)} 个基线源码文件 SHA-256 比对完全一致！")
+    else:
+        print("  [WARN] 清单未指定 file_checksums，跳过源码哈希比对")
+
+    # 4. 反向扫描全仓库 Markdown 文档中的全部 quote 标记
+    print("[2/5] 扫描仓库全部 Markdown 文档标记结构 (检查未配对/嵌套/重复)...")
     scan_ok, doc_tags_map, scan_err = scan_all_markdown_tags(repo_root)
     if not scan_ok:
         print(f"  [FAIL] 文档标记反向扫描失败: {scan_err}")
         return 1
     print(f"  [OK] 文档扫描完成，共捕获 {len(doc_tags_map)} 处配对标记")
 
-    # 4. 反向核验：检查文档中是否有未知 ID 或出现在非指定文档中
-    print("[2/3] 反向交叉校验 (检查文档标记是否超出清单或位置错乱)...")
+    # 5. 反向核验：检查文档中是否有未知 ID 或出现在非指定文档中
+    print("[3/5] 反向交叉校验 (检查文档标记是否超出清单或位置错乱)...")
     for doc_qid, tag_info in doc_tags_map.items():
         if doc_qid not in manifest_map:
             print(f"  [FAIL] 反向拦截: 文档 {tag_info['doc_rel']}:{tag_info['line_no']} 存在清单未登记的未知 ID '{doc_qid}'")
@@ -208,8 +343,8 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
             return 1
     print("  [OK] 反向交叉校验通过，文档标记无遗留或错位")
 
-    # 5. 三方比对 (Manifest vs Doc vs Source)
-    print(f"[3/3] 执行三方逐行内容核验 (共 {len(manifest_data)} 处登记条目)...")
+    # 6. 三方比对 (Manifest vs Doc vs Source)
+    print(f"[4/5] 执行三方逐行内容核验 (共 {len(manifest_quotes)} 处登记条目)...")
     print("------------------------------------------------------------")
 
     failures = 0
@@ -271,13 +406,23 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
                         print(f"           Line {line_no}: 清单: {repr(e_l)} vs 源码: {repr(s_l)}")
 
     print("------------------------------------------------------------")
-    print(f" 三方核验统计: 检查 {checked_count} 条 | 通过: {checked_count - failures} 条 | 失败: {failures} 条")
-    if failures == 0:
-        print(">>> 全部三方比对 100% 吻合！清单、文档与 SOES 源码逐字一致！<<<")
-        return 0
-    else:
-        print(">>> 存在比对不一致项，三方核验失败！<<<")
+    if failures > 0:
+        print(f">>> 存在三方比对不一致项 ({failures} 处失败)！<<<")
         return 1
+
+    # 7. 全库 Markdown 未登记正文行号扫描
+    print(f"[5/5] 扫描全库 Markdown 正文行号引用 (匹配 quotes 与 {len(prose_exemptions)} 条精确豁免)...")
+    prose_ok, prose_errs = scan_unregistered_prose_lines(repo_root, manifest_quotes, prose_exemptions)
+    if not prose_ok:
+        for err in prose_errs:
+            print(f"  [FAIL] {err}")
+        return 1
+    print("  [OK] 全库 Markdown 正文行号扫描通过，未发现未登记或未豁免的行号引用")
+
+    print("------------------------------------------------------------")
+    print(f" 三方核验统计: 检查 {checked_count} 条 Quotes | 源码 SHA-256 比对通过 | 正文行号引用核准完毕")
+    print(">>> 全部三方比对 100% 吻合！清单、文档与 SOES 源码逐字一致！<<<")
+    return 0
 
 def main():
     parser = argparse.ArgumentParser(description="SOES 源码引用三方严格核验工具")

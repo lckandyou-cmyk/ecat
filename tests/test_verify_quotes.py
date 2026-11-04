@@ -5,17 +5,20 @@ tests/test_verify_quotes.py
 三方引用校验工具的全场景独立临时夹具测试套件。
 在完全隔离的临时目录 (TemporaryDirectory) 中构建仿真环境，
 测试覆盖以下全部场景：
-1. 正例 (三方完全吻合 -> 返回 0)
+1. 正例 (三方完全吻合、SHA-256 比对一致、无非法正文引用 -> 返回 0)
 2. 篡改文档引文字符 (-> 返回 1)
 3. 缺失文档配对结束标记 (-> 返回 1)
 4. 文档标记嵌套错误 (-> 返回 1)
-5. 篡改源文件内容 (-> 返回 1)
-6. 空清单 [] (-> 返回 2)
+5. 篡改源文件引文内容 (-> 返回 1)
+6. 空清单 [] 或 {"quotes": []} (-> 返回 2)
 7. 清单存在重复 ID (-> 返回 2)
 8. 源码文件缺失 (-> 返回 1)
 9. 反向扫描发现文档中存在清单未登记的未知 ID (-> 返回 1)
 10. 反向扫描发现标记出现在清单指定外的错误文档中 (-> 返回 1)
 11. 反向扫描发现文档中存在重复标记 (-> 返回 1)
+12. 源文件 SHA-256 哈希篡改/不匹配 (-> 返回 1)
+13. 文档正文出现未登记且未豁免的行号引用 (-> 返回 1)
+14. 文档正文行号引用配置了有效豁免项 (-> 返回 0)
 
 【安全保证】：
 本测试仅在临时目录中读写夹具，绝不修改用户真实的 /tmp/soes_src 目录与源码。
@@ -24,6 +27,7 @@ tests/test_verify_quotes.py
 import os
 import sys
 import json
+import hashlib
 import tempfile
 import subprocess
 
@@ -58,6 +62,9 @@ def create_base_fixture(temp_dir: str):
         for idx in range(14, 40):
             f.write(f"// Footer line {idx}\n")
 
+    # 计算源文件真实 SHA-256
+    file_hash = hashlib.sha256(open(src_full, "rb").read()).hexdigest()
+
     # 2. 创建仿真 Markdown 文档 (包含带标记的 fenced code block)
     with open(doc_full, "w", encoding="utf-8") as f:
         f.write("# Test Document\n\n")
@@ -68,18 +75,29 @@ def create_base_fixture(temp_dir: str):
         f.write("```\n")
         f.write("<!-- quote-end: TEST_Q1 -->\n")
 
-    # 3. 创建外部清单 JSON
-    manifest = [
-        {
-            "id": "TEST_Q1",
-            "doc_path": doc_rel,
-            "source_file": src_file,
-            "start_line": 10,
-            "end_line": 13,
-            "expected_snippet": SAMPLE_SNIPPET,
-            "description": "Test fixture quote"
-        }
-    ]
+    # 3. 创建外部清单 JSON (包含 SHA-256 基线、quotes 及 exemptions)
+    manifest = {
+        "source_metadata": {
+            "source_directory": src_dir,
+            "upstream_commit": "FIXTURE_COMMIT",
+            "origin_statement": "Fixture test source baseline"
+        },
+        "file_checksums": {
+            src_file: file_hash
+        },
+        "quotes": [
+            {
+                "id": "TEST_Q1",
+                "doc_path": doc_rel,
+                "source_file": src_file,
+                "start_line": 10,
+                "end_line": 13,
+                "expected_snippet": SAMPLE_SNIPPET,
+                "description": "Test fixture quote"
+            }
+        ],
+        "prose_line_exemptions": []
+    }
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
@@ -147,7 +165,7 @@ def test_fixture_suite():
             f.write("<!-- quote-begin: TEST_Q1 -->\n<!-- quote-begin: NESTED -->\n<!-- quote-end: TEST_Q1 -->\n")
         assert_case("Case 4: 嵌套标记错误拦截", 1, "发现嵌套标记", manifest, repo, soes)
 
-    # Case 5: 篡改源文件内容
+    # Case 5: 篡改源文件内容 (更新 hash 以隔离三方比对错误)
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
         src_path = os.path.join(soes, "esc_foe.c")
@@ -156,7 +174,14 @@ def test_fixture_suite():
         lines[11] = "      if (1 == 1)\n"
         with open(src_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-        assert_case("Case 5: 篡改源文件内容拦截", 1, "差异: 清单 vs 源码", manifest, repo, soes)
+        # 同步更新 manifest hash，确保错误报在三方比对而非 SHA 拦截
+        new_hash = hashlib.sha256(open(src_path, "rb").read()).hexdigest()
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["file_checksums"]["esc_foe.c"] = new_hash
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 5: 篡改源文件内容三方比对拦截", 1, "差异: 清单 vs 源码", manifest, repo, soes)
 
     # Case 6: 空清单 [] 拦截
     with tempfile.TemporaryDirectory() as td:
@@ -170,7 +195,7 @@ def test_fixture_suite():
         manifest, repo, soes = create_base_fixture(td)
         with open(manifest, "r", encoding="utf-8") as f:
             m = json.load(f)
-        m.append(m[0])
+        m["quotes"].append(m["quotes"][0])
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
         assert_case("Case 7: 清单重复 ID 拦截", 2, "存在重复 ID", manifest, repo, soes)
@@ -179,7 +204,7 @@ def test_fixture_suite():
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
         os.remove(os.path.join(soes, "esc_foe.c"))
-        assert_case("Case 8: 源码文件缺失拦截", 1, "源码引文提取失败", manifest, repo, soes)
+        assert_case("Case 8: 源码文件缺失拦截", 1, "基线源文件不存在", manifest, repo, soes)
 
     # Case 9: 反向扫描发现文档中存在清单未登记的未知 ID 拦截
     with tempfile.TemporaryDirectory() as td:
@@ -207,10 +232,47 @@ def test_fixture_suite():
             f.write("\n<!-- quote-begin: TEST_Q1 -->\n```c\nrepeat\n```\n<!-- quote-end: TEST_Q1 -->\n")
         assert_case("Case 11: 文档存在重复标记拦截", 1, "重复标记 'TEST_Q1'", manifest, repo, soes)
 
+    # Case 12: 源文件 SHA-256 哈希篡改拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["file_checksums"]["esc_foe.c"] = "0000000000000000000000000000000000000000000000000000000000000000"
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 12: 源文件 SHA-256 哈希篡改拦截", 1, "源文件 SHA-256 校验失败", manifest, repo, soes)
+
+    # Case 13: 文档正文出现未登记且未豁免的行号引用拦截
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n正文中引述未核验代码: `esc_foe.c:999`\n")
+        assert_case("Case 13: 未登记且未豁免的正文行号引用拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:999'", manifest, repo, soes)
+
+    # Case 14: 文档正文行号引用配置了有效精确豁免项通过
+    with tempfile.TemporaryDirectory() as td:
+        manifest, repo, soes = create_base_fixture(td)
+        doc_path = os.path.join(repo, "docs/test_doc.md")
+        with open(doc_path, "a", encoding="utf-8") as f:
+            f.write("\n正文中引述豁免代码: `esc_foe.c:999`\n")
+        with open(manifest, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        m["prose_line_exemptions"].append({
+            "doc_path": "docs/test_doc.md",
+            "source_file": "esc_foe.c",
+            "line_reference": "999",
+            "status": "LOCAL_MANUAL_VERIFIED",
+            "reason": "Test fixture exemption"
+        })
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+        assert_case("Case 14: 正文行号引用精确豁免通过", 0, "全部三方比对 100% 吻合", manifest, repo, soes)
+
     print("------------------------------------------------------------")
     print(f" 夹具测试统计: 共 {total_tests} 项 | 通过: {test_passed} 项 | 失败: {total_tests - test_passed} 项")
     if test_passed == total_tests:
-        print(">>> 校验器 11 项夹具测试全部通过！<<<")
+        print(">>> 校验器 14 项全场景夹具测试全部通过！<<<")
         return 0
     else:
         print(">>> 夹具测试存在失败项！<<<")
