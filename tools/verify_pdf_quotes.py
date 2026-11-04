@@ -7,18 +7,22 @@ tools/verify_pdf_quotes.py
 【核验原则与三方防御机制】：
 1. 外部清单文件登记 PDF 路径、SHA-256 哈希基线及引用条目；
 2. 逐条包含：id, doc_path, doc_line, line_text_hash, pdf_page, section_number, section_title, snippet；
-3. 【文档行绑定与防漂移】：
-   实际读取 doc_path 文档，检查指定 doc_line 是否存在并计算行文本 SHA-256，
-   比对 line_text_hash，彻底拦截文档行被删除、篡改或发生行号漂移；
+   可选字段：printed_page (底部印刷页码)；
+3. 【文档行多维绑定与防漂移】：
+   实际读取 doc_path 文档，不仅核实 line_text_hash，还必须校验文档行内实际包含清单声明的
+   section_number 与 pdf_page，杜绝“哈希正确但引文与清单页码/章节脱节”的伪造；
 4. 【精确片段定位与多命中歧义防御】：
    使用多空白正则定位完整规范化 snippet 的全部出现位置；
    对每一次命中分别解析其所属章节；若单页内多次命中跨越不同章节，立即歧义拒绝；
-5. 【严格标题与章节号全等比对】：
+5. 【排除目录点线页码被误判为章节标题】：
+   自动识别并过滤 TOC (目录) 点线页码 (如 "... 239" 或 ". . . . 239")，杜绝目录项干扰真实章节树；
+6. 【严格标题与章节号全等比对】：
    规范化后严格比对期望章节号与标题，严禁截断标题、子串模糊匹配或空标题通过；
-6. 【严格跨页章节归属核验】：
-   对跨页表格自动向前回溯定位所属前序章节定义；
-   【严禁把错误章节通过片段匹配放行】；
-7. 【PDF 文件完整性校验】：
+7. 【可选印刷页码与页脚严格核验】：
+   若条目声明了 printed_page，工具核验该页文本页脚必须存在对应的印刷页码标记；
+8. 【严格跨页章节归属核验】：
+   对跨页表格自动向前回溯定位所属前序章节定义，严禁把错误章节通过片段匹配放行；
+9. 【PDF 文件完整性校验】：
    计算 PDF 实际 SHA-256 哈希并比对预期值。
 """
 
@@ -93,7 +97,8 @@ class PdfExtractor:
 def extract_sections_from_page(page_text: str) -> List[Tuple[str, str, int]]:
     """
     从单页文本中提取章节或表格定义列表。
-    返回: [(section_number, section_title, char_position), ...] 按在页内出现的先后顺序排列
+    返回: [(section_number, section_title, char_position), ...] 按在页内出现的先后顺序排列。
+    【核心防御】：自动识别并排除目录 (TOC) 点线页码行，防止误判章节标题。
     """
     sections: List[Tuple[str, str, int]] = []
 
@@ -108,6 +113,9 @@ def extract_sections_from_page(page_text: str) -> List[Tuple[str, str, int]]:
         # 排除包含 Offset: 等后续非标题行
         if title.startswith("Offset:") or title.startswith("Size:"):
             continue
+        # 排除目录点线页码 (如 ".... 239", ". . . . 239" 或连续两个点以上)
+        if re.search(r"(?:\.\s*){2,}", title) or re.search(r"\.{2,}", title):
+            continue
         sections.append((num, title, m.start()))
 
     # 2. 匹配表格标题：例如 "TABLE 6-1: RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY"
@@ -118,6 +126,9 @@ def extract_sections_from_page(page_text: str) -> List[Tuple[str, str, int]]:
     for m in tbl_pattern.finditer(page_text):
         num = m.group(1).strip()
         title = normalize_whitespace(m.group(2))
+        # 排除目录点线页码
+        if re.search(r"(?:\.\s*){2,}", title) or re.search(r"\.{2,}", title):
+            continue
         sections.append((num, title, m.start()))
 
     # 按字符位置排序
@@ -162,11 +173,13 @@ def resolve_effective_section(
     return None, None
 
 def verify_doc_binding(quote: Dict[str, Any], repo_root: str) -> Tuple[bool, str]:
-    """严格核验文档行绑定与防篡改/防漂移"""
+    """严格核验文档行物理绑定、哈希、章节号与页码多维一致性"""
     qid = quote.get("id", "UNKNOWN")
     doc_path = quote.get("doc_path", "")
     doc_line = quote.get("doc_line")
     exp_hash = quote.get("line_text_hash", "")
+    exp_sec = quote.get("section_number", "")
+    exp_page = quote.get("pdf_page")
 
     if not doc_path:
         return False, f"[{qid}] 'doc_path' 不能为空"
@@ -204,7 +217,26 @@ def verify_doc_binding(quote: Dict[str, Any], repo_root: str) -> Tuple[bool, str
             f"  实际文本: {repr(actual_line)}"
         )
 
-    return True, f"  [DOC-OK] {qid:24s} -> {doc_path}:{doc_line} (哈希验证通过)"
+    # 校验文档行中是否物理包含清单声明的章节号与 PDF 页码 (A1: 防哈希正确但页码/章节脱节)
+    norm_exp_sec = normalize_whitespace(str(exp_sec)).lower()
+    if norm_exp_sec not in actual_line.lower():
+        return False, (
+            f"[{qid}] 【文档行章节号不一致拦截】！\n"
+            f"  清单声明章节号: '{exp_sec}'\n"
+            f"  文档行物理内容: {repr(actual_line)}\n"
+            f"  (文档行虽哈希吻合，但未包含清单声明的章节号！)"
+        )
+
+    if exp_page is not None:
+        if not re.search(r"\b" + re.escape(str(exp_page)) + r"\b", actual_line):
+            return False, (
+                f"[{qid}] 【文档行 PDF 页码不一致拦截】！\n"
+                f"  清单声明 PDF 页码: {exp_page}\n"
+                f"  文档行物理内容: {repr(actual_line)}\n"
+                f"  (文档行虽哈希吻合，但未包含清单声明的 PDF 页码！)"
+            )
+
+    return True, f"  [DOC-OK] {qid:24s} -> {doc_path}:{doc_line} (哈希、章节号与页码全部吻合)"
 
 def verify_single_quote(
     item: Dict[str, Any],
@@ -213,6 +245,7 @@ def verify_single_quote(
     """严格核验单条 PDF 引用"""
     qid = item.get("id", "UNKNOWN")
     pdf_page = item.get("pdf_page")
+    printed_page = item.get("printed_page")
     exp_sec_num = item.get("section_number", "")
     exp_sec_title = item.get("section_title", "")
     snippet = item.get("snippet", "")
@@ -235,7 +268,19 @@ def verify_single_quote(
     if not ok:
         return False, f"[{qid}] 无法读取第 {pdf_page} 页: {err}"
 
-    # 1. 片段精确位置匹配 (支持跨换行与任意连续空白)
+    # 1. 校验可选 printed_page 并比对 PDF 页脚 (A2)
+    if printed_page is not None:
+        printed_str = str(printed_page).strip()
+        # 匹配页脚形式，如 "DS00001909A-page 253" 或 "-page 253" 或 "Page 253"
+        footer_pat = re.compile(r"(?:-page\s*|\bpage\s+)" + re.escape(printed_str) + r"\b", re.IGNORECASE)
+        if not footer_pat.search(page_text):
+            return False, (
+                f"[{qid}] 【印刷页码校验拦截】！\n"
+                f"  清单期望印刷页码: '{printed_str}'\n"
+                f"  在 PDF 第 {pdf_page} 页未找到该印刷页码页脚标记！"
+            )
+
+    # 2. 片段精确位置匹配 (支持跨换行与任意连续空白)
     escaped_tokens = [re.escape(t) for t in tokens]
     snippet_pattern = re.compile(r"\s+".join(escaped_tokens))
     matches = list(snippet_pattern.finditer(page_text))
@@ -243,7 +288,7 @@ def verify_single_quote(
     if not matches:
         return False, f"[{qid}] 片段未在第 {pdf_page} 页中找到！\n  期望片段: {repr(normalize_whitespace(snippet))}"
 
-    # 2. 对每一次命中分别解析其章节归属
+    # 3. 对每一次命中分别解析其章节归属
     resolved_sections: List[Tuple[str, str]] = []
     for m in matches:
         pos = m.start()
@@ -252,7 +297,7 @@ def verify_single_quote(
             return False, f"[{qid}] 无法解析第 {pdf_page} 页在位置 {pos} 的有效章节归属！"
         resolved_sections.append((sec_num, sec_title))
 
-    # 3. 处理重复命中：若命中跨越了不同章节，存在归属歧义，必须拒绝！
+    # 4. 处理重复命中：若命中跨越了不同章节，存在归属歧义，必须拒绝！
     distinct_sections = list(set(
         (normalize_whitespace(s[0]).lower(), normalize_whitespace(s[1]).lower())
         for s in resolved_sections
@@ -264,7 +309,7 @@ def verify_single_quote(
             f"  (拒绝模糊放行，必须精准无歧义！)"
         )
 
-    # 4. 章节号与标题严格全等核验 (严禁截断标题或空标题放行)
+    # 5. 章节号与标题严格全等核验 (严禁截断标题或空标题放行)
     actual_num, actual_title = resolved_sections[0]
     norm_act_num = normalize_whitespace(actual_num)
     norm_act_title = normalize_whitespace(actual_title)
@@ -286,7 +331,8 @@ def verify_single_quote(
             f"  (严格全等比对，严禁截断标题或空标题放行！)"
         )
 
-    return True, f"  [PDF-OK] {qid:24s} -> Page {pdf_page} | Sec {actual_num}: {actual_title}"
+    print_info = f" (印刷页: {printed_page})" if printed_page is not None else ""
+    return True, f"  [PDF-OK] {qid:24s} -> Page {pdf_page}{print_info} | Sec {actual_num}: {actual_title}"
 
 def verify_pdf_manifest(manifest_path: str, override_pdf: Optional[str] = None, repo_root: Optional[str] = None) -> int:
     """校验 PDF 引文清单主流程"""
@@ -305,7 +351,8 @@ def verify_pdf_manifest(manifest_path: str, override_pdf: Optional[str] = None, 
         print("[FATAL] 清单根结构必须为 JSON Object")
         return 2
 
-    pdf_path = override_pdf or data.get("pdf_path")
+    raw_pdf_path = override_pdf or data.get("pdf_path")
+    pdf_path = os.path.expanduser(raw_pdf_path) if raw_pdf_path else None
     expected_hash = data.get("pdf_sha256")
     quotes = data.get("quotes")
 

@@ -12,7 +12,7 @@
    - 内容：LAN9252 手册 AL Event Request 寄存器（0220h，跨第 252-253 页，章节号待定为 12.14.34，【未核实（待 PDF 工具全量独立核查）】）Bit 0 AL Control Event 是否由 PDI 读 0120h 自动清除；以及 ET1100、AX58100 等其他 ESC 控制器的清除条件。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 3.1 节第 5 条。
 2. **SII Configuration Area Checksum 存放位置与计算算法【未核实】**：
-   - 内容：LAN9252 手册 Section 12.14.49（第 261 页）定义了校验和错误位 Bit 11，但全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法。
+   - 内容：LAN9252 手册 Section 12.14.49（第 261 页，【未核实（未纳入自动化核验清单）】）定义了校验和错误位 Bit 11，但全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 4.3 节第 3 条。
 3. **SII Bootstrap 邮箱配置段偏移与格式【未核实】**：
    - 内容：ETG.2010 官方规范中关于 Bootstrap 邮箱配置段的字偏移地址（暂标为 0x14-0x17、0x1C bit3）及其标准定义。
@@ -30,7 +30,7 @@
    - 内容：具体哪些型号的 Cortex-M MCU 在执行片内 Flash 擦写期间会导致 CPU 硬件彻底挂起、无法执行 RAM 中的协议栈代码。
    - 出处：`docs/open-issues.md` 第 4 节第 2 条及 `docs/architecture/SAD-v0.1.md` 第 5.1 节第 14 条。
 8. **ESC 错误挂起状态后果推断【推断】**：
-   - 内容：依据 LAN9252 手册 Section 12.14.49（第 261 页）仅给出了 EEPROM 加载失败状态位（Bit 11 与 Bit 12），工程推断其无法进入 BOOT 态、网络恢复完全失效。
+   - 内容：依据 LAN9252 手册 Section 12.14.49（第 261 页，【未核实（未纳入自动化核验清单）】）仅给出了 EEPROM 加载失败状态位（Bit 11 与 Bit 12），工程推断其无法进入 BOOT 态、网络恢复完全失效。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 4.3 节第 1 条。
 
 ---
