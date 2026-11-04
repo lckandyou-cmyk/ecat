@@ -808,6 +808,25 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     uint8_t an = 0x01U;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, 0x13U, "post hook 改写为 BOOT + Error (0x13)");
+    TEST_ASSERT_EQ_INT(adapter.last_al_error, 0x0014U, "记录 AL 状态错误码 0x0014 ALERR_NOVALIDFIRMWARE");
+
+    /* 验证非 BOOT_TO_INIT 迁移时不拦截 */
+    as = 0x12U; /* PREOP_TO_BOOT 或其他状态 */
+    an = 0x03U;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, 0x03U, "非 BOOT_TO_INIT 迁移不予拦截改写");
+
+    /* 验证提交成功时正常允许迁移至 INIT */
+    adapter.last_commit_failed = false;
+    as = 0x13U;
+    an = 0x01U;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, 0x01U, "提交成功时允许正常迁移至 INIT");
+
+    /* 验证空指针健壮性 */
+    ecat_foe_soes_post_state_hook(NULL, &as, &an);
+    ecat_foe_soes_post_state_hook(&adapter, NULL, &an);
+    ecat_foe_soes_post_state_hook(&adapter, &as, NULL);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -851,6 +870,21 @@ static void test_config_validation_rules(void)
     memset(unterminated_proj, 'A', sizeof(unterminated_proj));
     cfg.project_name = unterminated_proj;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "project_name 无 \\0 终止符探测必须报错");
+
+    /* B3. 验证 31 字节合法上限边界与 32 字节超长拒绝 */
+    char name_31[32];
+    memset(name_31, 'X', 31);
+    name_31[31] = '\0';
+    cfg.project_name = name_31;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), 0, "31 字节合法上限项目名初始化必须成功");
+    TEST_ASSERT_EQ_INT(strcmp(ecat_foe_core_get_project_name(&core), name_31), 0, "31 字节项目名完整保存无截断");
+
+    char name_32[33];
+    memset(name_32, 'Y', 32);
+    name_32[32] = '\0';
+    cfg.project_name = name_32;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), -1, "32 字节超长项目名必须返回 -1 拒绝");
+    TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME, "超长项目名错误码匹配");
     cfg.project_name = "SERVO_DRV";
 
     /* C. max_header_size 下限/对齐/上限检查 */
@@ -1329,6 +1363,13 @@ static void test_self_referential_pointer_elimination_and_idle_copy(void)
     TEST_ASSERT(core.cfg.project_name == NULL, "init 后 cfg.project_name 设为 NULL 消除自指针");
     TEST_ASSERT((const void *)core.cfg.project_name != (const void *)core.local_project_name, "杜绝内部自身指针指向");
     TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "安全接口返回正确内部项目名");
+
+    /* 1.1 验证使用 &core.cfg (project_name=NULL) 重新初始化可安全回退并保留 local_project_name */
+    int ret_reinit = ecat_foe_core_init(&core, &core.cfg);
+    TEST_ASSERT_EQ_INT(ret_reinit, 0, "使用 &core.cfg 重新初始化成功");
+    TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "重新初始化后保留原有项目名");
+    TEST_ASSERT(core.cfg.project_name == NULL, "重新初始化后 cfg.project_name 仍为 NULL 消除自指针");
+    TEST_ASSERT(core.is_configured, "重新初始化后核心依然处于 configured");
 
     /* 2. 验证非活跃状态下结构体支持按值复制/模板分发 */
     ecat_foe_core_t core_copy = core;

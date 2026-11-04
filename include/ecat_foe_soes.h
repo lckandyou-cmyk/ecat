@@ -17,6 +17,7 @@ typedef struct {
     ecat_foe_core_t *core;
     uint32_t         buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     bool             last_commit_failed; /**< 记录最后提交失败状态 (用于 BOOT->INIT 拦截) */
+    uint16_t         last_al_error;      /**< 记录设置的 AL 错误码 (如 0x0014 ALERR_NOVALIDFIRMWARE) */
 } ecat_foe_soes_adapter_t;
 
 /**
