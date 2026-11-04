@@ -138,6 +138,28 @@
         "   }"
       ],
       "description": "post_state_change_hook 调用点 (在 stopmbx 之后)"
+    },
+    {
+      "id": "Q9_ESC_C_ESC_STATE_ALEVENT_CHECK",
+      "doc_path": "docs/architecture/soes-integration-options.md",
+      "source_file": "esc.c",
+      "start_line": 1099,
+      "end_line": 1110,
+      "expected_snippet": [
+        "   /* Do we have a state change request pending */",
+        "   if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)",
+        "   {",
+        "      ESC_read (ESCREG_ALCONTROL, (void *) &ESCvar.ALcontrol,",
+        "                sizeof (ESCvar.ALcontrol));",
+        "      ESCvar.ALcontrol = etohs (ESCvar.ALcontrol);",
+        "   }",
+        "   else",
+        "   {",
+        "      /* nothing to do */",
+        "      return;",
+        "   }"
+      ],
+      "description": "ESC_state() 中对 ALevent CONTROL 事件标志位检查与提前退出"
     }
   ],
   "prose_line_exemptions": [

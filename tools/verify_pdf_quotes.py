@@ -11,7 +11,7 @@ tools/verify_pdf_quotes.py
 3. 【文档行多维绑定与防漂移】：
    实际读取 doc_path 文档，不仅核实 line_text_hash，还必须校验文档行内实际包含清单声明的
    section_number 与 pdf_page，杜绝“哈希正确但引文与清单页码/章节脱节”的伪造；
-4. 【精确片段定位与多命中歧义防御】：
+4. 【规范化片段定位与多命中歧义防御】：
    使用多空白正则定位完整规范化 snippet 的全部出现位置；
    对每一次命中分别解析其所属章节；若单页内多次命中跨越不同章节，立即歧义拒绝；
 5. 【排除目录点线页码被误判为章节标题】：
@@ -172,8 +172,59 @@ def resolve_effective_section(
 
     return None, None
 
+def extract_printed_page_from_footer(page_text: str) -> Optional[int]:
+    """
+    从页面文本末尾 5 行中提取标准印刷页脚页码 (A4 强化校验)。
+    规范格式：^\\s*DS\\d+[A-Z]?-page\\s+(\\d+)\\s*$
+    例如：'DS00001909A-page 253' 或 'DS9999-page 101'
+    若末尾 5 行未找到符合规范的页脚，返回 None。
+    """
+    non_empty = [l.strip() for l in page_text.splitlines() if l.strip()]
+    footer_lines = non_empty[-5:] if len(non_empty) >= 5 else non_empty
+    pat = re.compile(r"^DS\d+[A-Z]?-page\s+(\d+)$", re.IGNORECASE)
+    for line in footer_lines:
+        m = pat.match(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+def check_authoritative_docs_for_unregistered_citations(repo_root: str) -> Tuple[bool, List[str]]:
+    """
+    A3: 扫描权威文档 (README, SAD, efw-format, open-issues)，
+    禁止手写 LAN9252 页码章节，指向时只允许 [pdf:ID]。
+    违规模式: 12.14.x, 6.2.1.x, 第 N 页, page N, Table 6-x.
+    """
+    authoritative_docs = [
+        "README.md",
+        "docs/architecture/SAD-v0.1.md",
+        "docs/spec/efw-format-v0.1.md",
+        "docs/open-issues.md",
+    ]
+    prohibited_pat = re.compile(
+        r"(?:"
+        r"(?<![\d.])12\.14(?:\.\d+)?(?![\d.])"
+        r"|(?<![\d.])6\.2\.1(?:\.\d+)?(?![\d.])"
+        r"|第\s*\d+\s*页"
+        r"|\bpage\s+\d+\b"
+        r"|Table\s+6-\d+"
+        r")",
+        re.IGNORECASE
+    )
+    errors = []
+    for doc_rel in authoritative_docs:
+        doc_full = os.path.join(repo_root, doc_rel)
+        if not os.path.isfile(doc_full):
+            continue
+        with open(doc_full, "r", encoding="utf-8", errors="replace") as f:
+            for lno, line in enumerate(f, 1):
+                clean_line = re.sub(r"\[pdf:[^\]]+\]", "", line)
+                m = prohibited_pat.search(clean_line)
+                if m:
+                    errors.append(f"{doc_rel}:{lno} 发现禁止的手写引用模式 '{m.group(0)}': {line.strip()}")
+    return len(errors) == 0, errors
+
 def verify_doc_binding(quote: Dict[str, Any], repo_root: str) -> Tuple[bool, str]:
-    """严格核验文档行物理绑定、哈希、章节号与页码多维一致性"""
+    """严格核验文档行物理绑定、哈希、章节号与页码多维一致性 (防 A1 旁路伪造)"""
     qid = quote.get("id", "UNKNOWN")
     doc_path = quote.get("doc_path", "")
     doc_line = quote.get("doc_line")
@@ -217,24 +268,90 @@ def verify_doc_binding(quote: Dict[str, Any], repo_root: str) -> Tuple[bool, str
             f"  实际文本: {repr(actual_line)}"
         )
 
-    # 校验文档行中是否物理包含清单声明的章节号与 PDF 页码 (A1: 防哈希正确但页码/章节脱节)
-    norm_exp_sec = normalize_whitespace(str(exp_sec)).lower()
-    if norm_exp_sec not in actual_line.lower():
+    # 1. 校验文档行章节号 (A5: 使用 (?<![\d.])…(?![\d.]) 数字边界，防 12.14.340 伪造 12.14.34)
+    norm_exp_sec = normalize_whitespace(str(exp_sec))
+    sec_boundary_pat = re.compile(r"(?<![\d.])" + re.escape(norm_exp_sec) + r"(?![\d.])", re.IGNORECASE)
+    if not sec_boundary_pat.search(actual_line):
         return False, (
             f"[{qid}] 【文档行章节号不一致拦截】！\n"
             f"  清单声明章节号: '{exp_sec}'\n"
             f"  文档行物理内容: {repr(actual_line)}\n"
-            f"  (文档行虽哈希吻合，但未包含清单声明的章节号！)"
+            f"  (文档行虽哈希吻合，但未包含符合边界规范的章节号！)"
         )
 
+    # 2. 校验文档行 PDF 页码与多维矛盾防御 (A1-b, A1-c)
     if exp_page is not None:
-        if not re.search(r"\b" + re.escape(str(exp_page)) + r"\b", actual_line):
-            return False, (
-                f"[{qid}] 【文档行 PDF 页码不一致拦截】！\n"
-                f"  清单声明 PDF 页码: {exp_page}\n"
-                f"  文档行物理内容: {repr(actual_line)}\n"
-                f"  (文档行虽哈希吻合，但未包含清单声明的 PDF 页码！)"
-            )
+        if actual_line.startswith("|") and actual_line.endswith("|"):
+            cells = [c.strip() for c in actual_line.split("|")]
+            # cells[0] is '', cells[1] is Section, cells[2] is PDF page, cells[3] is Printed page
+            if len(cells) >= 4:
+                sec_cell = cells[1]
+                pdf_cell = cells[2]
+
+                if not sec_boundary_pat.search(sec_cell):
+                    return False, (
+                        f"[{qid}] 【文档行表格章节列不一致拦截】！\n"
+                        f"  清单声明章节号: '{exp_sec}'\n"
+                        f"  表格章节单元格: {repr(sec_cell)}"
+                    )
+
+                page_matches = re.findall(r"(?:Page|第)\s*(\d+)", pdf_cell, re.IGNORECASE)
+                if not page_matches:
+                    page_matches = re.findall(r"\b(\d+)\b", pdf_cell)
+
+                if not page_matches:
+                    return False, (
+                        f"[{qid}] 【文档行 PDF 页码单元格未识别到页码】！\n"
+                        f"  清单声明 PDF 页码: {exp_page}\n"
+                        f"  表格页码单元格: {repr(pdf_cell)}"
+                    )
+
+                primary_page = int(page_matches[0])
+                if primary_page != exp_page:
+                    return False, (
+                        f"[{qid}] 【文档行 PDF 页码不一致拦截】！\n"
+                        f"  清单声明 PDF 页码: {exp_page}\n"
+                        f"  表格声明主页码: {primary_page} (单元格: {repr(pdf_cell)})\n"
+                        f"  (表格主页码与清单声明不符！)"
+                    )
+
+                # 检查矛盾页码声明 (A1-c)
+                explicit_pages = re.findall(r"(?:Page|第)\s*(\d+)\s*(?:页)?", pdf_cell, re.IGNORECASE)
+                if len(explicit_pages) > 1:
+                    for p_str in explicit_pages:
+                        if int(p_str) != exp_page:
+                            # 允许在注释中说明跨页标题位置 (如 "标题在 252 页" / "Title on 3")
+                            if not re.search(r"(?:标题在|Title on)\s*(?:第)?\s*" + re.escape(p_str), pdf_cell, re.IGNORECASE):
+                                return False, (
+                                    f"[{qid}] 【文档行存在矛盾页码拦截】！\n"
+                                    f"  清单声明 PDF 页码: {exp_page}\n"
+                                    f"  发现矛盾页码声明: {p_str} (单元格: {repr(pdf_cell)})"
+                                )
+        else:
+            page_pat = re.compile(r"(?:Page|第)\s*(\d+)", re.IGNORECASE)
+            p_matches = page_pat.findall(actual_line)
+            if p_matches:
+                primary = int(p_matches[0])
+                if primary != exp_page:
+                    return False, (
+                        f"[{qid}] 【文档行 PDF 页码不一致拦截】！\n"
+                        f"  清单声明 PDF 页码: {exp_page}\n"
+                        f"  文档行主页码: {primary} (内容: {repr(actual_line)})"
+                    )
+                for p_str in p_matches:
+                    if int(p_str) != exp_page:
+                        return False, (
+                            f"[{qid}] 【文档行存在矛盾页码拦截】！\n"
+                            f"  清单声明 PDF 页码: {exp_page}\n"
+                            f"  发现矛盾页码: {p_str} (内容: {repr(actual_line)})"
+                        )
+            else:
+                if not re.search(r"(?<![\d.])" + re.escape(str(exp_page)) + r"(?![\d.])", actual_line):
+                    return False, (
+                        f"[{qid}] 【文档行 PDF 页码不一致拦截】！\n"
+                        f"  清单声明 PDF 页码: {exp_page}\n"
+                        f"  文档行物理内容: {repr(actual_line)}"
+                    )
 
     return True, f"  [DOC-OK] {qid:24s} -> {doc_path}:{doc_line} (哈希、章节号与页码全部吻合)"
 
@@ -268,19 +385,24 @@ def verify_single_quote(
     if not ok:
         return False, f"[{qid}] 无法读取第 {pdf_page} 页: {err}"
 
-    # 1. 校验可选 printed_page 并比对 PDF 页脚 (A2)
+    # 1. 校验可选 printed_page 并比对 PDF 页脚 (A4 强化校验)
     if printed_page is not None:
-        printed_str = str(printed_page).strip()
-        # 匹配页脚形式，如 "DS00001909A-page 253" 或 "-page 253" 或 "Page 253"
-        footer_pat = re.compile(r"(?:-page\s*|\bpage\s+)" + re.escape(printed_str) + r"\b", re.IGNORECASE)
-        if not footer_pat.search(page_text):
+        found_prn = extract_printed_page_from_footer(page_text)
+        if found_prn is None:
+            return False, (
+                f"[{qid}] 【印刷页码页脚缺失拦截】！\n"
+                f"  清单期望印刷页码: '{printed_page}'\n"
+                f"  在 PDF 第 {pdf_page} 页尾 5 行内未找到符合 '^DS\\d+[A-Z]?-page\\s+(\\d+)$' 规范的页脚标记！"
+            )
+        if found_prn != int(printed_page):
             return False, (
                 f"[{qid}] 【印刷页码校验拦截】！\n"
-                f"  清单期望印刷页码: '{printed_str}'\n"
-                f"  在 PDF 第 {pdf_page} 页未找到该印刷页码页脚标记！"
+                f"  清单期望印刷页码: '{printed_page}'\n"
+                f"  页尾实际提取印刷页码: '{found_prn}'\n"
+                f"  (页脚印刷页码与清单不匹配！)"
             )
 
-    # 2. 片段精确位置匹配 (支持跨换行与任意连续空白)
+    # 2. 片段规范化位置匹配 (支持跨换行与任意连续空白)
     escaped_tokens = [re.escape(t) for t in tokens]
     snippet_pattern = re.compile(r"\s+".join(escaped_tokens))
     matches = list(snippet_pattern.finditer(page_text))
@@ -391,6 +513,15 @@ def verify_pdf_manifest(manifest_path: str, override_pdf: Optional[str] = None, 
     print(f" PDF 路径: {pdf_path}")
     print(f" 仓库根目录: {effective_repo_root}")
     print("============================================================")
+
+    # 0. 扫描权威文档禁止手写 LAN9252 引用模式 (A3: 仅允许 [pdf:ID])
+    print("[0/3] 扫描权威文档禁止手写 LAN9252 引用模式 (A3: 仅允许 [pdf:ID])...")
+    ok_a3, a3_errors = check_authoritative_docs_for_unregistered_citations(effective_repo_root)
+    if not ok_a3:
+        for err in a3_errors:
+            print(f"  [FAIL] {err}")
+        return 1
+    print("  [OK] 权威文档中无手写 LAN9252 违规引用模式。")
 
     # 1. 校验 PDF 文件 SHA-256 哈希完整性
     print("[1/3] 校验 PDF 文件完整性与 SHA-256 基线...")

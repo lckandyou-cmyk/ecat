@@ -24,7 +24,7 @@
 ### 1.2 匹配机理与潜在隐患分析 (静态推断与动态验证界定)
 以下分析基于对 SOES 原生源码第 70~73 行的**静态代码推断 (Static Code Inspection)**，尚未在主站物理环境下完成全流程动态验证：
 1. **由接收长度决定的前缀匹配**：
-   - 比较长度参数为 `num_chars`（即主站发送的文件名长度）。这属于前缀匹配，绝非严格的全名精确匹配；
+   - 比较长度参数为 `num_chars`（即主站发送的文件名长度）。这属于前缀匹配，非严格的全名比对；
 2. **【静态推断】空文件名命中首条配置隐患**：
    - 当主站发来的 WRQ 报文未携带文件名或文件名长度为 0 时，`num_chars == 0`；
    - 根据 C99 标准，`strncmp(s1, s2, 0)` 恒等于 0，`0 == 0` 条件在循环的第 1 次迭代（`i = 0`）即无条件成立；
@@ -85,8 +85,8 @@
 
 - **源码事实**：在 `data_len == 0` 分支，`FOE_fclose()` 的返回值确实被直接丢弃，即使底层提交返回错误，SOES 依然会发出成功 ACK 并重置状态。
 
-### 2.2 防砖能力与可靠性客观边界 (消除绝对化保证)
-此前文档中关于“绝不会变砖”、“必然无法启动”等断言不够客观严谨。设备在异常中断或校验失败后能否可靠停留在 Bootloader，**高度依赖以下系统与工程边界条件，不存在绝对保证**：
+### 2.2 防砖能力与可靠性客观边界
+此前文档中关于“不会变砖”、“必然无法启动”等断言不够客观严谨。设备在异常中断或校验失败后能否可靠停留在 Bootloader，**高度依赖以下系统与工程边界条件，不存在无条件保证**：
 1. **驱动有效标记的非易失性持久化**：
    - 核心机在解完固件头后调用 `invalidate()`，要求清除固件有效标记；
    - **关键依赖**：此操作必须在非易失介质（Flash 扇区或特定标志位）上实现掉电原子性持久化。若硬件仅在 RAM 中修改标记、或标记擦写期间发生断电造成状态未定义，设备重启后可能误跳入损坏固件；
@@ -192,15 +192,37 @@ void ESC_ALerror (uint16_t errornumber);
    - **执行时机**：`post_state_change_hook` 在 `switch(as)` 退出后被调用。
    - **技术影响分析**：当进入 post 钩子时，`ESC_stopmbx()` 已经完成，邮箱已被停用。若在此处将 `*an` 改写回 `ESCboot | ESCerror` 并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`，虽然可以在 AL 状态寄存器中呈现错误并阻断进入 INIT，但**邮箱已停，主站无法在该状态下通过邮箱继续交互，必须先重新走状态机恢复流程**。
 
+4. **AL Event 检查与提前退出机制** (第 1099~1110 行)：
+
+<!-- quote-begin: Q9_ESC_C_ESC_STATE_ALEVENT_CHECK -->
+```c
+   /* Do we have a state change request pending */
+   if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)
+   {
+      ESC_read (ESCREG_ALCONTROL, (void *) &ESCvar.ALcontrol,
+                sizeof (ESCvar.ALcontrol));
+      ESCvar.ALcontrol = etohs (ESCvar.ALcontrol);
+   }
+   else
+   {
+      /* nothing to do */
+      return;
+   }
+```
+<!-- quote-end: Q9_ESC_C_ESC_STATE_ALEVENT_CHECK -->
+
+   - **时序与机理分析**：`ESC_state()` 首先检查 `ESCvar.ALevent & ESCREG_ALEVENT_CONTROL`（0220h 寄存器 Bit 0）。若该事件位未置位，函数直接 `return;` 退出，不会主动读取 `ESCREG_ALCONTROL` (0120h)。
+   - **与硬件行为联动**：依据 LAN9252 手册 [pdf:PDF_Q6_AL_EVENT_CLEAR_PDI]，PDI 读取 0120h 会自动清除 0220h Bit 0。若先前 APP 读取了 0120h，新启动的协议栈如果仅依赖 `ESCvar.ALevent` 轮询，将直接命中 `else return;` 无法进入状态迁移逻辑。
+
 ### 4.2 现有实现状态界定 (区分设计与实现)
-- **【单测桩仿真与局限性】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 实现了双参数 `ecat_foe_soes_post_state_hook(adapter, as, an)` 的单测桩，能够在 `*as == 0x13U` 且 `last_commit_failed == true` 时改写 `*an = 0x13U` (BOOT|Error) 并记录 `last_al_error = 0x0014U` (ALERR_NOVALIDFIRMWARE)；
+- **【单测桩仿真与局限性】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 实现了双参数 `ecat_foe_soes_post_state_hook(adapter, as, an)` 的单测桩，能够在 `*as == 0x13U` 且核心机未正常完成 finalize（或处于未闭环活跃会话/错误态）时改写 `*an = 0x13U` (BOOT|Error) 并通过注入的 `al_error_fn` 回调上报 `0x0014U` (ALERR_NOVALIDFIRMWARE)；
 - **局限性与待验证项**：当前仍为单测桩，**未引入 SOES 真实头文件，未在真实硬件上集成编译，未进行真实主站动态联调【未核实/待开发与真机动态验证】**。真实硬件环境下由于邮箱已在 switch 内部通过 `ESC_stopmbx()` 停止，主站无法在该状态下通过 FoE 邮箱继续交互，必须先按 EtherCAT 规范走状态机复位恢复流程。
 
 ---
 
 ## 5. 源码引用自动化校验清单 (Registered Quotes)
 
-为了保证本文档引用的每一处 SOES 源码绝对真实，项目提供了三方校验脚本 `tools/verify_soes_quotes.py` 与外部清单 `docs/quotes_manifest.json`，针对以下明确登记的源码条目进行全量行号与文本三方比对：
+为了保证本文档引用的每一处 SOES 源码真实可靠，项目提供了三方校验脚本 `tools/verify_soes_quotes.py` 与外部清单 `docs/quotes_manifest.json`，针对以下明确登记的源码条目进行全量行号与文本三方比对：
 
 | 引用编号 | 文件路径 | 行号范围 | 校验内容描述 |
 | :--- | :--- | :--- | :--- |
@@ -212,8 +234,9 @@ void ESC_ALerror (uint16_t errornumber);
 | `Q6_ESC_C_PRE_HOOK_INVOCATION` | `esc.c` | 1128 - 1135 | `pre_state_change_hook` 调用与迁移码合成时机 |
 | `Q7_ESC_C_BOOT_TO_INIT` | `esc.c` | 1191 - 1196 | `BOOT_TO_INIT` 分支执行 `ESC_stopmbx` 时机 |
 | `Q8_ESC_C_POST_HOOK_INVOCATION` | `esc.c` | 1304 - 1308 | `post_state_change_hook` 调用点位于停邮箱之后 |
+| `Q9_ESC_C_ESC_STATE_ALEVENT_CHECK` | `esc.c` | 1099 - 1110 | `ESC_state()` 检查 ALevent CONTROL 事件标志与提前退出 |
 
-*说明：校验脚本通过读取 `docs/quotes_manifest.json`，同时提取本文档中的 `<!-- quote-begin: <ID> -->` 块与本地 SOES 源码对应行进行三方严格核验。本工具仅对上述明确登记的 8 处引用条目作出真实性承诺，不涵盖未登记引文。*
+*说明：校验脚本通过读取 `docs/quotes_manifest.json`，同时提取本文档中的 `<!-- quote-begin: <ID> -->` 块与本地 SOES 源码对应行进行三方严格核验。本工具仅对上述明确登记的 9 处引用条目作出真实性承诺，不涵盖未登记引文。*
 
 ---
 
@@ -257,6 +280,7 @@ void ESC_ALerror (uint16_t errornumber);
 - 文本转换文件: `/tmp/vendor_docs/lan9252.txt` (40,871 行, SHA-256: `e9839ad1bbd0ee4fe725584b0d2fa8fd545693a6f974ff4f9e193f698790b2e1`)
 - 核验比对说明：本表对照 Microchip 官方原版 DS00001909A PDF 进行自动化与人工盘点，明确区分 PDF 阅读器物理页码与手册底部印刷页码。目前仅第 Q1 至 Q6 项纳入自动化清单并经由 `tools/verify_pdf_quotes.py` 工具完成逐页文本与章节归属严格核验；其余条目尚未纳入自动化核验清单，客观如实标为【未核实（未纳入自动化核验清单）】，绝不作无证据推断或宣称全量已验证。
 
+<!-- pdf-table-begin -->
 | 官方章节 (Section) | PDF 物理页 | 底部印刷页 | 英文逐字原文 (English Verbatim Text) | 当前文本转换行号 (`/tmp/vendor_docs/lan9252.txt`) | 历史引用行号 (Historical Citation) | 自动化核验状态与依据 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Table 6-1 (复位源与功能影响表) | Page 38 | Page 38 | `RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY` (`EEPROM Loader Run`) | 第 4694, 4718 行 | 第 4758 行 | **【PDF 工具逐页与章节归属核验通过】** (Q1) |
@@ -276,6 +300,7 @@ void ESC_ALerror (uint16_t errornumber);
 | Section 12.14.50 | Page 263 | Page 263 | `12.14.50 EEPROM ADDRESS REGISTER` | 第 33698 行 | 第 33698, 33702, 33717 行 | **【未核实（未纳入自动化核验清单）】** |
 | Section 12.14.51 | Page 263 | Page 263 | `12.14.51 EEPROM DATA REGISTER` | 第 33751 行 | 第 33744, 33748, 33769 行 | **【未核实（未纳入自动化核验清单）】** |
 | Section 12.14.51 (Note 27) | Page 265 | Page 265 | `Note 27: The default value of this field can be configured via EEPROM.` | 第 33978 行 | 第 33980 行 | **【未核实（未纳入自动化核验清单）】** |
+<!-- pdf-table-end -->
 
 ### 6.3 Beckhoff ET9300 应用笔记引用 (`an_et9300.txt`)
 

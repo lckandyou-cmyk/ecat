@@ -4,9 +4,9 @@ tests/test_verify_pdf_quotes.py
 
 PDF 引文核验工具的独立全场景测试夹具套件。
 【设计原则】：
-1. 100% 采用合成文本 (Synthetic Text)，严禁复制任何厂商专有原文；
+1. 完全采用合成文本 (Synthetic Text)，严禁复制任何厂商专有原文；
 2. 独立生成标准轻量多页合成 PDF，常规测试不依赖任何外部 PDF 文件或目录；
-3. 针对全场景正例与反例进行严格自动化断言 (共 22 项)：
+3. 针对全场景正例与反例进行严格自动化断言 (共 29 项)：
    - Case 1: 正例全要素吻合通过 (Exit 0)
    - Case 2: 绑定文档文件不存在拦截 (Exit 1)
    - Case 3: 文档行超出范围 / 行被删除拦截 (Exit 1)
@@ -29,6 +29,13 @@ PDF 引文核验工具的独立全场景测试夹具套件。
    - Case 20: 空/纯空白章节标题拦截 (Exit 2)
    - Case 21: 空/纯空白章节号拦截 (Exit 2)
    - Case 22: 空/纯空白片段拦截 (Exit 2)
+   - Case 23: A1-a 旁路反例：文档行含 12.14.340，清单为 12.14.34 (数字边界拦截) (Exit 1)
+   - Case 24: A1-b 旁路反例：文档行声明 Page 99，另在别处出现 253 (主页码不符拦截) (Exit 1)
+   - Case 25: A1-c 旁路反例：文档行含正确数字，同时出现矛盾数字 (矛盾页码拦截) (Exit 1)
+   - Case 26: A1-d 旁路反例：printed_page 只在正文而非页脚 (正文 page 254，页脚 101) (Exit 1)
+   - Case 27: A4 强化反例：页脚缺失导致 printed_page 校验拦截 (Exit 1)
+   - Case 28: A4 强化反例：页脚页码不符拦截 (Exit 1)
+   - Case 29: A3 权威文档手写模式扫描拦截 (Exit 1)
 """
 
 import os
@@ -190,7 +197,7 @@ def assert_case(name, exp_code, exp_msg_fragment, manifest_path, override_pdf=No
 
 def test_pdf_fixture_suite():
     print("============================================================")
-    print(" 运行 PDF 校验工具独立夹具测试套件 (合成无外部依赖 22 项覆盖)")
+    print(" 运行 PDF 校验工具独立夹具测试套件 (合成无外部依赖 29 项覆盖)")
     print("============================================================")
 
     total = 0
@@ -440,6 +447,112 @@ def test_pdf_fixture_suite():
         d["quotes"][0]["snippet"] = "   "
         with open(m, "w") as f: json.dump(d, f)
         if assert_case("Case 22: 空/纯空白片段拦截", 2, "不能为空或纯空白", m, repo_root=root):
+            passed += 1
+
+    # Case 23: A1-a 旁路反例：文档行含 12.14.340，清单为 12.14.34 (数字边界拦截)
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        doc_file = os.path.join(root, "docs/synthetic_spec.md")
+        with open(doc_file, "r") as f: lines = f.readlines()
+        lines[1] = "| Section 12.14.340 | Page 1 | Page 101 | Verbatim text |\n"
+        with open(doc_file, "w") as f: f.writelines(lines)
+        with open(m, "r") as f: d = json.load(f)
+        d["quotes"][0]["line_text_hash"] = compute_line_text_hash(lines[1])
+        d["quotes"][0]["section_number"] = "12.14.34"
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 23: A1-a 旁路反例 (12.14.340 vs 12.14.34 边界拦截)", 1, "文档行章节号不一致拦截", m, repo_root=root):
+            passed += 1
+
+    # Case 24: A1-b 旁路反例：文档行声明 Page 99，另在别处出现 253 (主页码不符拦截)
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        doc_file = os.path.join(root, "docs/synthetic_spec.md")
+        with open(doc_file, "r") as f: lines = f.readlines()
+        lines[1] = "| Section 1.1 | Page 99 (note 253) | Page 101 | Verbatim text |\n"
+        with open(doc_file, "w") as f: f.writelines(lines)
+        with open(m, "r") as f: d = json.load(f)
+        d["quotes"][0]["line_text_hash"] = compute_line_text_hash(lines[1])
+        d["quotes"][0]["pdf_page"] = 253
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 24: A1-b 旁路反例 (Page 99 与 note 253 主页码拦截)", 1, "文档行 PDF 页码不一致拦截", m, repo_root=root):
+            passed += 1
+
+    # Case 25: A1-c 旁路反例：文档行含正确数字，同时出现矛盾数字 (矛盾页码拦截)
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        doc_file = os.path.join(root, "docs/synthetic_spec.md")
+        with open(doc_file, "r") as f: lines = f.readlines()
+        lines[1] = "| Section 1.1 | Page 1 与 第 99 页 | Page 101 | Verbatim text |\n"
+        with open(doc_file, "w") as f: f.writelines(lines)
+        with open(m, "r") as f: d = json.load(f)
+        d["quotes"][0]["line_text_hash"] = compute_line_text_hash(lines[1])
+        d["quotes"][0]["pdf_page"] = 1
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 25: A1-c 旁路反例 (文档行含正确数字与矛盾数字拦截)", 1, "文档行存在矛盾页码拦截", m, repo_root=root):
+            passed += 1
+
+    # Case 26: A1-d 旁路反例：printed_page 只在正文而非页脚 (正文 page 254，页脚 101)
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        # 生成正文含 page 254 但页脚为 101 的合成 PDF
+        p_body = make_synthetic_pdf([
+            "SYNTHETIC ESC DATASHEET\n1.1 SYNTHETIC CONTROL REGISTER\nUnique synthetic sentence for control register.\nSee page 254 for details.\nDS9999-page 101"
+        ])
+        with open(p, "wb") as f: f.write(p_body)
+        with open(m, "r") as f: d = json.load(f)
+        d["pdf_sha256"] = compute_file_sha256(p)
+        doc_file = os.path.join(root, "docs/synthetic_spec.md")
+        with open(doc_file, "r") as f: lines = f.readlines()
+        lines[1] = "| Section 1.1 | Page 1 | Page 254 | Verbatim text |\n"
+        with open(doc_file, "w") as f: f.writelines(lines)
+        d["quotes"][0]["line_text_hash"] = compute_line_text_hash(lines[1])
+        d["quotes"][0]["pdf_page"] = 1
+        d["quotes"][0]["printed_page"] = 254
+        # 删除第 2 条 quote 避免单页 PDF 缺少第 4 页
+        d["quotes"] = [d["quotes"][0]]
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 26: A1-d 旁路反例 (printed_page 仅在正文不在页脚拦截)", 1, "页脚印刷页码与清单不匹配", m, repo_root=root):
+            passed += 1
+
+    # Case 27: A4 强化反例：页脚缺失导致 printed_page 校验拦截
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        # 生成无 DS9999-page 页脚的 PDF
+        p_nofooter = make_synthetic_pdf([
+            "SYNTHETIC ESC DATASHEET\n1.1 SYNTHETIC CONTROL REGISTER\nUnique synthetic sentence for control register.\nNo standard footer here"
+        ])
+        with open(p, "wb") as f: f.write(p_nofooter)
+        with open(m, "r") as f: d = json.load(f)
+        d["pdf_sha256"] = compute_file_sha256(p)
+        d["quotes"] = [d["quotes"][0]]
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 27: A4 强化反例 (页脚缺失拦截)", 1, "印刷页码页脚缺失拦截", m, repo_root=root):
+            passed += 1
+
+    # Case 28: A4 强化反例：页脚页码不符拦截
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        with open(m, "r") as f: d = json.load(f)
+        d["quotes"][0]["printed_page"] = 888  # 实际为 101
+        with open(m, "w") as f: json.dump(d, f)
+        if assert_case("Case 28: A4 强化反例 (页脚页码不符拦截)", 1, "页脚印刷页码与清单不匹配", m, repo_root=root):
+            passed += 1
+
+    # Case 29: A3 权威文档手写引用模式拦截
+    total += 1
+    with tempfile.TemporaryDirectory() as td:
+        m, p, root, _, _, _ = setup_synthetic_fixture(td)
+        # 在临时权威文档 README.md 中写入禁止的手写模式
+        readme_path = os.path.join(root, "README.md")
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write("# README\nHandwritten violation: see Section 12.14.20 on page 239\n")
+        if assert_case("Case 29: A3 权威文档手写模式扫描拦截", 1, "发现禁止的手写引用模式", m, repo_root=root):
             passed += 1
 
     print("------------------------------------------------------------")

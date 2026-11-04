@@ -152,7 +152,7 @@ static bool parse_filename_reverse(
     }
     *out_target_id = tid;
 
-    /* 4. 第二个下划线左侧全部字符串为项目名称 (严格区分大小写且必须精确比对) */
+    /* 4. 第二个下划线左侧全部字符串为项目名称 (严格区分大小写且必须一致比对) */
     size_t proj_len = second_us;
     if (expected_project == NULL) {
         *out_err = ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH;
@@ -338,11 +338,11 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
     }
 
     /* 新会话自愈规则: 若上一个会话残留未闭环 (且未执行过 abort/finalize)，先调驱动 abort() */
-    if (core->state != ECAT_FOE_STATE_IDLE) {
+    if (core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
         core_abort_driver(core);
-        /* 精细自愈: 仅重置会话级运行字段，完整保留核心静态配置 cfg 及驱动生命周期，避免重复全局 memset */
-        core_reset_session(core);
     }
+    /* 每次新 WRQ 必须重置会话级运行字段，完整保留核心配置与驱动生命周期 */
+    core_reset_session(core);
 
     /* 长度边界检查 */
     if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
@@ -562,7 +562,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
 
             if (core->header_rx_len < core->header_total_len) {
                 core->total_rx_bytes += h_copy;
-                return 0; /* 头部尚未攒齐，返回 0 成功，绝对不碰驱动 */
+                return 0; /* 头部尚未攒齐，返回 0 成功，不触发驱动 */
             }
         }
 
@@ -842,6 +842,7 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core)
         return;
     }
     core_abort_driver(core);
+    core_reset_session(core);
     core->state = ECAT_FOE_STATE_IDLE;
 }
 

@@ -45,7 +45,7 @@
 | **核心协议机 (Core)** | 维护 FoE 升级会话状态机；暴露 `on_wrq`、`on_data`、`on_end`、`on_abort` 四个纯事件接口；流式装配 `.efw` 文件头；执行文件名与文件头双向强交叉校验；执行“擦除前必须全过”检查；以回调块为粒度检测总长越界；维护擦除水位并调度 `erase_to`；分步调用驱动 `read` 并累加计算比对 CRC32；控制错误与熔断中止。 | **不包含**任何硬件寄存器读写；**不包含**任何特定协议栈私有数据结构；**不执行**动态内存申请 (`malloc`/`free`)；**不提供** FoE 读（RRQ）功能（v1 不支持，收到直接回复 `FOE_ERR_ACCESS`）。 | 【已确定】 |
 | **FoE 适配接口 (Adapter)** | 作为协议栈与核心机的薄转接层；将 SSC 的 FoE 回调或 SOES 的 `foe_file_cfg_t` 回调映射到核心机的 `on_wrq`、`on_data`、`on_end`、`on_abort` 事件接口；解析 SOES 的 `buffer_size` 粒度并定界结束。 | **不修改**官方协议栈内部状态机；**不越过**核心机直接操作底层驱动。 | 【已确定】 |
 | **目标驱动接口 (Target Driver)** | 抽象各目标硬件（内部 Flash、外部 SPI Flash、ESC SII EEPROM、外部用户数据 EEPROM）的真实物理擦除、覆盖擦除（`erase_to`）、对齐写入、底层物理读取（`read`）、提交与中止操作。 | 仅由用户按硬件实现抽象函数指针；**不解析** FoE 协议；**不决定**写入基地址；**不负责** CRC32 算法计算。 | 【已确定】 |
-| **全局配置头 (Config)** | 集中管理单一工程的 Project ID、Hardware ID、本地硬件版本 (uint16)、各目标使能宏开关、头部缓冲上限、Bootloader 绝对硬编码分区物理基地址与最大限制尺寸。 | 仅提供静态宏定义常量；**严禁**运行时动态修改分区基地址。 | 【已确定】 |
+| **全局配置头 (Config)** | 集中管理单一工程的 Project ID、Hardware ID、本地硬件版本 (uint16)、各目标使能宏开关、头部缓冲上限、Bootloader 硬编码分区物理基地址与最大限制尺寸。 | 仅提供静态宏定义常量；**严禁**运行时动态修改分区基地址。 | 【已确定】 |
 | **平台适配层 (Port/Platform)** | 负责从 APP 切换至 Bootloader 的硬件/内存动作；管理 Retention RAM / RTC 备份域升级标记；提供各 Target 掉电安全防回滚版本下限存取；提供平台微秒延时与看门狗喂狗。 | 芯片专属逻辑（如 Cortex-M 内核寄存器操作），由用户针对特定 MCU 提供，**不入通用核心库**。 | 【已确定】 |
 
 ### 1.2 核心事件接口与协议栈适配映射机制
@@ -115,7 +115,7 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
       6. SSC 侧 `post_state_change_hook` 等效机制标记为 **【未核实（未读到 SSC 源码）】**。
 * **栈层中止通知缺口与会话自愈机制【已确定】**：
   - 源码出处：`soes/esc_foe.c` 中 `FOE_abort()` 函数实现。
-  - 源码事实：SOES 协议栈在遭遇通信错误（如包序号错、超时、或主站下发 FoE ERR）进入 `FOE_abort` 路径时，仅发送 ERR 包并调用 `FOE_init()` 重置自身，**绝对不会调用应用层回调函数（既不调用 `write_function`，也无任何 abort 钩子）**。
+  - 源码事实：SOES 协议栈在遭遇通信错误（如包序号错、超时、或主站下发 FoE ERR）进入 `FOE_abort` 路径时，仅发送 ERR 包并调用 `FOE_init()` 重置自身，**不会调用应用层回调函数（既不调用 `write_function`，也无任何 abort 钩子）**。
   - 影响与后果：核心协议机无法实时收到 `on_abort` 通知，导致核心机产生未闭环的会话状态残留（仍处于写状态），底层目标驱动的 `drv->abort()` 也不会在协议栈中止的瞬间被调用。
   - **安全底线保证**：由于架构上在首包擦除前已强制调用了 `drv->invalidate()`，固件区已被标记为无效状态，保障在 Bootloader 前置校验完备且存储介质掉电不损坏标记的前提下，防止误引导半途损坏的固件。
   - 恢复与自愈规则：
@@ -135,7 +135,7 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
 ## 2. APP→Bootloader 切换架构（主线方案 A 与兼容方案 B）
 
 > **前置硬件结论**：
-> 1. 基于 LAN9252 官方手册第 39 页核实结果，ESC 的复位引脚（`RST#`）拉低会触发全芯片复位（包括以太网 PHY 掉线与 EEPROM 重载）。
+> 1. 基于 LAN9252 官方手册 [pdf:PDF_Q2_RST_PIN_RESET] 核实结果，ESC 的复位引脚（`RST#`）拉低会触发全芯片复位（包括以太网 PHY 掉线与 EEPROM 重载）。
 > 2. 已拍板决策：**硬件设计上 ESC 复位脚由 MCU 独立 GPIO 单独控制，严禁与 MCU NRST 引脚直连**。主线采用方案 A（MCU 硬件复位系统重启）；方案 B 仅作为历史旧板（复位脚直连）的纯软件内存跳转备选兼容方案。
 
 ```text
@@ -150,9 +150,9 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
 
 #### 1. 切换握手核心原则【已确定】
 * **禁止通用库与 Bootloader 直接操作 ESC AL Status**：
-  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，LAN9252 章节出处【未核实（待 PDF 工具全量独立核查）】）时，**绝对不向 ESC AL Status 寄存器 (`0130h-0131h`) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
+  APP 在收到 `INIT -> BOOT` 请求（AL Control 寄存器 `0120h-0121h` 为 `3h`，见 [pdf:PDF_Q3_AL_CONTROL_REG]）时，**严禁向 ESC AL Status 寄存器 (`0130h-0131h`，见 [pdf:PDF_Q4_AL_STATUS_REG]) 确认 BOOT**，仅在保留 RAM 中写入暖切换标志，随后立即跳转进入 Bootloader。
 * **由协议栈自行接管并确认**：
-  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（LAN9252 章节出处【未核实（待 PDF 工具全量独立核查）】）完成握手响应。通用升级库核心与用户驱动**绝对不直接写 ESC 0130h 寄存器**。
+  Bootloader 启动后，先检测并清除暖切换标志，然后初始化 EtherCAT 从站协议栈（SSC / SOES）。由协议栈自身的初始化逻辑或状态机轮询检测 ESC 中挂起的 BOOT 请求，并由协议栈自行向 AL Status 写入 `3h: Bootstrap State`（见 [pdf:PDF_Q4_AL_STATUS_REG]）完成握手响应。通用升级库核心与用户驱动**严禁直接写 ESC 0130h 寄存器**。
 * **待验证与未核实事项**：
   - MCU 硬件复位后，ESC 内部寄存器与邮箱 SM（SyncManager）配置是否能够完好保留、从站协议栈启动后能否无缝接上当前待处理的 BOOT 请求标为 **【待验证】**。
   - SSC 协议栈在未确认状态下重启接管的具体行为标为 **【未核实（未读到 SSC 源码）】**。
@@ -166,10 +166,10 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
   Bootloader 在读取并校验该标志后，**必须在第一时间将其全盘清零**。防止因后续异常复位导致 Bootloader 误判陷入死循环。
 
 #### 3. 启动来源判定优先级【已确定】
-Bootloader 启动后，必须按以下绝对优先级判定执行流向：
+Bootloader 启动后，必须按以下严格优先级判定执行流向：
 1. **优先级 1：暖切换判定（Warm Transition）**：
    - **条件**：检测到保留 RAM 中 `boot_magic == 0x544F4F42U` 且 `boot_magic_inv == 0xABB0B0BDU`。
-   - **行为**：立即清除标志；**绝对禁止触碰 ESC 复位 GPIO**；**绝对禁止重新初始化会打断 PDI 通信的外设**；初始化 PDI 接口；启动从站协议栈接管 BOOT 状态机；常驻 Bootloader 等待主站 FoE 下发。
+   - **行为**：立即清除标志；**严格禁止触碰 ESC 复位 GPIO**；**严格禁止重新初始化会打断 PDI 通信的外设**；初始化 PDI 接口；启动从站协议栈接管 BOOT 状态机；常驻 Bootloader 等待主站 FoE 下发。
 2. **优先级 2：冷启动默认安全行为（Cold Boot）**：
    - **条件**：未检测到标志、标志全 0、数据损坏或反码校验不一致。
    - **行为**：一律按冷启动流程处理：
@@ -193,18 +193,18 @@ Bootloader 启动后，必须按以下绝对优先级判定执行流向：
 * **适用场景**：已投产的历史旧版硬件，ESC 复位引脚被直连至 MCU 外部复位总线，MCU 软复位必然导致外部引脚拉低并连带复位 ESC。
 * **切换流程（纯软件安全内存跳转）**：
   1. APP 收到 AL Control 寄存器（`0120h-0121h`）请求 `3h: Request Bootstrap State`，在 Retention RAM 写入“魔数 + 取反魔数 (`0xABB0B0BDU`)”，**不确认 BOOT**；
-  2. APP 立即执行彻底的系统反初始化：
+  2. APP 立即执行全盘系统反初始化：
      - 关闭全局中断：`__disable_irq()`；
-     - 彻底停止并关闭所有已使能外设（DMA 通道、定时器、PDI/SPI 控制器）；
+     - 完全停止并关闭所有已使能外设（DMA 通道、定时器、PDI/SPI 控制器）；
      - 停止并清零 SysTick 计数器；
      - 清除 NVIC 所有挂起中断位 (`NVIC->ICPR`)；
   3. 执行向量表切换与堆栈重置：
      - 将主堆栈指针指向 Bootloader 向量表的栈顶：`__set_MSP(*(uint32_t *)BOOTLOADER_ADDR)`；
      - 重设中断向量偏移寄存器：`SCB->VTOR = BOOTLOADER_ADDR`；
-  4. 获取 Bootloader 复位入口地址并执行绝对跳转：`void (*boot_entry)(void) = (void *)((*(uint32_t *)(BOOTLOADER_ADDR + 4))); boot_entry();`；
+  4. 获取 Bootloader 复位入口地址并执行直接跳转：`void (*boot_entry)(void) = (void *)((*(uint32_t *)(BOOTLOADER_ADDR + 4))); boot_entry();`；
   5. Bootloader 启动，执行硬件重初始化（时钟树重置、GPIO 模式重设、SPI/PDI 控制器全新初始化、ESC 中断事件清零），**禁止触碰 ESC 复位 GPIO**，启动协议栈，由协议栈接管待决 BOOT 请求。
 * **潜在风险**：
-  1. 外设残留风险：未彻底停止的 DMA、定时器若在跳转后触发非法中断，将引发 HardFault；
+  1. 外设残留风险：未完全停止的 DMA、定时器若在跳转后触发非法中断，将引发 HardFault；
   2. PDI/SPI 事务悬停：中途跳转可能导致 ESC 端 SPI 状态机死锁；
   3. ESC 中断残留（IRQ Pin）：未清除中断可能引发中断风暴；
   4. 假定默认状态的风险：Bootloader 跳过部分寄存器配置可能引发不可预期行为。
@@ -329,7 +329,7 @@ sequenceDiagram
 ### 3.1 时序关键设计准则
 
 1. **【已确定】擦除前必须全过与分阶段装配**：
-   文件头可能跨多次协议栈回调块。在头部全部字节攒齐并通过 `header_crc32` 与全量元数据安全检查前，**核心机仅对中间块返回 0 成功，绝对禁止调用驱动的 `init`、`invalidate`、`erase_to`、`write` 或 `read` 接口**。若校验失败，直接返回非零触发 FoE ERR，原有固件完整无损。
+   文件头可能跨多次协议栈回调块。在头部全部字节攒齐并通过 `header_crc32` 与全量元数据安全检查前，**核心机仅对中间块返回 0 成功，严格禁止调用驱动的 `init`、`invalidate`、`erase_to`、`write` 或 `read` 接口**。若校验失败，直接返回非零触发 FoE ERR，原有固件完整无损。
 2. **【已确定】失效标记先行 (Invalidate)**：
    在开始擦除物理扇区前，驱动层必须先调用 `invalidate()` 清除目标固件的就绪/有效标记。一旦升级中途断电或意外中止，下次冷启动时 Bootloader 能准确识别固件损坏，杜绝执行未烧录完整的半成品代码。
 3. **【已确定】同步阻塞模型与按需覆盖擦除 (erase_to)**：
@@ -339,14 +339,36 @@ sequenceDiagram
 4. **【已确定】双重校验职责分工机制**：
    系统通过两道防线严格区分“网络通信故障”与“硬件存储故障”：
    - **第一道防线：流 CRC 比对（Stream CRC Check）**：核心机在数据接收过程中，对送达的所有有效 Payload 数据字节增量累加 IEEE 802.3 CRC32；在最后一次回调中首先比对流 CRC32 与文件头 `payload_crc32`。此步专门用于快速抓取以太网通信误码、丢包或截断；若不匹配，直接中止，无需执行耗时的底层读回；
-   - **第二道防线：物理介质回读校验（Readback CRC Check）**：流 CRC 比对通过后，核心机调用驱动 `drv->read` 逐块读回已写入物理 Flash/EEPROM 的真实数据并重新计算 CRC32 与文件头比对。此步专门用于排查 Flash 坏块、物理写入电压抖动、擦除不彻底等硬件存储缺陷。
+   - **第二道防线：物理介质回读校验（Readback CRC Check）**：流 CRC 比对通过后，核心机调用驱动 `drv->read` 逐块读回已写入物理 Flash/EEPROM 的真实数据并重新计算 CRC32 与文件头比对。此步专门用于排查 Flash 坏块、物理写入电压抖动、擦除不全等硬件存储缺陷。
 5. **【已确定】块粒度多收熔断检测**：
    在流式接收过程中，核心机以回调块为粒度持续检测累计接收偏移；当某一次回调数据使得 `rx_offset + block_len > Expected_Total` 时，**核心机立即整块拒绝，不再写入任何物理数据，并直接返回错误触发中止熔断**。
-6. **【待验证】Bootloader 启动时主动比对 0120h 与 0130h**：
-   - **问题机理**：APP 在检测到 `INIT -> BOOT` 请求时通常会读取 AL Control 寄存器（`0120h`）。
-   - **协议栈源码出处**：查阅 SOES 源码 `esc.c` 中 `ESC_state()` 函数实现，通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h 寄存器 Bit 0）来发现是否有待处理的状态转换请求；若该事件位未置位，函数直接 `return;` 退出，根本不会主动读取 `0120h`。
-   - **事件清除条件出处**：依据 LAN9252 手册 AL Event Request 寄存器（0220h，跨第 252-253 页，章节号待定为 12.14.34，【未核实（待 PDF 工具全量独立核查）】），Bit 0 为 AL Control Event，其注释注明：`This bit is cleared by reading the AL Control Register from PDI.`。证实 PDI 读取 0120h 时硬件会自动清除该事件。
-   - **应对规则【待验证】**：若 APP 先前读取 0120h 导致 0220h 事件位已被清除，新启动的从站协议栈轮询时将无法感知到待决请求，状态机将永远卡死在 INIT 无法进入 BOOT。因此 Bootloader 内部启动协议栈时，**协议栈或适配代码必须在初始化完成后主动读取 0120h 并与 0130h 比对**，若发现 `0120h == 0x0003` 且 `0130h != 0x0003`，必须由协议栈强制主动触发向 BOOT 的状态转换处理。
+6. **【推断，未验证】Bootloader 启动时主动比对 0120h 与 0130h 及 AL Control 事件联动**：
+   - **问题推断与机理【推断，未验证】**：APP 在检测到 `INIT -> BOOT` 请求时通常会读取 AL Control 寄存器（`0120h`）。
+   - **手册依据**：依据 LAN9252 官方手册 [pdf:PDF_Q6_AL_EVENT_CLEAR_PDI]，Bit 0 为 AL Control Event，其注释注明：`This bit is cleared by reading the AL Control Register from PDI.`。证实 PDI 读取 0120h 时硬件会自动清除 0220h 寄存器中的该事件标志。
+   - **协议栈源码事实**：查阅 SOES 源码中 `ESC_state()` 函数实现（见架构分析 Q9_ESC_C_ESC_STATE_ALEVENT_CHECK 引用）：
+     ```c
+     if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)
+     {
+        ESC_read (ESCREG_ALCONTROL, (void *) &ESCvar.ALcontrol,
+                  sizeof (ESCvar.ALcontrol));
+        ESCvar.ALcontrol = etohs (ESCvar.ALcontrol);
+     }
+     else
+     {
+        return;
+     }
+     ```
+     函数通过检查 `if (ESCvar.ALevent & ESCREG_ALEVENT_CONTROL)`（0220h Bit 0）判定是否有待处理状态转换；若该标志位未置位，直接执行 `return;` 退出，根本不会主动读取 `0120h`。
+   - **设计要求**：若 APP 先前读取 0120h 导致硬件自动清除了 0220h 事件位，Bootloader 启动的新协议栈轮询时将无法感知待决请求。设计上要求 Bootloader 在协议栈初始化后，需保证挂起的 BOOT 状态转换能够被正常触发处理。
+   - **触发办法候选（只评估不实现，贴原文符号）**：
+     1. *候选方案 1（置位事件标志）*：在协议栈初始化完成后，由适配层通过原生符号显式设置 `ESCvar.ALevent |= ESCREG_ALEVENT_CONTROL;`，引导下一次主循环轮询自然进入 `ESC_state()`；
+     2. *候选方案 2（直接调用状态处理）*：在外部检测到 `0120h == 0x0003` 且 `0130h != 0x0003` 时，直接显式调用 `ESC_state()`；
+     3. *候选方案 3（主动写入确认）*：由适配层调用 `ESC_ALstatus(ESCboot);` 主动完成状态确认。
+     *评估结论：上述 3 项候选方案目前仅作为架构评估，通用核心库与适配层暂不实现任何侵入逻辑，待真实硬件主站环境联调实测确认后再行决策。*
+   - **真机验证点**：
+     1. TwinCAT 主站下发 INIT->BOOT 状态转换指令；
+     2. APP 记录暖启动标志并软复位进入 Bootloader；
+     3. 示波器抓取 SPI PDI 交互报文，确认从站协议栈能否在 0220h 事件位已清零情况下稳定响应并进入 BOOT 状态。
 7. **【建议，待验证】升级成功后的重启走暖切换（专用标志值）**：
    - **时机判定【已确定，待真机验证】**：固件写入与校验成功后，由主站发起从 BOOT 到 INIT 的状态转换请求（`BOOT -> INIT`，依据 Infineon 官方范例工程说明）。
    - **暖切换重启规则【建议，待验证】**：Bootloader 捕获到切回 INIT 状态后，建议在 Retention RAM 中写入专用的“固件升级成功就绪”魔数（如 `0x55504752U`，即 ASCII `'UPGR'`，及其取反码 `0xAAAFB8ADU`），调用 `NVIC_SystemReset()` 软复位系统进入 APP，**全程不拉低 ESC 复位 GPIO**。
@@ -373,7 +395,7 @@ sequenceDiagram
 * **防回滚持久化错误处理与时序规则【已确定】**：
   1. **防回滚开启时获取失败**：若 `port_get_version_floor` 返回非零，核心机在阶段 3 直接拒绝升级（回复错误，驱动不调用 `init`/`erase_to`）；
   2. **下限更新时机**：版本下限**仅在 `finalize()` 成功提交后**方可调用 `port_set_version_floor` 进行更新；
-  3. **持久化失败后果**：若 `finalize()` 已成功而 `port_set_version_floor` 返回非零，核心机向主站返回错误，但**固件保持物理有效状态，绝对不调用 `abort()`**（因为固件实体与元数据已写入且校验通过，固件可用）。
+  3. **持久化失败后果**：若 `finalize()` 已成功而 `port_set_version_floor` 返回非零，核心机向主站返回错误，但**固件保持物理有效状态，不得调用 `abort()`**（因为固件实体与元数据已写入且校验通过，固件可用）。
 
 > **SOES 协议栈限制依据【已核实】**：
 > 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
@@ -541,44 +563,44 @@ typedef struct ecat_foe_target_driver {
 * **默认配置关闭**：`ECAT_FOE_ENABLE_TARGET_SII_EEPROM` 必须默认严格置 `0`。
 * **风险与推断说明**：
   ESC 的 SII (Slave Information Interface) EEPROM 存放着 ESC 上电硬件配置与 ESI 数据。
-  依据 LAN9252 手册（Section 12.14.49，第 261 页，【未核实（待 PDF 工具全量独立核查）】），若 EEPROM 镜像写入损坏或校验失败，上电时 ESC 寄存器将报错：Bit 11 `Checksum Error in ESC Configuration Area` 为 1，Bit 12 `EEPROM Loading Status` 为 1。
-  **工程推断【推断】**：虽然手册只给出了上述状态位，但依据从站硬件行为特性，ESC 此时将处于错误挂起状态，无法正常响应主站进入 BOOT 状态，主站亦无法通过网络恢复通信。依赖标准 BOOT/FoE 的 MCU Bootloader 网络恢复路径将彻底失效，设备完全变砖，必须拆机使用物理夹具重新烧录物理 EEPROM。
+  依据 LAN9252 手册 EEPROM 控制/状态寄存器【未核实（未纳入自动化核验清单）】，若 EEPROM 镜像写入损坏或校验失败，上电时 ESC 寄存器将报错：Bit 11 `Checksum Error in ESC Configuration Area` 为 1，Bit 12 `EEPROM Loading Status` 为 1。
+  **工程推断【推断】**：虽然手册只给出了上述状态位，但依据从站硬件行为特性，ESC 此时将处于错误挂起状态，无法正常响应主站进入 BOOT 状态，主站亦无法通过网络恢复通信。依赖标准 BOOT/FoE 的 MCU Bootloader 网络恢复路径将完全失效，设备完全变砖，必须拆机使用物理夹具重新烧录物理 EEPROM。
 
-#### 2. MCU 通过 PDI 访问 SII EEPROM 的机制【未核实（待 PDF 工具全量独立核查）】
-* **0500h 小节**：
-  - 出处：LAN9252 手册 `12.14.47 EEPROM CONFIGURATION REGISTER`（偏移 `0500h`）；
+#### 2. MCU 通过 PDI 访问 SII EEPROM 的机制【未核实（未纳入自动化核验清单）】
+* **0500h 寄存器**：
+  - 出处：LAN9252 手册 EEPROM CONFIGURATION REGISTER（偏移 `0500h`，【未核实】）；
   - Bit 0 原文：`PDI EEPROM Control`；原文说明：`1: Yes (PDI has EEPROM control)`。
-* **0501h 小节**：
-  - 出处：LAN9252 手册 `12.14.48 EEPROM PDI ACCESS STATE REGISTER`（偏移 `0501h`）；
+* **0501h 寄存器**：
+  - 出处：LAN9252 手册 EEPROM PDI ACCESS STATE REGISTER（偏移 `0501h`，【未核实】）；
   - Bit 0 原文：`Access to EEPROM`。
 * **PDI 控制 EEPROM 规则**：
-  - 出处：LAN9252 手册 `12.14.48` 节规则说明；
+  - 出处：LAN9252 手册 EEPROM PDI ACCESS 规则说明（【未核实】）；
   - 原文：`Otherwise, PDI controls the EEPROM interface.`。
-* **0502h-0503h 小节**：
-  - 出处：LAN9252 手册 `12.14.49 EEPROM CONTROL/STATUS REGISTER`（偏移 `0502h-0503h`）；
+* **0502h-0503h 寄存器**：
+  - 出处：LAN9252 手册 EEPROM CONTROL/STATUS REGISTER（偏移 `0502h-0503h`，【未核实】）；
   - Bit 15 原文：`Busy`；原文说明：`1: EEPROM interface is busy`；
   - Bit 14 原文：`Error Write Enable`；
   - Bit 13 原文：`Error Acknowledge/Command`；
   - Bit 12 原文：`EEPROM Loading Status`；
   - Bit 11 原文：`Checksum Error in ESC Configuration Area`；
   - Bits 10:8 命令原文：`Command Register`；说明：`010: Write`；`100: Reload`。
-* **0504h-0507h 小节**：
-  - 出处：LAN9252 手册 `12.14.50 EEPROM ADDRESS REGISTER`（偏移 `0504h-0507h`）；
+* **0504h-0507h 寄存器**：
+  - 出处：LAN9252 手册 EEPROM ADDRESS REGISTER（偏移 `0504h-0507h`，【未核实】）；
   - 寻址单位原文：`Bit 0: First word (16-bit)`。
-* **0508h-050Bh 小节**：
-  - 出处：LAN9252 手册 `12.14.51 EEPROM DATA REGISTER`（偏移 `0508h-050Bh`）；
+* **0508h-050Bh 寄存器**：
+  - 出处：LAN9252 手册 EEPROM DATA REGISTER（偏移 `0508h-050Bh`，【未核实】）；
   - 数据读写原文：`EEPROM Read/Write Data`。
 
 #### 3. SII 校验字的位置与算法【未核实】
 * **核实状态**：**【未核实】**。
 * **核实依据说明**：
-  LAN9252 官方手册 Section 12.14.49 定义了状态位 `Checksum Error in ESC Configuration Area`，但**手册全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法**。该项标记为【未核实】，待查实 ETG 官方规范后补充。
+  LAN9252 官方手册 EEPROM CONTROL/STATUS REGISTER【未核实】定义了状态位 `Checksum Error in ESC Configuration Area`，但**手册全文未给出 ESC Configuration Area 校验字存放的具体 Word 地址（如 Word 7）以及校验和的具体累加/反转算法**。该项标记为【未核实】，待查实 ETG 官方规范后补充。
 
-#### 4. 新内容何时生效【未核实（待 PDF 工具全量独立核查）】
-* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 Section 12.14.49，【未核实（待 PDF 工具全量独立核查）】），可触发 ESC 重新从 EEPROM 读取数据。
+#### 4. 新内容何时生效【未核实（未纳入自动化核验清单）】
+* **手动重载命令**：向 `0502h-0503h` Command Register 写入 `100: Reload`（见 LAN9252 手册 EEPROM CONTROL/STATUS REGISTER【未核实】），可触发 ESC 重新从 EEPROM 读取数据。
 * **特定功能限制（仅限 Enhanced Link 与 MI Link）**：
-  - 依据 Note 11（LAN9252 手册 Section 12.14.25 第 243 页注释，引用 Section 12.8，【未核实（待 PDF 工具全量独立核查）】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
-  - 依据 Note 27（LAN9252 手册 Section 12.14.51 Note 27，【未核实（待 PDF 工具全量独立核查）】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
+  - 依据 Note 11（LAN9252 手册 EEPROM 链路检测配置注释【未核实】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 Enhanced Link detection）；
+  - 依据 Note 27（LAN9252 手册 EEPROM 寄存器注释【未核实】），原文：`only taken at the first EEPROM loading after power-on reset`（该限制仅针对 MI link detection）；
   - 手册原文仅明确指出上述两项链路检测特性在手动 reload 时不会生效，**不能外推为全部寄存器或通用 Reload 规则**。
 
 #### 5. 写入 SII 前的防御校验项【已确定】

@@ -9,68 +9,223 @@
     {
       "id": "PDF_Q1_RESET_TABLE_6_1",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 262,
+      "doc_line": 286,
       "line_text_hash": "4c0ea3d20c2a3d9a4a1ba92fb07dbfdd6d519226b8c1b00c9aecdd8340558f9b",
       "pdf_page": 38,
       "printed_page": 38,
       "section_number": "TABLE 6-1",
       "section_title": "RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY",
-      "snippet": "EEPROM Loader Run"
+      "snippet": "EEPROM Loader Run",
+      "table_row": {
+        "section_cell": "Table 6-1 (复位源与功能影响表)",
+        "pdf_page_cell": "Page 38",
+        "printed_page_cell": "Page 38",
+        "verbatim_cell": "`RESET SOURCES AND AFFECTED DEVICE FUNCTIONALITY` (`EEPROM Loader Run`)",
+        "text_line_cell": "第 4694, 4718 行",
+        "hist_line_cell": "第 4758 行",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q1)"
+      }
     },
     {
       "id": "PDF_Q2_RST_PIN_RESET",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 263,
+      "doc_line": 287,
       "line_text_hash": "c9cfbbe7d0ab64e2876164f88635acaf09ba217c6005b350ccb7810435476b35",
       "pdf_page": 39,
       "printed_page": 39,
       "section_number": "6.2.1.2",
       "section_title": "RST# Pin Reset",
-      "snippet": "Driving the RST# input pin low initiates a chip-level reset."
+      "snippet": "Driving the RST# input pin low initiates a chip-level reset.",
+      "table_row": {
+        "section_cell": "Section 6.2.1.2 (RST# 引脚复位)",
+        "pdf_page_cell": "Page 39",
+        "printed_page_cell": "Page 39",
+        "verbatim_cell": "`6.2.1.2 RST# Pin Reset` (`Driving the RST# input pin low initiates a chip-level reset.`)",
+        "text_line_cell": "第 4867, 4869 行",
+        "hist_line_cell": "第 4874, 4875 行",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q2)"
+      }
     },
     {
       "id": "PDF_Q3_AL_CONTROL_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 264,
+      "doc_line": 288,
       "line_text_hash": "ba8415890b08d2a99579ace975b28fbfebbc8874ca42ff33751999c60ab42993",
       "pdf_page": 239,
       "printed_page": 239,
       "section_number": "12.14.20",
       "section_title": "AL CONTROL REGISTER",
-      "snippet": "12.14.20 AL CONTROL REGISTER"
+      "snippet": "12.14.20 AL CONTROL REGISTER",
+      "table_row": {
+        "section_cell": "Section 12.14.20 (AL Control 寄存器)",
+        "pdf_page_cell": "Page 239",
+        "printed_page_cell": "Page 239",
+        "verbatim_cell": "`12.14.20 AL CONTROL REGISTER` (Offset: `0120h-0121h`)",
+        "text_line_cell": "第 30981 行",
+        "hist_line_cell": "历史未单独制表",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q3)"
+      }
     },
     {
       "id": "PDF_Q4_AL_STATUS_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 265,
+      "doc_line": 289,
       "line_text_hash": "da1771ea64921c241e9499183a84c95cff76b93bc2ccaadd6a9c800c032ff0c3",
       "pdf_page": 240,
       "printed_page": 240,
       "section_number": "12.14.21",
       "section_title": "AL STATUS REGISTER",
-      "snippet": "12.14.21 AL STATUS REGISTER"
+      "snippet": "12.14.21 AL STATUS REGISTER",
+      "table_row": {
+        "section_cell": "Section 12.14.21 (AL Status 寄存器)",
+        "pdf_page_cell": "Page 240",
+        "printed_page_cell": "Page 240",
+        "verbatim_cell": "`12.14.21 AL STATUS REGISTER` (Offset: `0130h-0131h`)",
+        "text_line_cell": "第 31059 行",
+        "hist_line_cell": "历史未单独制表",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q4)"
+      }
     },
     {
       "id": "PDF_Q5_AL_STATUS_CODE_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 266,
+      "doc_line": 290,
       "line_text_hash": "91ab6c1758a76ce341266c0b2d2fa265080ba4d4537335648b4677f850ee359a",
       "pdf_page": 240,
       "printed_page": 240,
       "section_number": "12.14.22",
       "section_title": "AL STATUS CODE REGISTER",
-      "snippet": "12.14.22 AL STATUS CODE REGISTER"
+      "snippet": "12.14.22 AL STATUS CODE REGISTER",
+      "table_row": {
+        "section_cell": "Section 12.14.22 (AL Status Code 寄存器)",
+        "pdf_page_cell": "Page 240",
+        "printed_page_cell": "Page 240",
+        "verbatim_cell": "`12.14.22 AL STATUS CODE REGISTER` (Offset: `0134h-0135h`)",
+        "text_line_cell": "第 31174 行",
+        "hist_line_cell": "历史未单独制表",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q5)"
+      }
     },
     {
       "id": "PDF_Q6_AL_EVENT_CLEAR_PDI",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 267,
+      "doc_line": 291,
       "line_text_hash": "9117105c8297674cff84b6cb2b5686e84fddbc57bc0a083f627985e23c940890",
       "pdf_page": 253,
       "printed_page": 253,
       "section_number": "12.14.34",
       "section_title": "AL EVENT REQUEST REGISTER",
-      "snippet": "This bit is cleared by reading the AL Control Register from PDI."
+      "snippet": "This bit is cleared by reading the AL Control Register from PDI.",
+      "table_row": {
+        "section_cell": "Section 12.14.34 (AL Event Request 寄存器)",
+        "pdf_page_cell": "Page 253 (标题在 252 页)",
+        "printed_page_cell": "Page 253 (标题在 252 页)",
+        "verbatim_cell": "`This bit is cleared by reading the AL Control Register from PDI.`",
+        "text_line_cell": "第 32264 行",
+        "hist_line_cell": "历史误标为未核实",
+        "status_cell": "**【PDF 工具逐页与章节归属核验通过】** (Q6)"
+      }
+    }
+  ],
+  "unverified_citations": [
+    {
+      "section_cell": "Section 12.14.25 (Note 11 引用 12.8)",
+      "pdf_page_cell": "Page 243",
+      "printed_page_cell": "Page 243",
+      "verbatim_cell": "`Note 11: The default value of this field can be configured via EEPROM.` (引用 Page 201 Sec 12.8)",
+      "text_line_cell": "第 31430 行",
+      "hist_line_cell": "第 31434 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`12.14.49 EEPROM CONTROL/STATUS REGISTER`",
+      "text_line_cell": "第 33483 行",
+      "hist_line_cell": "第 33481, 33485 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bit 15)",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`Busy`",
+      "text_line_cell": "第 33506 行",
+      "hist_line_cell": "第 33496, 33498 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bit 14)",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`Error Write Enable`",
+      "text_line_cell": "第 33518 行",
+      "hist_line_cell": "第 33504 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bit 13)",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`Error Acknowledge/Command`",
+      "text_line_cell": "第 33531 行",
+      "hist_line_cell": "第 33518 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bit 12)",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`EEPROM Loading Status`",
+      "text_line_cell": "第 33550 行",
+      "hist_line_cell": "第 33532 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bit 11)",
+      "pdf_page_cell": "Page 261",
+      "printed_page_cell": "Page 261",
+      "verbatim_cell": "`Checksum Error in ESC Configuration Area`",
+      "text_line_cell": "第 33563 行",
+      "hist_line_cell": "第 33544 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.49 (Bits 10:8)",
+      "pdf_page_cell": "Page 262",
+      "printed_page_cell": "Page 262",
+      "verbatim_cell": "`Command Register` (Write 010, Reload 100)",
+      "text_line_cell": "第 33593-33599 行",
+      "hist_line_cell": "第 33568, 33574, 33575 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.50",
+      "pdf_page_cell": "Page 263",
+      "printed_page_cell": "Page 263",
+      "verbatim_cell": "`12.14.50 EEPROM ADDRESS REGISTER`",
+      "text_line_cell": "第 33698 行",
+      "hist_line_cell": "第 33698, 33702, 33717 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.51",
+      "pdf_page_cell": "Page 263",
+      "printed_page_cell": "Page 263",
+      "verbatim_cell": "`12.14.51 EEPROM DATA REGISTER`",
+      "text_line_cell": "第 33751 行",
+      "hist_line_cell": "第 33744, 33748, 33769 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
+    },
+    {
+      "section_cell": "Section 12.14.51 (Note 27)",
+      "pdf_page_cell": "Page 265",
+      "printed_page_cell": "Page 265",
+      "verbatim_cell": "`Note 27: The default value of this field can be configured via EEPROM.`",
+      "text_line_cell": "第 33978 行",
+      "hist_line_cell": "第 33980 行",
+      "status_cell": "**【未核实（未纳入自动化核验清单）】**"
     }
   ]
 }

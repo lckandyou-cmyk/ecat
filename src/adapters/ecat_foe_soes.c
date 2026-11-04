@@ -22,18 +22,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     }
     adapter->core = core;
     adapter->buffer_size = buffer_size;
-    adapter->last_commit_failed = false;
-    adapter->last_al_error = 0;
     adapter->al_error_fn = NULL;
     s_active_adapter = adapter;
-}
-
-void ecat_foe_soes_reset(ecat_foe_soes_adapter_t *adapter)
-{
-    if (adapter != NULL) {
-        adapter->last_commit_failed = false;
-        adapter->last_al_error = 0;
-    }
 }
 
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
@@ -48,8 +38,6 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
     if (adapter == NULL || adapter->core == NULL || filename == NULL) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
-    adapter->last_commit_failed = false;
-    adapter->last_al_error = 0;
     s_active_adapter = adapter;
     return ecat_foe_core_on_wrq(adapter->core, filename, filename_len);
 }
@@ -65,30 +53,21 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
     /* 0 长度包结束路径 */
     if (length == 0) {
         if (ecat_foe_core_on_end(adapter->core) != 0) {
-            adapter->last_commit_failed = true;
             return 1U;
         }
-        /* 提交成功：自动解除失败标记与 AL 错误缓存，允许后续 BOOT->INIT 迁移 */
-        adapter->last_commit_failed = false;
-        adapter->last_al_error = 0;
         return 0U;
     }
 
     /* 写入数据块 */
     if (ecat_foe_core_on_data(adapter->core, data, length) != 0) {
-        adapter->last_commit_failed = true;
         return 1U;
     }
 
     /* 回调级结束判定: 当本次接收字节数小于 buffer_size 时判定为最后一包 (短包路径) */
     if (adapter->buffer_size > 0 && length < adapter->buffer_size) {
         if (ecat_foe_core_on_end(adapter->core) != 0) {
-            adapter->last_commit_failed = true;
             return 1U;
         }
-        /* 提交成功：自动解除失败标记与 AL 错误缓存，允许后续 BOOT->INIT 迁移 */
-        adapter->last_commit_failed = false;
-        adapter->last_al_error = 0;
     }
 
     return 0U; /* 0 表示成功 */
@@ -105,13 +84,10 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * - *as 匹配 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)
      * - *an 改写为 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)
      *
-     * 会话状态与固件有效性双重防御：
-     * 1. 显式记录的提交失败 (adapter->last_commit_failed 为 true)；
-     * 2. 核心状态防御：若主站超时、断线或协议栈静默中止导致 write_cb 从未触发，
-     *    但底层已被 invalidate (core->driver_invalidated) 或会话未正常闭环 (core->session_active)，
-     *    只要未成功执行 finalize (core->driver_finalized == false)，固件即处于残缺/不可用状态；
-     * 3. 核心机处于 ECAT_FOE_STATE_ERROR 错误状态。
-     * 上述任一情况均判定固件不可用于正常运行，必须强行拦截 BOOT->INIT 迁移。
+     * 判定只依赖核心状态：
+     * 只要核心未成功执行 finalize (core->driver_finalized == false)，
+     * 且处于 driver_invalidated、session_active 或 state == ECAT_FOE_STATE_ERROR，
+     * 固件即处于残缺/不可用状态，必须强行拦截 BOOT->INIT 迁移。
      *
      * 时序与物理限制明确说明：
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
@@ -120,7 +96,7 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * 3. 局限性说明：当前为测试桩仿真验证，真实 SOES 源码尚未集成编译，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
      *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
      */
-    bool should_block_init = adapter->last_commit_failed;
+    bool should_block_init = false;
     if (adapter->core != NULL) {
         if (!adapter->core->driver_finalized) {
             if (adapter->core->driver_invalidated || adapter->core->session_active ||
@@ -133,7 +109,6 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
     if (*as == ECAT_TRANSITION_BOOT_TO_INIT && should_block_init) {
         /* 改写目标状态为 BOOT + Error (0x03 | 0x10 = 0x13) */
         *an = ECAT_AL_STATUS_BOOT_ERROR;
-        adapter->last_al_error = ECAT_AL_STATUS_CODE_NO_VALID_FW;
         if (adapter->al_error_fn != NULL) {
             adapter->al_error_fn(ECAT_AL_STATUS_CODE_NO_VALID_FW);
         }

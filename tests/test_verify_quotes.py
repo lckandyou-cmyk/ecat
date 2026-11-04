@@ -18,7 +18,7 @@ tests/test_verify_quotes.py
 11. 反向扫描发现文档中存在重复标记 (-> 返回 1)
 12. 源文件 SHA-256 哈希篡改/不匹配 (-> 返回 1)
 13. 文档正文出现未登记且未豁免的行号引用 (-> 返回 1)
-14. 文档正文行号引用配置了有效精确豁免项 (-> 返回 0)
+14. 文档正文行号引用配置了有效豁免项 (-> 返回 0)
 15. 豁免项包含通配符 '*' 拦截 (-> 返回 1)
 16. 跨文档借用引用块拦截 (-> 返回 1)
 17. 豁免行文本被修改 (line_text_hash 不匹配) 拦截 (-> 返回 1)
@@ -257,7 +257,7 @@ def test_fixture_suite():
             f.write("\n正文中引述未核验代码: `esc_foe.c:999`\n")
         assert_case("Case 13: 未登记且未豁免的正文行号引用拦截", 1, "发现未登记的正文行号引用: 'esc_foe.c:999'", manifest, repo, soes)
 
-    # Case 14: 文档正文行号引用配置了有效精确豁免项通过
+    # Case 14: 文档正文行号引用配置了有效豁免项通过
     with tempfile.TemporaryDirectory() as td:
         manifest, repo, soes = create_base_fixture(td)
         doc_path = os.path.join(repo, "docs/test_doc.md")
@@ -288,7 +288,7 @@ def test_fixture_suite():
         })
         with open(manifest, "w", encoding="utf-8") as f:
             json.dump(m, f)
-        assert_case("Case 14: 正文行号引用精确豁免通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
+        assert_case("Case 14: 正文行号引用豁免通过", 0, "三方引文自动化核验通过", manifest, repo, soes)
 
     # Case 15: 豁免项包含通配符 '*' 拦截
     with tempfile.TemporaryDirectory() as td:
@@ -396,7 +396,7 @@ def test_fixture_suite():
         new_doc = "行 1: `esc_foe.c:10-13`\n行 2: text\n行 3: text\n" + content
         # quote-begin 现在位于第 4+ 行，距离第 1 行恰好为 3 行
         lines = new_doc.splitlines(keepends=True)
-        # 精确构造: line 1 引用, line 2 空行, line 3 空行, line 4 是 quote-begin (4 - 1 = 3)
+        # 边界构造: line 1 引用, line 2 空行, line 3 空行, line 4 是 quote-begin (4 - 1 = 3)
         doc_text = "正文相邻引用: `esc_foe.c:10-13`\n\n\n<!-- quote-begin: TEST_Q1 -->\n```c\n"
         for line in SAMPLE_SNIPPET:
             doc_text += line + "\n"

@@ -16,7 +16,7 @@ SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan vectors check-quotes check-pdf-quotes
+.PHONY: all clean test test-asan vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -44,9 +44,14 @@ check-pdf-quotes:
 		echo "[FATAL] 厂商 PDF 不存在: $(PDF_FILE)"; \
 		exit 1; \
 	fi
+	@$(PYTHON) tools/gen_pdf_cite_table.py --check
 	@$(PYTHON) tools/verify_pdf_quotes.py --pdf-path $(PDF_FILE)
 
+gen-pdf-table:
+	@$(PYTHON) tools/gen_pdf_cite_table.py --update
+
 test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
+	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
 	@./$(TEST_CORE_BIN)

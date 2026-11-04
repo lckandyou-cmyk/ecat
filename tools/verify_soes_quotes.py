@@ -272,7 +272,7 @@ def scan_unregistered_prose_lines(
 ) -> Tuple[bool, List[str], Dict[str, int]]:
     """
     全量扫描仓库 Markdown 正文中包含的行号引用，
-    严密拦截任何未在 quotes 登记且未在 exemptions 中显式精确豁免的行号引用。
+    严密拦截任何未在 quotes 登记且未在 exemptions 中显式清单豁免的行号引用。
     校验行文本哈希以防篡改或行号漂移。
     """
     p1 = re.compile(r"([a-zA-Z0-9_\-\./]+\.(?:c|h|txt|pdf))[:：](\d+(?:-\d+)?)")
@@ -315,7 +315,7 @@ def scan_unregistered_prose_lines(
                                 status_counts["LOCAL_QUOTE_ADJACENT"] = status_counts.get("LOCAL_QUOTE_ADJACENT", 0) + 1
                                 continue
 
-                            # 2. 检查精确豁免清单匹配 (路径必须严格一致，杜绝裸文件名与子目录二义性模糊放行)
+                            # 2. 检查已登记豁免清单匹配 (路径必须严格一致，杜绝裸文件名与子目录二义性模糊放行)
                             key = (os.path.normpath(doc_rel), lno)
                             matched = False
                             norm_doc_src = os.path.normpath(raw_path)
@@ -539,7 +539,7 @@ def verify_three_way(manifest_path: str, repo_root: str, soes_dir: str) -> int:
     print("------------------------------------------------------------")
     print(f" 核验统计与覆盖范围客观汇报:")
     print(f" - 登记 Quote 自动化三方核验: {checked_count} 项 (逐字比对吻合)")
-    print(f" - 正文行号精确豁免总数:     {len(prose_exemptions)} 项 (权威规范文档已清零，仅限归档历史记录)")
+    print(f" - 正文行号登记豁免总数:     {len(prose_exemptions)} 项 (权威规范文档已清零，仅限归档历史记录)")
     for st, cnt in sorted(status_counts.items()):
         print(f"   * {st:38s}: {cnt} 处引用")
     print(" - 正则覆盖局限说明: 本工具基于正则表达式匹配显式文件行号引用，无法识别无行号自然语言引述或非常规引用语法")
