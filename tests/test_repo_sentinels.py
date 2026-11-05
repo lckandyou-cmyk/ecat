@@ -1133,6 +1133,115 @@ os.close(fd)
         shutil.rmtree(build_dir, ignore_errors=True)
 
 
+def test_user_replaced_manifest_retention(repo_dir: str):
+    """[TEST 22] 验证用户在构建后替换清单自身时的防篡改检测与默认非破坏保留机制"""
+    print("\n[TEST 22] 验证用户在构建后替换清单自身时的防篡改检测与默认非破坏保留机制...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="foe_manifest_replace_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+
+        # 正常构建一次，签发宿主真实凭据（记录原始清单哈希）
+        res_build = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_build.returncode == 0
+        manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+        assert os.path.isfile(manifest_path)
+
+        # 用户将清单替换为自定义合法格式内容，并重算校验和
+        sys.path.insert(0, os.path.join(repo_dir, "tools"))
+        import safe_build
+        user_replaced_data = {
+            "magic": safe_build.MANIFEST_MAGIC,
+            "version": 1,
+            "created_by": "foe_build_system",
+            "artifacts": {},
+            "dsym_files": {},
+            "dsym_dirs": [],
+            "user_custom_payload": "USER_VALUABLE_SENTINEL_MANIFEST_DATA"
+        }
+        user_replaced_data["checksum"] = safe_build.compute_manifest_checksum(user_replaced_data)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(user_replaced_data, f, indent=2)
+
+        # 执行 make clean
+        res_clean = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean.returncode == 0
+        assert "清单文件已被用户修改或替换" in res_clean.stdout
+
+        # 核心断言：被用户替换的清单文件完好保留，内容未丢失
+        assert os.path.isfile(manifest_path), "错误: 用户替换的清单被误删！"
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            saved_data = json.load(f)
+        assert saved_data.get("user_custom_payload") == "USER_VALUABLE_SENTINEL_MANIFEST_DATA"
+        print("  [PASS] 用户替换清单保留验证通过：清单哈希与凭据不符时跳过清理，存量清单完好保留")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def test_corrupt_or_unreadable_lock_protection(repo_dir: str):
+    """[TEST 23] 验证损坏或不可读的锁记录保护机制与失败安全退出"""
+    print("\n[TEST 23] 验证损坏或不可读的锁记录保护机制与失败安全退出...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="foe_lock_corrupt_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+        os.makedirs(build_dir, exist_ok=True)
+        lock_file = os.path.join(build_dir, ".foe_build.lock")
+
+        # 场景 A: 锁文件为用户存量非 JSON 哨兵文本，未加 OVERWRITE 构建时应安全拒绝并保留内容
+        user_lock_text = "USER_SENTINEL_LOCK_DATA_DO_NOT_OVERWRITE"
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write(user_lock_text)
+
+        res_build_refuse = subprocess.run(
+            ["make", "build", "CC=clang"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_build_refuse.returncode != 0, "错误: 未拦截非受控锁文件"
+        assert "安全拒绝：锁文件" in res_build_refuse.stderr
+        with open(lock_file, "r", encoding="utf-8") as f:
+            assert f.read() == user_lock_text, "错误: 用户锁文件内容被覆盖！"
+        print("  [PASS] 场景 A 验证通过：非受控锁文件在构建时安全拒绝，用户数据未被覆盖")
+
+        # 场景 B: 锁文件存在但不可读 (chmod 000)，clean 时遵循失败安全原则跳过清理
+        os.chmod(lock_file, 0o000)
+        res_clean = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean.returncode == 0
+        assert "依据失败安全原则跳过清理以防冲突" in res_clean.stdout
+        print("  [PASS] 场景 B 验证通过：锁文件不可读时 clean 严格遵循失败安全原则终止清理")
+
+        os.chmod(lock_file, 0o600)
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="foe_isolated_repo_") as tmp_repo:
         print(f"=== 搭建独立隔离仓库副本环境: {tmp_repo} ===")
@@ -1178,6 +1287,8 @@ def main():
         test_inode_stability_and_clean_race_defense(tmp_repo)
         test_fail_closed_clean_when_coordinator_unavailable(tmp_repo)
         test_clean_and_build_lifecycle_mutual_exclusion(tmp_repo)
+        test_user_replaced_manifest_retention(tmp_repo)
+        test_corrupt_or_unreadable_lock_protection(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 

@@ -20,6 +20,7 @@ import fcntl
 MANIFEST_NAME = ".foe_manifest.json"
 MANIFEST_MAGIC = "ECAT_FOE_BUILD_MANIFEST_V1"
 LOCK_NAME = ".foe_build.lock"
+LOCK_MAGIC = "ECAT_FOE_BUILD_LOCK_V1"
 
 # 严格受控构建目标名称白名单（纯文件名，严禁包含路径分隔符）
 ALLOWED_TARGET_NAMES = frozenset({"test_runner_efw", "test_runner_core"})
@@ -174,7 +175,7 @@ def get_host_coordinator_file(build_dir: str) -> str:
     return os.path.join(get_host_voucher_dir(), f"coord_{bdir_key}.lock")
 
 
-def save_host_build_voucher(build_dir: str, artifacts: dict, dsym_files: dict):
+def save_host_build_voucher(build_dir: str, artifacts: dict, dsym_files: dict, manifest_hash: str = None):
     """构建成功后签发宿主真实构建凭据，证明本次产物确由受控构建真实生成"""
     voucher_file = get_voucher_file_for_dir(build_dir)
     real_bdir = os.path.realpath(build_dir)
@@ -182,6 +183,7 @@ def save_host_build_voucher(build_dir: str, artifacts: dict, dsym_files: dict):
         "build_dir": real_bdir,
         "created_at": time.time(),
         "pid": os.getpid(),
+        "manifest_hash": manifest_hash,
         "artifacts": {k: (v.get("hash") if isinstance(v, dict) else v) for k, v in artifacts.items()},
         "dsym_files": dsym_files
     }
@@ -300,7 +302,7 @@ def is_pid_alive(pid: int) -> bool:
         return e.errno == errno.EPERM
 
 
-def acquire_build_lock(build_dir: str):
+def acquire_build_lock(build_dir: str, overwrite: bool = False):
     """获取构建排他标记，防范并发构建竞态。基于宿主私有文件锁临界区与主控进程树生命周期核验"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
     coord_file = get_host_coordinator_file(build_dir)
@@ -321,14 +323,26 @@ def acquire_build_lock(build_dir: str):
             try:
                 with open(lock_file, "r", encoding="utf-8") as f:
                     lock_info = json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                if not overwrite:
+                    raise FileExistsError(f"安全拒绝：锁文件 {lock_file} 已存在但无法读取或非合法JSON格式，疑似用户文件") from e
+                lock_info = {}
+
+            if not isinstance(lock_info, dict):
+                if not overwrite:
+                    raise FileExistsError(f"安全拒绝：锁文件 {lock_file} 格式异常，疑似用户文件")
+                lock_info = {}
 
             locked_driver = lock_info.get("driver_pid")
             if locked_driver is None:
                 locked_driver = lock_info.get("pid")
             if locked_driver is None:
                 locked_driver = lock_info.get("ppid")
+
+            # 若既无受控魔数又无有效 PID 记录，在未授权覆盖时判定为用户存量文件并安全拒绝
+            if lock_info.get("magic") != LOCK_MAGIC and locked_driver is None:
+                if not overwrite:
+                    raise FileExistsError(f"安全拒绝：锁文件 {lock_file} 缺少合法构建锁标识，疑似用户文件")
 
             # 仅当持锁主控进程就是当前构建的同一主控 make 时，才视为同一次构建流程内部的后续步骤
             if locked_driver is not None and locked_driver == driver_pid:
@@ -340,6 +354,7 @@ def acquire_build_lock(build_dir: str):
 
         # 写入新锁信息（新建锁或安全接管无主孤儿锁）
         lock_data = {
+            "magic": LOCK_MAGIC,
             "driver_pid": driver_pid,
             "pid": os.getpid(),
             "created_at": time.time()
@@ -379,9 +394,10 @@ def release_build_lock(build_dir: str):
                 with open(lock_file, "r", encoding="utf-8") as f:
                     lock_info = json.load(f)
                 driver_pid = get_build_session_driver_pid()
-                if (lock_info.get("driver_pid") == driver_pid or
-                    lock_info.get("pid") == os.getpid() or
-                    lock_info.get("ppid") == os.getppid()):
+                if ((lock_info.get("magic") == LOCK_MAGIC or lock_info.get("driver_pid") is not None) and
+                    (lock_info.get("driver_pid") == driver_pid or
+                     lock_info.get("pid") == os.getpid() or
+                     lock_info.get("ppid") == os.getppid())):
                     os.remove(lock_file)
             except Exception:
                 pass
@@ -402,7 +418,7 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
         raise ValueError(f"安全拒绝：构建目录为符号链接: {build_dir}")
 
     # 获取构建排他标记，防止并发竞态
-    acquire_build_lock(build_dir)
+    acquire_build_lock(build_dir, overwrite=overwrite)
 
     manifest_path = os.path.join(build_dir, MANIFEST_NAME)
     if os.path.islink(manifest_path):
@@ -547,14 +563,15 @@ def record_build(build_dir: str, target_files: list):
         }
         manifest_data["checksum"] = compute_manifest_checksum(manifest_data)
 
-        # 签发宿主真实构建凭据，证明本次产物确由受控构建生成
-        save_host_build_voucher(build_dir, artifacts, dsym_files)
-
         tmp_manifest = os.path.join(build_dir, f".manifest_tmp_{os.getpid()}")
         fd = os.open(tmp_manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump(manifest_data, f, indent=2)
         os.replace(tmp_manifest, manifest_path)
+
+        # 计算已落盘清单的哈希指纹，并随宿主真实构建凭据一同签发
+        manifest_hash = sha256_file(manifest_path)
+        save_host_build_voucher(build_dir, artifacts, dsym_files, manifest_hash=manifest_hash)
     finally:
         release_build_lock(build_dir)
 
@@ -582,12 +599,16 @@ def clean_build(build_dir: str):
             try:
                 with open(lock_file, "r", encoding="utf-8") as f:
                     lock_info = json.load(f)
+            except Exception as e:
+                # 遵循失败安全（Fail-Closed）原则：锁记录存在但无法安全读取，终止清理以防与活动构建冲突
+                print(f"  [CLEAN] 锁记录存在但无法读取 ({e})，依据失败安全原则跳过清理以防冲突。")
+                return
+
+            if isinstance(lock_info, dict):
                 locked_driver = lock_info.get("driver_pid") or lock_info.get("pid")
                 if locked_driver is not None and is_pid_alive(locked_driver):
                     print(f"  [CLEAN] 检测到并发构建正在运行 (PID {locked_driver})，跳过清理以防冲突。")
                     return
-            except Exception:
-                pass
 
         manifest_path = os.path.join(build_dir, MANIFEST_NAME)
         if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
@@ -614,6 +635,15 @@ def clean_build(build_dir: str):
         if not host_voucher:
             print("  [CLEAN] 缺乏有效的宿主真实构建凭据（疑似预存用户文件或外来清单），默认保留存量文件以防误删。")
             return
+
+        # 核心防篡改核验：验证清单自身哈希与宿主构建凭据记录是否一致
+        # 若用户在构建后修改或替换了清单自身，判定为疑似用户文件并终止清理，绝不删除清单！
+        expected_manifest_hash = host_voucher.get("manifest_hash")
+        if expected_manifest_hash:
+            current_manifest_hash = sha256_file(manifest_path)
+            if current_manifest_hash != expected_manifest_hash:
+                print("  [CLEAN] 清单文件已被用户修改或替换（与构建凭据哈希不符），跳过清理以保护用户存量文件。")
+                return
 
         voucher_artifacts = host_voucher.get("artifacts", {})
         voucher_dsym_files = host_voucher.get("dsym_files", {})
@@ -680,9 +710,10 @@ def clean_build(build_dir: str):
         # 3. 默认非破坏设计：文件凭据无法证明目录归属，不依赖自描述清单删除目录，所有目录一律保留以防误删
         # 无论清单中的 dsym_dirs 如何声明，严禁根据清单直接 rmdir 目录
 
-        # 4. 移除清单本身
+        # 4. 移除清单本身（仅当确定由本次构建生成且未被修改时安全移除）
         if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
-            os.remove(manifest_path)
+            if not expected_manifest_hash or sha256_file(manifest_path) == expected_manifest_hash:
+                os.remove(manifest_path)
 
         # 5. 清理完成，撤销宿主真实凭据
         revoke_host_build_voucher(build_dir)
