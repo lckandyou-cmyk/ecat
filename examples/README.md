@@ -40,12 +40,18 @@ examples/
 ```bash
 make test-examples
 ```
+或者运行带 7 大同名哨兵保护与并发调用的隔离验证：
+```bash
+make test-sentinels
+```
 或者手动编译运行：
 ```bash
-clang -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -o examples/host_demo/host_demo examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
-./examples/host_demo/host_demo
+TMP_DIR=$(mktemp -d /tmp/foe_demo_build_XXXXXX)
+clang -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -o "$TMP_DIR/host_demo" examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
+"$TMP_DIR/host_demo"
+rm -rf "$TMP_DIR"
 ```
-宿主示例输出已收敛为确定性文本，不包含时间戳或本地环境路径。自动化测试会将其实际输出与 `examples/host_demo/expected_output.txt` 进行逐行比较。
+自动化构建已将所有生成物约束在系统临时构建目录中，失败时通过 shell trap 仅清理自身目录，不触碰源码树；宿主示例输出已收敛为确定性文本，不包含时间戳或本地环境路径。自动化测试会将其实际输出与 `examples/host_demo/expected_output.txt` 进行逐行比较。
 
 ## 3. 驱动模板 (driver_template)
 

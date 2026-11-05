@@ -17,17 +17,15 @@ TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
 TEST_SOES_HARNESS_BIN = tests/test_runner_soes_real
 SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I$(SOES_DIR)
 
-# 阶段 D: 宿主机参考示例与驱动模板
+# 阶段 D: 宿主机参考示例与驱动模板源码
 EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
-EXAMPLES_HOST_DEMO_BIN = examples/host_demo/host_demo
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
-EXAMPLES_DRIVER_TEMPLATE_OBJ = examples/driver_template/driver_template.o
 
 SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan test-soes test-examples vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all clean test test-asan test-soes test-examples test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -79,12 +77,17 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN) test-examples
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
+test-sentinels:
+	@$(PYTHON) tests/test_repo_sentinels.py
+
 test-examples:
-	@echo "--- 编译并运行宿主参考示例 (host_demo) 与对比 expected_output.txt ---"
-	@$(CC) $(CFLAGS) -o $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_HOST_DEMO_SRC)
-	@$(PYTHON) -c 'open("examples/host_demo/raw_payload.bin", "wb").write(bytes([0x55] * 64))'
-	@$(PYTHON) tools/efw_pack.py pack \
-		--bin examples/host_demo/raw_payload.bin \
+	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_examples_XXXXXX) && \
+	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
+	echo "--- 编译并运行宿主参考示例 (构建目录: $$TMP_BUILD_DIR) ---" && \
+	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/host_demo" $(EXAMPLES_HOST_DEMO_SRC) && \
+	$(PYTHON) -c 'open("'$$TMP_BUILD_DIR'/raw_payload.bin", "wb").write(bytes([0x55] * 64))' && \
+	$(PYTHON) tools/efw_pack.py pack \
+		--bin "$$TMP_BUILD_DIR/raw_payload.bin" \
 		--project-id 0x10010001 \
 		--project-name SERVO_DRV \
 		--hardware-id 0x00000001 \
@@ -93,23 +96,18 @@ test-examples:
 		--target MCU \
 		--fw-version 1.0.0.0 \
 		--foe-packet-size 64 \
-		--out examples/host_demo/packed_padded.efw >/dev/null
-	@rm -f examples/host_demo/raw_payload.bin
-	@$(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw > examples/host_demo/run_output.tmp
-	@diff -u examples/host_demo/expected_output.txt examples/host_demo/run_output.tmp || (rm -f examples/host_demo/run_output.tmp examples/host_demo/packed_padded.efw && exit 1)
-	@rm -f examples/host_demo/run_output.tmp
-	@echo "  [PASS] host_demo 输出与 expected_output.txt 逐行比对完全匹配"
-	@(ulimit -s 8192 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
-	@(ulimit -s 1024 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
-	@echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常"
-	@echo "--- 运行 host_demo 外部隔离、同名哨兵保护与多实例并发验证 ---"
-	@$(PYTHON) tests/test_host_demo_isolation.py $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw
-	@rm -f examples/host_demo/packed_padded.efw
-	@echo "--- 静态编译检查驱动模板 (driver_template) ---"
-	@$(CC) $(CFLAGS) -c -o $(EXAMPLES_DRIVER_TEMPLATE_OBJ) $(EXAMPLES_DRIVER_TEMPLATE_SRC)
-	@rm -f $(EXAMPLES_DRIVER_TEMPLATE_OBJ)
-	@echo "  [PASS] driver_template 编译检查通过 (-Wall -Wextra -Werror -pedantic)"
-	@rm -f $(EXAMPLES_HOST_DEMO_BIN)
+		--out "$$TMP_BUILD_DIR/packed_padded.efw" >/dev/null && \
+	"$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" > "$$TMP_BUILD_DIR/run_output.tmp" && \
+	diff -u examples/host_demo/expected_output.txt "$$TMP_BUILD_DIR/run_output.tmp" && \
+	echo "  [PASS] host_demo 输出与 expected_output.txt 逐行比对完全匹配" && \
+	(ulimit -s 8192 && "$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" >/dev/null) && \
+	echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常" && \
+	echo "--- 运行 host_demo 外部隔离、同名哨兵保护与多实例并发验证 ---" && \
+	$(PYTHON) tests/test_host_demo_isolation.py "$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" && \
+	echo "--- 静态编译检查驱动模板 (在独立临时构建目录) ---" && \
+	$(CC) $(CFLAGS) -c -o "$$TMP_BUILD_DIR/driver_template.o" $(EXAMPLES_DRIVER_TEMPLATE_SRC) && \
+	echo "  [PASS] driver_template 编译检查通过 (-Wall -Wextra -Werror -pedantic)"
 
 test-soes:
 	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ]; then \
@@ -145,4 +143,4 @@ test-asan:
 	@echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
 
 clean:
-	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_DRIVER_TEMPLATE_OBJ) examples/host_demo/run_output.tmp examples/host_demo/*.dSYM examples/host_demo/packed_padded.efw examples/host_demo/raw_payload.bin
+	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw
