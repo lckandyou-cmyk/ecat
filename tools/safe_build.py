@@ -2,6 +2,7 @@
 """
 tools/safe_build.py: 本地构建与安全清理管理工具
 实现文件级归属登记、哈希比对与安全清理，严禁递归删除未确认归属的目录或误删用户文件。
+默认非破坏原则：不能可靠证明归属时完整保留，严格限制可信路径且不跟随父路径符号链接。
 """
 
 import os
@@ -13,6 +14,10 @@ import errno
 
 MANIFEST_NAME = ".foe_manifest.json"
 MANIFEST_MAGIC = "ECAT_FOE_BUILD_MANIFEST_V1"
+LOCK_NAME = ".foe_build.lock"
+
+# 严格受控构建目标名称白名单（纯文件名，严禁包含路径分隔符）
+ALLOWED_TARGET_NAMES = frozenset({"test_runner_efw", "test_runner_core"})
 
 
 def sha256_file(filepath: str) -> str:
@@ -24,18 +29,156 @@ def sha256_file(filepath: str) -> str:
     return h.hexdigest()
 
 
+def compute_manifest_checksum(data: dict) -> str:
+    """计算清单核心数据结构的哈希指纹，防止清单被篡改"""
+    core_data = {
+        "magic": data.get("magic"),
+        "version": data.get("version"),
+        "created_by": data.get("created_by"),
+        "artifacts": data.get("artifacts"),
+        "dsym_files": data.get("dsym_files"),
+        "dsym_dirs": data.get("dsym_dirs"),
+    }
+    raw = json.dumps(core_data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def is_safe_artifact_name(name: str) -> bool:
+    """核验是否为白名单内的安全产物文件名（纯文件名，严禁包含路径分隔符、.. 或以根路径开头）"""
+    if not isinstance(name, str) or not name:
+        return False
+    if os.path.basename(name) != name:
+        return False
+    if "/" in name or "\\" in name or ".." in name:
+        return False
+    return name in ALLOWED_TARGET_NAMES
+
+
+def is_safe_dsym_relpath(rel_path: str) -> bool:
+    """核验是否为合法的 dSYM 内部相对路径"""
+    if not isinstance(rel_path, str) or not rel_path:
+        return False
+    if os.path.isabs(rel_path):
+        return False
+    norm = os.path.normpath(rel_path)
+    parts = norm.split(os.sep)
+    if any(p in ("..", ".", "") for p in parts):
+        return False
+    top_dir = parts[0]
+    if not (top_dir.endswith(".dSYM") and top_dir[:-5] in ALLOWED_TARGET_NAMES):
+        return False
+    is_std = (
+        norm.endswith(f"Contents{os.sep}Info.plist") or
+        f"{os.sep}Contents{os.sep}Resources{os.sep}DWARF{os.sep}" in norm or
+        f"{os.sep}Contents{os.sep}Resources{os.sep}Relocations{os.sep}" in norm
+    )
+    return is_std
+
+
+def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
+    """严格核验目标路径位于 build_dir 内部，且无符号链接穿透或路径逃逸"""
+    if not isinstance(rel_path, str) or not rel_path or os.path.isabs(rel_path):
+        return None
+    norm = os.path.normpath(rel_path)
+    parts = norm.split(os.sep)
+    if any(p in ("..", ".", "") for p in parts):
+        return None
+
+    if os.path.islink(build_dir):
+        return None
+    real_build_dir = os.path.realpath(build_dir)
+
+    full_path = os.path.join(build_dir, norm)
+
+    # 检查从 build_dir 到 full_path 的每一级父目录，严禁符号链接
+    cur = build_dir
+    for p in parts[:-1]:
+        cur = os.path.join(cur, p)
+        if os.path.islink(cur):
+            return None
+
+    # 检查真实父目录是否位于 real_build_dir 内部
+    parent_dir = os.path.dirname(full_path)
+    if os.path.exists(parent_dir):
+        real_parent = os.path.realpath(parent_dir)
+        try:
+            if os.path.commonpath([real_build_dir, real_parent]) != real_build_dir:
+                return None
+        except ValueError:
+            return None
+
+    # 检查目标文件本身如果是符号链接，则拒绝
+    if os.path.islink(full_path):
+        return None
+
+    return full_path
+
+
+def acquire_build_lock(build_dir: str):
+    """获取构建排他标记，防范并发构建竞态"""
+    lock_file = os.path.join(build_dir, LOCK_NAME)
+    if os.path.islink(lock_file):
+        raise ValueError(f"安全拒绝：锁文件为符号链接: {lock_file}")
+
+    if os.path.exists(lock_file):
+        old_pid = None
+        try:
+            with open(lock_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                old_pid = int(content) if content.isdigit() else None
+        except Exception:
+            old_pid = None
+
+        if old_pid is not None and old_pid != os.getpid():
+            # 检查原持锁进程是否存活
+            try:
+                os.kill(old_pid, 0)
+                raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (PID {old_pid})，锁文件已锁定")
+            except OSError:
+                # 进程已不存在，安全接管锁
+                pass
+
+    tmp_lock = os.path.join(build_dir, f".lock_tmp_{os.getpid()}")
+    fd = os.open(tmp_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))
+    os.replace(tmp_lock, lock_file)
+
+
+def release_build_lock(build_dir: str):
+    """释放构建排他标记"""
+    lock_file = os.path.join(build_dir, LOCK_NAME)
+    if os.path.isfile(lock_file) and not os.path.islink(lock_file):
+        try:
+            with open(lock_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content == str(os.getpid()):
+                    os.remove(lock_file)
+        except Exception:
+            pass
+
+
 def check_before_build(build_dir: str, target_files: list, overwrite: bool = False):
-    """构建前核验：保护已有清单、符号链接以及已修改的目标文件"""
+    """构建前核验：保护已有清单、符号链接以及已修改的目标文件与 dSYM 用户文件"""
     if os.path.islink(build_dir):
         raise ValueError(f"安全拒绝：构建目录为符号链接: {build_dir}")
+
+    # 获取构建排他标记，防止并发竞态
+    acquire_build_lock(build_dir)
 
     manifest_path = os.path.join(build_dir, MANIFEST_NAME)
     if os.path.islink(manifest_path):
         raise ValueError(f"安全拒绝：清单路径为符号链接: {manifest_path}")
 
+    # 白名单检验待构建目标
+    for fname in target_files:
+        if not is_safe_artifact_name(fname):
+            raise ValueError(f"安全拒绝：非白名单构建目标: {fname}")
+
     recorded_artifacts = {}
     recorded_dsym_dirs = set()
     recorded_dsym_files = {}
+
     if os.path.isfile(manifest_path):
         try:
             with open(manifest_path, 'r', encoding='utf-8') as f:
@@ -48,6 +191,17 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
         # 若已有清单缺少归属魔数，说明系用户预置或外来文件，非授权时严禁覆盖
         if mdata.get("magic") != MANIFEST_MAGIC and not overwrite:
             raise FileExistsError(f"安全拒绝：清单文件 {manifest_path} 已存在但缺少合法归属魔数，疑似用户文件")
+
+        # 若清单内容被篡改（校验和不匹配）或包含非法非白名单条目，非授权时严禁覆盖
+        if mdata.get("magic") == MANIFEST_MAGIC and not overwrite:
+            expected_csum = mdata.get("checksum")
+            actual_csum = compute_manifest_checksum(mdata)
+            if expected_csum != actual_csum:
+                raise FileExistsError(f"安全拒绝：已有清单指纹不吻合（疑似被手动修改或非标准清单），拒绝覆盖")
+
+            for afname in mdata.get("artifacts", {}):
+                if not is_safe_artifact_name(afname):
+                    raise FileExistsError(f"安全拒绝：已有清单中包含非受控路径 {afname}，疑似用户文件")
 
         recorded_artifacts = mdata.get("artifacts", {})
         recorded_dsym_dirs = set(mdata.get("dsym_dirs", []))
@@ -82,7 +236,6 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
                 if not overwrite:
                     raise FileExistsError(f"安全拒绝：调试符号目录已存在且未在清单中登记: {dsym_path}")
             else:
-                # 已登记 dSYM 目录：逐一核查内部文件是否都在清单中且哈希吻合
                 for root, _, files in os.walk(dsym_path):
                     for f in files:
                         fp = os.path.join(root, f)
@@ -97,77 +250,80 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
 
 def record_build(build_dir: str, target_files: list):
     """构建后登记：记录本次构建生成的二进制及调试符号文件清单，并原子写入清单"""
-    if os.path.islink(build_dir):
-        raise ValueError(f"安全拒绝：构建目录为符号链接: {build_dir}")
+    try:
+        if os.path.islink(build_dir):
+            raise ValueError(f"安全拒绝：构建目录为符号链接: {build_dir}")
 
-    manifest_path = os.path.join(build_dir, MANIFEST_NAME)
-    if os.path.islink(manifest_path):
-        raise ValueError(f"安全拒绝：清单路径为符号链接: {manifest_path}")
+        manifest_path = os.path.join(build_dir, MANIFEST_NAME)
+        if os.path.islink(manifest_path):
+            raise ValueError(f"安全拒绝：清单路径为符号链接: {manifest_path}")
 
-    artifacts = {}
-    dsym_files = {}
-    dsym_dirs = []
+        artifacts = {}
+        dsym_files = {}
+        dsym_dirs = []
 
-    for fname in target_files:
-        fpath = os.path.join(build_dir, fname)
-        if os.path.isfile(fpath) and not os.path.islink(fpath):
-            artifacts[fname] = {
-                "hash": sha256_file(fpath),
-                "size": os.path.getsize(fpath)
-            }
+        for fname in target_files:
+            if not is_safe_artifact_name(fname):
+                raise ValueError(f"安全拒绝：非白名单构建目标: {fname}")
 
-        dsym_path = os.path.join(build_dir, fname + ".dSYM")
-        if os.path.isdir(dsym_path) and not os.path.islink(dsym_path):
-            # 逐一遍历记录 dSYM 目录下的具体文件与目录层级，严禁模糊全删
-            # 仅收录符合 macOS 标准调试信息规范的文件，用户文件不作为调试产物登记
-            has_valid_dsym_content = False
-            for root, dirs, files in os.walk(dsym_path, topdown=False):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    if not os.path.islink(fp) and os.path.isfile(fp):
-                        rel = os.path.relpath(fp, build_dir)
-                        # 仅收录标准 dSYM 规范产物 (Info.plist, DWARF 二进制, Relocations)
-                        # 凡非规范文件 (如 user.txt 等任意用户数据) 均不收录入删除清单
-                        is_std_dsym = (
-                            rel.endswith("/Contents/Info.plist") or
-                            "/Contents/Resources/DWARF/" in rel or
-                            "/Contents/Resources/Relocations/" in rel
-                        )
-                        if is_std_dsym:
-                            dsym_files[rel] = sha256_file(fp)
-                            has_valid_dsym_content = True
-                for d in dirs:
-                    dp = os.path.join(root, d)
-                    if not os.path.islink(dp) and os.path.isdir(dp):
-                        dsym_dirs.append(os.path.relpath(dp, build_dir))
-            if has_valid_dsym_content:
-                dsym_dirs.append(fname + ".dSYM")
+            fpath = os.path.join(build_dir, fname)
+            if os.path.islink(fpath):
+                raise ValueError(f"安全拒绝：构建目标为符号链接: {fpath}")
 
-    manifest_data = {
-        "magic": MANIFEST_MAGIC,
-        "version": 1,
-        "created_by": "foe_build_system",
-        "artifacts": artifacts,
-        "dsym_files": dsym_files,
-        "dsym_dirs": dsym_dirs
-    }
+            if os.path.isfile(fpath):
+                artifacts[fname] = {
+                    "hash": sha256_file(fpath),
+                    "size": os.path.getsize(fpath)
+                }
 
-    # 原子写入清单文件：先写独立临时文件再原子 replace，杜绝中断与竞态
-    tmp_manifest = os.path.join(build_dir, f".manifest_tmp_{os.getpid()}")
-    fd = os.open(tmp_manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        json.dump(manifest_data, f, indent=2)
-    os.replace(tmp_manifest, manifest_path)
+            dsym_path = os.path.join(build_dir, fname + ".dSYM")
+            if os.path.islink(dsym_path):
+                raise ValueError(f"安全拒绝：调试符号目录为符号链接: {dsym_path}")
+
+            if os.path.isdir(dsym_path):
+                has_valid_dsym_content = False
+                for root, dirs, files in os.walk(dsym_path, topdown=False):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        if not os.path.islink(fp) and os.path.isfile(fp):
+                            rel = os.path.relpath(fp, build_dir)
+                            if is_safe_dsym_relpath(rel):
+                                dsym_files[rel] = sha256_file(fp)
+                                has_valid_dsym_content = True
+                    for d in dirs:
+                        dp = os.path.join(root, d)
+                        if not os.path.islink(dp) and os.path.isdir(dp):
+                            dsym_dirs.append(os.path.relpath(dp, build_dir))
+                if has_valid_dsym_content:
+                    dsym_dirs.append(fname + ".dSYM")
+
+        manifest_data = {
+            "magic": MANIFEST_MAGIC,
+            "version": 1,
+            "created_by": "foe_build_system",
+            "artifacts": artifacts,
+            "dsym_files": dsym_files,
+            "dsym_dirs": dsym_dirs
+        }
+        manifest_data["checksum"] = compute_manifest_checksum(manifest_data)
+
+        tmp_manifest = os.path.join(build_dir, f".manifest_tmp_{os.getpid()}")
+        fd = os.open(tmp_manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(manifest_data, f, indent=2)
+        os.replace(tmp_manifest, manifest_path)
+    finally:
+        release_build_lock(build_dir)
 
 
 def clean_build(build_dir: str):
-    """安全清理：仅删除经哈希比对证明由本次构建生成的具体文件，非递归删除，非空目录完好保留"""
+    """安全清理：仅删除经核验确由本次构建生成的具体文件，不能可靠证明归属时一律保留"""
     if not os.path.isdir(build_dir) or os.path.islink(build_dir):
         return
 
     manifest_path = os.path.join(build_dir, MANIFEST_NAME)
     if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
-        print(f"  [CLEAN] 未发现合法构建清单，跳过清理以保护存量文件。")
+        print("  [CLEAN] 未发现合法构建清单，跳过清理以保护存量文件。")
         return
 
     try:
@@ -178,20 +334,60 @@ def clean_build(build_dir: str):
         return
 
     if manifest_data.get("magic") != MANIFEST_MAGIC:
-        print(f"  [CLEAN] 清单文件缺少归属魔数，跳过清理以防误删用户文件。")
+        print("  [CLEAN] 清单文件缺少归属魔数，跳过清理以防误删用户文件。")
         return
 
-    artifacts = manifest_data.get("artifacts", {})
-    dsym_files = manifest_data.get("dsym_files", {})
-    dsym_dirs = manifest_data.get("dsym_dirs", [])
+    expected_csum = manifest_data.get("checksum")
+    actual_csum = compute_manifest_checksum(manifest_data)
+    if expected_csum != actual_csum:
+        print("  [CLEAN] 清单指纹不匹配（内容疑似被手工篡改或损坏），跳过清理以保护存量文件。")
+        return
+
+    raw_artifacts = manifest_data.get("artifacts", {})
+    raw_dsym_files = manifest_data.get("dsym_files", {})
+    raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
+
+    # 严格路径与归属核验：如果清单中存在任何非法路径或越界路径，直接判定清单不可靠，放弃清理
+    for fname in raw_artifacts:
+        if not is_safe_artifact_name(fname):
+            print(f"  [CLEAN] 清单包含非白名单或越界产物路径 {fname!r}，判定清单不可靠，终止清理以保护用户文件。")
+            return
+        if not verify_strictly_inside_build_dir(build_dir, fname):
+            print(f"  [CLEAN] 目标 {fname!r} 存在符号链接或路径逃逸隐患，终止清理。")
+            return
+
+    for rel_f in raw_dsym_files:
+        if not is_safe_dsym_relpath(rel_f):
+            print(f"  [CLEAN] 清单包含非安全 dSYM 路径 {rel_f!r}，判定清单不可靠，终止清理以保护用户文件。")
+            return
+        if not verify_strictly_inside_build_dir(build_dir, rel_f):
+            print(f"  [CLEAN] dSYM 文件 {rel_f!r} 存在符号链接或路径逃逸隐患，终止清理。")
+            return
+
+    # 检查 dSYM 目录中是否存在未登记用户文件
+    # 若 dSYM 目录内含有用户数据，整棵 dSYM 目录全部保留不删
+    protected_dsym_dirs = set()
+    for dsym in raw_dsym_dirs:
+        dsym_path = os.path.join(build_dir, dsym)
+        if os.path.isdir(dsym_path) and not os.path.islink(dsym_path):
+            has_unknown_file = False
+            for root, _, files in os.walk(dsym_path):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    rel = os.path.relpath(fp, build_dir)
+                    if rel not in raw_dsym_files:
+                        has_unknown_file = True
+                        break
+                if has_unknown_file:
+                    break
+            if has_unknown_file:
+                print(f"  [CLEAN] 调试符号目录 {dsym} 内检测到用户存量文件，整棵目录予以保留不删。")
+                protected_dsym_dirs.add(dsym)
 
     # 1. 逐一删除经哈希校验的二进制文件
-    for fname, finfo in artifacts.items():
+    for fname, finfo in raw_artifacts.items():
         fpath = os.path.join(build_dir, fname)
-        if os.path.islink(fpath):
-            print(f"  [WARN] {fpath} 为符号链接，跳过删除。")
-            continue
-        if os.path.isfile(fpath):
+        if os.path.isfile(fpath) and not os.path.islink(fpath):
             expected_hash = finfo.get("hash") if isinstance(finfo, dict) else finfo
             actual_hash = sha256_file(fpath)
             if actual_hash == expected_hash:
@@ -200,18 +396,25 @@ def clean_build(build_dir: str):
             else:
                 print(f"  [WARN] {fname} 内容已被修改，保留文件不予删除。")
 
-    # 2. 逐一删除经哈希校验的 dSYM 具体文件（非递归）
-    for rel_file, expected_hash in dsym_files.items():
+    # 2. 逐一删除经哈希校验的 dSYM 具体文件（非受保护目录下的）
+    for rel_file, expected_hash in raw_dsym_files.items():
+        top_dsym = rel_file.split(os.sep)[0]
+        if top_dsym in protected_dsym_dirs:
+            continue
+
         fpath = os.path.join(build_dir, rel_file)
-        if not os.path.islink(fpath) and os.path.isfile(fpath):
+        if os.path.isfile(fpath) and not os.path.islink(fpath):
             if sha256_file(fpath) == expected_hash:
                 os.remove(fpath)
                 print(f"  [CLEAN] 已安全清理调试符号文件: {rel_file}")
             else:
                 print(f"  [WARN] {rel_file} 内容已被修改，保留文件不予删除。")
 
-    # 3. 逐层尝试 rmdir 移除空的 dSYM 目录层级（若内部有 user.txt 等文件，rmdir 会安全失败）
-    for rel_dir in sorted(dsym_dirs, key=len, reverse=True):
+    # 3. 逐层尝试 rmdir 移除空的 dSYM 目录层级
+    for rel_dir in sorted(raw_dsym_dirs, key=len, reverse=True):
+        top_dsym = rel_dir.split(os.sep)[0]
+        if top_dsym in protected_dsym_dirs:
+            continue
         dpath = os.path.join(build_dir, rel_dir)
         if os.path.isdir(dpath) and not os.path.islink(dpath):
             try:

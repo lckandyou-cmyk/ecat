@@ -20,6 +20,11 @@ tests/test_repo_sentinels.py:
 7. 已修改产物防覆写与保留测试：验证用户修改过的构建产物在再次 build 时被主动拒绝覆盖，在 clean 时安全跳过保留。
 8. 符号链接与原子防御测试：验证即使传入 --overwrite，O_NOFOLLOW 依然在内核级原子拒绝符号链接穿透，
    外部目标文件不受篡改。
+9. 路径穿越与逃逸清理防御测试：验证在清单写入 ../valuable.txt、系统根路径或父目录符号链接时，
+   clean 成功识别并拒绝清理，仓库根目录与外部用户文件完好无损。
+10. 被篡改清单指纹防伪防御测试：验证当清单哈希指纹不匹配时，clean 判定为不可信并跳过清理，保护存量产物。
+11. dSYM 用户数据整棵保留测试：验证当 dSYM 目录内含有用户数据时，整棵 dSYM 目录及其文件全部保留不删。
+12. 并发构建排他锁测试：验证存在存活构建锁时，并发构建被主动安全拒绝。
 """
 
 import os
@@ -315,6 +320,129 @@ def test_existing_identical_output_defense(repo_dir: str):
     print("  [PASS] make vectors OVERWRITE=1 显式授权下成功更新向量")
 
 
+def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
+    """测试 11: 验证路径穿越、系统根路径、父目录符号链接、被篡改清单与 dSYM 深度防御"""
+    print("\n[TEST 11] 验证路径穿越 (../valuable.txt)、系统根路径、父目录符号链接与被篡改清单防御...")
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir, exist_ok=True)
+
+    # 1. 复现审查发现的逃逸删除路径：在仓库根目录放置 valuable.txt
+    valuable_path = os.path.join(repo_dir, "valuable.txt")
+    valuable_content = b"CRITICAL_USER_VALUABLE_SOURCE_DATA_123456"
+    with open(valuable_path, "wb") as f:
+        f.write(valuable_content)
+    valuable_hash = hashlib.sha256(valuable_content).hexdigest()
+
+    # 在 build/.foe_manifest.json 中写入带 ../valuable.txt 的欺骗清单
+    manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+    escape_manifest = {
+        "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "artifacts": {
+            "../valuable.txt": valuable_hash
+        }
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(escape_manifest, f)
+
+    # 运行 make clean：必须安全识别越界路径并拒绝清理
+    res_c1 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c1.returncode == 0, f"make clean 执行失败: {res_c1.stderr}"
+    assert os.path.isfile(valuable_path), "错误: 仓库根目录下的 valuable.txt 被 clean 跨目录逃逸误删！"
+    with open(valuable_path, "rb") as f:
+        assert f.read() == valuable_content, "错误: valuable.txt 内容被篡改！"
+    print("  [PASS] 跨目录逃逸 (../valuable.txt) 成功被拦截，根目录用户文件完好无损")
+
+    # 2. 验证系统根路径与多级遍历组件防御
+    root_escape_manifest = {
+        "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "artifacts": {
+            "/tmp/non_existent_target": "dummy_hash",
+            "../../outside.txt": "dummy_hash"
+        }
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(root_escape_manifest, f)
+
+    res_c2 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c2.returncode == 0, f"make clean 失败: {res_c2.stderr}"
+    assert os.path.isfile(valuable_path), "错误: valuable.txt 在系统根路径测试中被误删！"
+    print("  [PASS] 系统根路径与多级遍历逃逸清单成功被拦截，终止清理操作")
+
+    # 3. 验证父目录符号链接穿透防御
+    symlink_dir = os.path.join(build_dir, "link_to_parent")
+    if os.path.exists(symlink_dir) or os.path.islink(symlink_dir):
+        os.remove(symlink_dir)
+    os.symlink("..", symlink_dir)
+
+    symlink_escape_manifest = {
+        "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "artifacts": {
+            "link_to_parent/valuable.txt": valuable_hash
+        }
+    }
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(symlink_escape_manifest, f)
+
+    res_c3 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c3.returncode == 0, f"make clean 失败: {res_c3.stderr}"
+    assert os.path.isfile(valuable_path), "错误: valuable.txt 在父目录符号链接测试中被误删！"
+    os.remove(symlink_dir)
+    print("  [PASS] 父目录符号链接穿透成功被识别并安全拦截")
+
+    # 4. 验证被篡改的清单（指纹不匹配）安全防御
+    # 先生成合法受控构建
+    res_b = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b.returncode == 0, f"make build 失败: {res_b.stderr}"
+
+    target_bin = os.path.join(build_dir, "test_runner_efw")
+    assert os.path.isfile(target_bin), "构建产物未生成"
+
+    # 人为篡改清单中的哈希（导致指纹 checksum 校验失败）
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        tampered_data = json.load(f)
+    tampered_data["artifacts"]["test_runner_efw"]["hash"] = "0000000000000000000000000000000000000000000000000000000000000000"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(tampered_data, f)
+
+    # 运行 make clean：必须因指纹不符跳过清理，保留产物
+    res_c4 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c4.returncode == 0, f"make clean 失败: {res_c4.stderr}"
+    assert os.path.isfile(target_bin), "错误: 被篡改清单未能阻断清理，构建产物被删除！"
+    print("  [PASS] 被篡改清单指纹核验生效：成功跳过清理，保护存量文件")
+
+    # 5. 验证包含用户文件的 dSYM 目录整棵保留机制
+    # 重新生成受控构建并在 dSYM 中写入 user.txt
+    res_b2 = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b2.returncode == 0, f"make build 失败: {res_b2.stderr}"
+
+    dsym_dir = os.path.join(build_dir, "test_runner_efw.dSYM", "Contents")
+    os.makedirs(dsym_dir, exist_ok=True)
+    user_file_in_dsym = os.path.join(dsym_dir, "user.txt")
+    with open(user_file_in_dsym, "wb") as f:
+        f.write(b"USER_DATA_INSIDE_VALID_DSYM_TREE")
+
+    res_c5 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c5.returncode == 0, f"make clean 失败: {res_c5.stderr}"
+    assert os.path.isfile(user_file_in_dsym), "错误: 含有用户文件的 dSYM 目录中的用户文件被误删！"
+    assert os.path.isdir(dsym_dir), "错误: 含有用户文件的 dSYM 目录被误删！"
+    print("  [PASS] 含有用户存量数据的 dSYM 目录整棵完好保留，未发生误删")
+
+    # 6. 验证并发构建锁防竞态
+    lock_file = os.path.join(build_dir, ".foe_build.lock")
+    with open(lock_file, "w", encoding="utf-8") as f:
+        f.write(str(os.getpid()))  # 写入当前正在运行的存活进程 PID
+
+    res_b_race = subprocess.run(["make", "build", "CC=clang"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_race.returncode != 0, "错误: 在存活构建锁存在时未能拒绝并发构建！"
+    os.remove(lock_file)
+    print("  [PASS] 并发构建排他锁生效：成功拦截并发竞态构建冲突")
+
+    # 清理测试现场
+    if os.path.isfile(valuable_path):
+        os.remove(valuable_path)
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def test_atomic_symlink_defense(repo_dir: str):
     """测试 10: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦绝不穿透"""
     print("\n[TEST 10] 验证内核级原子符号链接防御 (即使指定 overwrite 亦安全拦截)...")
@@ -392,6 +520,7 @@ def main():
         test_modified_artifact_protection(tmp_repo)
         test_existing_identical_output_defense(tmp_repo)
         test_atomic_symlink_defense(tmp_repo)
+        test_manifest_path_traversal_and_symlink_defense(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 
