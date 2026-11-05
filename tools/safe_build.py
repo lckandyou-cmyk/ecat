@@ -2,15 +2,18 @@
 """
 tools/safe_build.py: 本地构建与安全清理管理工具
 实现文件级归属登记、哈希比对与安全清理，严禁递归删除未确认归属的目录或误删用户文件。
-默认非破坏原则：不能可靠证明归属时完整保留，严格限制可信路径且不跟随父路径符号链接。
+默认非破坏原则：若无法可靠区分已有用户文件和产物，默认保留，不依据自描述清单删除。
 """
 
 import os
 import sys
 import json
+import time
 import hashlib
 import argparse
 import errno
+import tempfile
+import subprocess
 
 MANIFEST_NAME = ".foe_manifest.json"
 MANIFEST_MAGIC = "ECAT_FOE_BUILD_MANIFEST_V1"
@@ -88,7 +91,6 @@ def is_safe_dsym_dir_relpath(rel_dir: str) -> bool:
     top_dir = parts[0]
     if not (top_dir.endswith(".dSYM") and top_dir[:-5] in ALLOWED_TARGET_NAMES):
         return False
-    # 子目录结构核验：允许顶层 .dSYM 目录本身或内部标准子目录层级 (Contents, Resources, DWARF, Relocations 等)
     allowed_subdirs = {"Contents", "Resources", "DWARF", "Relocations"}
     for sub in parts[1:]:
         if sub not in allowed_subdirs and not any(sub.startswith(arch) for arch in ("arm", "x86", "aarch")):
@@ -111,14 +113,12 @@ def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
 
     full_path = os.path.join(build_dir, norm)
 
-    # 检查从 build_dir 到 full_path 的每一级父目录，严禁符号链接
     cur = build_dir
     for p in parts[:-1]:
         cur = os.path.join(cur, p)
         if os.path.islink(cur):
             return None
 
-    # 检查真实父目录是否位于 real_build_dir 内部
     parent_dir = os.path.dirname(full_path)
     if os.path.exists(parent_dir):
         real_parent = os.path.realpath(parent_dir)
@@ -128,11 +128,71 @@ def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
         except ValueError:
             return None
 
-    # 检查目标自身如果是符号链接，则拒绝
     if os.path.islink(full_path):
         return None
 
     return full_path
+
+
+def get_host_voucher_dir() -> str:
+    """获取宿主系统临时安全凭据目录，权限仅当前系统用户可读写 (0o700)"""
+    vdir = os.path.join(tempfile.gettempdir(), f".foe_build_voucher_{os.getuid()}")
+    try:
+        os.makedirs(vdir, mode=0o700, exist_ok=True)
+        os.chmod(vdir, 0o700)
+    except Exception:
+        pass
+    return vdir
+
+
+def get_voucher_file_for_dir(build_dir: str) -> str:
+    """获取指定构建目录在宿主凭据库中的凭据文件路径"""
+    real_bdir = os.path.realpath(build_dir)
+    bdir_key = hashlib.sha256(real_bdir.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(get_host_voucher_dir(), f"voucher_{bdir_key}.json")
+
+
+def save_host_build_voucher(build_dir: str, artifacts: dict, dsym_files: dict):
+    """构建成功后签发宿主真实构建凭据，证明本次产物确由受控构建真实生成"""
+    voucher_file = get_voucher_file_for_dir(build_dir)
+    real_bdir = os.path.realpath(build_dir)
+    data = {
+        "build_dir": real_bdir,
+        "created_at": time.time(),
+        "pid": os.getpid(),
+        "artifacts": {k: (v.get("hash") if isinstance(v, dict) else v) for k, v in artifacts.items()},
+        "dsym_files": dsym_files
+    }
+    tmp_v = f"{voucher_file}.tmp_{os.getpid()}"
+    fd = os.open(tmp_v, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp_v, voucher_file)
+
+
+def verify_host_build_voucher(build_dir: str) -> dict:
+    """核验宿主真实构建凭据是否存在且有效，若缺乏凭据则返回 None"""
+    voucher_file = get_voucher_file_for_dir(build_dir)
+    if not os.path.isfile(voucher_file) or os.path.islink(voucher_file):
+        return None
+    try:
+        with open(voucher_file, "r", encoding="utf-8") as f:
+            vdata = json.load(f)
+        if vdata.get("build_dir") == os.path.realpath(build_dir):
+            return vdata
+    except Exception:
+        pass
+    return None
+
+
+def revoke_host_build_voucher(build_dir: str):
+    """清理完成后撤销宿主真实构建凭据"""
+    voucher_file = get_voucher_file_for_dir(build_dir)
+    if os.path.isfile(voucher_file) and not os.path.islink(voucher_file):
+        try:
+            os.remove(voucher_file)
+        except Exception:
+            pass
 
 
 def validate_manifest_integrity_and_paths(build_dir: str, manifest_data: dict) -> bool:
@@ -179,14 +239,52 @@ def validate_manifest_integrity_and_paths(build_dir: str, manifest_data: dict) -
     return True
 
 
+def get_build_session_driver_pid() -> int:
+    """获取当前构建流程的主控 make 进程 PID，用于跨步骤绑定与并发隔离"""
+    ps_bin = "/bin/ps" if os.path.exists("/bin/ps") else "ps"
+    cur = os.getppid()
+    top_make = None
+    while cur > 1:
+        p = subprocess.run([ps_bin, "-c", "-o", "comm=,ppid=", "-p", str(cur)], capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout.strip():
+            parts = p.stdout.strip().split()
+            comm = parts[0].lower()
+            next_ppid = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+            if "make" in comm:
+                top_make = cur
+            elif "sh" in comm or "bash" in comm or "zsh" in comm:
+                pass
+            else:
+                break
+            cur = next_ppid
+        else:
+            break
+    return top_make if top_make is not None else os.getppid()
+
+
+def is_pid_alive(pid: int) -> bool:
+    """核验系统进程是否存在且存活（兼容不同用户权限与无权探测场景）"""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as e:
+        import errno
+        return e.errno == errno.EPERM
+
+
 def acquire_build_lock(build_dir: str):
-    """获取构建排他标记，防范并发构建竞态。采用父进程与进程组生命周期校验"""
+    """获取构建排他标记，防范并发构建竞态。基于主控 make 进程 PID 树生命周期核验"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
     if os.path.islink(lock_file):
         raise ValueError(f"安全拒绝：锁文件为符号链接: {lock_file}")
 
-    current_ppid = os.getppid()
-    current_pgrp = os.getpgrp()
+    driver_pid = get_build_session_driver_pid()
 
     if os.path.exists(lock_file):
         lock_info = {}
@@ -196,29 +294,23 @@ def acquire_build_lock(build_dir: str):
         except Exception:
             pass
 
-        old_ppid = lock_info.get("ppid")
-        old_pgrp = lock_info.get("pgrp")
+        locked_driver = lock_info.get("driver_pid")
+        if locked_driver is None:
+            locked_driver = lock_info.get("pid")
+        if locked_driver is None:
+            locked_driver = lock_info.get("ppid")
 
-        # 若原持锁进程属于当前父进程或同属当前进程组，视为同一次构建流程内部流转
-        if old_ppid == current_ppid or (old_pgrp is not None and old_pgrp == current_pgrp):
+        # 仅当持锁主控进程就是当前构建的同一主控 make 时，才视为同一次构建流程内部的后续步骤
+        if locked_driver is not None and locked_driver == driver_pid:
             return
 
-        # 检查原持锁父进程是否仍然存活
-        is_alive = False
-        if old_ppid is not None:
-            try:
-                os.kill(old_ppid, 0)
-                is_alive = True
-            except OSError:
-                is_alive = False
+        # 检查原持锁主控进程是否仍然存活
+        if locked_driver is not None and is_pid_alive(locked_driver):
+            raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (主控进程 PID {locked_driver})，锁文件已锁定")
 
-        if is_alive:
-            raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (父进程 PID {old_ppid})，锁文件已锁定")
-
-    # 写入新锁信息（带当前会话与父进程标识）
+    # 写入新锁信息，记录主控构建驱动进程的 PID
     lock_data = {
-        "ppid": current_ppid,
-        "pgrp": current_pgrp,
+        "driver_pid": driver_pid,
         "pid": os.getpid()
     }
     tmp_lock = os.path.join(build_dir, f".lock_tmp_{os.getpid()}")
@@ -229,14 +321,16 @@ def acquire_build_lock(build_dir: str):
 
 
 def release_build_lock(build_dir: str):
-    """释放构建排他标记，核验会话归属后安全清理"""
+    """释放构建排他标记，核验主控进程归属后安全清理"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
     if os.path.isfile(lock_file) and not os.path.islink(lock_file):
         try:
             with open(lock_file, "r", encoding="utf-8") as f:
                 lock_info = json.load(f)
-            # 确认系当前父进程或进程组持有的锁才予以删除
-            if lock_info.get("ppid") == os.getppid() or lock_info.get("pgrp") == os.getpgrp():
+            driver_pid = get_build_session_driver_pid()
+            if (lock_info.get("driver_pid") == driver_pid or
+                lock_info.get("pid") == os.getpid() or
+                lock_info.get("ppid") == os.getppid()):
                 os.remove(lock_file)
         except Exception:
             pass
@@ -333,7 +427,7 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
 
 
 def record_build(build_dir: str, target_files: list):
-    """构建后登记：记录本次构建生成的二进制及调试符号文件清单，并原子写入清单"""
+    """构建后登记：记录本次构建生成的二进制及调试符号文件清单，并原子写入清单与签发真实凭据"""
     try:
         if os.path.islink(build_dir):
             raise ValueError(f"安全拒绝：构建目录为符号链接: {build_dir}")
@@ -393,6 +487,9 @@ def record_build(build_dir: str, target_files: list):
         }
         manifest_data["checksum"] = compute_manifest_checksum(manifest_data)
 
+        # 签发宿主真实构建凭据，证明本次产物确由受控构建生成
+        save_host_build_voucher(build_dir, artifacts, dsym_files)
+
         tmp_manifest = os.path.join(build_dir, f".manifest_tmp_{os.getpid()}")
         fd = os.open(tmp_manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -425,6 +522,17 @@ def clean_build(build_dir: str):
         print("  [CLEAN] 清单存在未校验通过的非受控路径、越界路径或指纹不符，跳过清理以保护存量文件与目录。")
         return
 
+    # 核心非破坏校验：核验是否存在有效的宿主真实构建凭据
+    # 若用户直接在工作区中预置了清单和文件，而未真实执行受控构建，则凭据库中无凭据
+    # 遵循非破坏原则：无法可靠证明归属时默认保留，不依据自描述清单删除！
+    host_voucher = verify_host_build_voucher(build_dir)
+    if not host_voucher:
+        print("  [CLEAN] 缺乏有效的宿主真实构建凭据（疑似预存用户文件或外来清单），默认保留存量文件以防误删。")
+        return
+
+    voucher_artifacts = host_voucher.get("artifacts", {})
+    voucher_dsym_files = host_voucher.get("dsym_files", {})
+
     raw_artifacts = manifest_data.get("artifacts", {})
     raw_dsym_files = manifest_data.get("dsym_files", {})
     raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
@@ -449,11 +557,16 @@ def clean_build(build_dir: str):
                 print(f"  [CLEAN] 调试符号目录 {dsym} 内检测到用户存量文件，整棵目录予以保留不删。")
                 protected_dsym_dirs.add(dsym)
 
-    # 1. 逐一删除经哈希校验的二进制文件
+    # 1. 逐一删除经哈希校验且与真实构建凭据吻合的二进制文件
     for fname, finfo in raw_artifacts.items():
         fpath = os.path.join(build_dir, fname)
         if os.path.isfile(fpath) and not os.path.islink(fpath):
             expected_hash = finfo.get("hash") if isinstance(finfo, dict) else finfo
+            # 严格双重校验：必须与宿主真实凭据吻合
+            if fname not in voucher_artifacts or voucher_artifacts[fname] != expected_hash:
+                print(f"  [WARN] {fname} 缺乏真实构建凭证或哈希与构建凭据不符，保留文件不予删除。")
+                continue
+
             actual_hash = sha256_file(fpath)
             if actual_hash == expected_hash:
                 os.remove(fpath)
@@ -461,7 +574,7 @@ def clean_build(build_dir: str):
             else:
                 print(f"  [WARN] {fname} 内容已被修改，保留文件不予删除。")
 
-    # 2. 逐一删除经哈希校验的 dSYM 具体文件（非受保护目录下的）
+    # 2. 逐一删除经哈希校验且与真实构建凭据吻合的 dSYM 具体文件（非受保护目录下的）
     for rel_file, expected_hash in raw_dsym_files.items():
         top_dsym = rel_file.split(os.sep)[0]
         if top_dsym in protected_dsym_dirs:
@@ -469,6 +582,10 @@ def clean_build(build_dir: str):
 
         fpath = os.path.join(build_dir, rel_file)
         if os.path.isfile(fpath) and not os.path.islink(fpath):
+            if rel_file not in voucher_dsym_files or voucher_dsym_files[rel_file] != expected_hash:
+                print(f"  [WARN] {rel_file} 缺乏真实构建凭据，保留文件不予删除。")
+                continue
+
             if sha256_file(fpath) == expected_hash:
                 os.remove(fpath)
                 print(f"  [CLEAN] 已安全清理调试符号文件: {rel_file}")
@@ -496,7 +613,10 @@ def clean_build(build_dir: str):
     if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
         os.remove(manifest_path)
 
-    # 5. 尝试 rmdir 构建根目录：仅当目录已完全为空时安全移除
+    # 5. 清理完成，撤销宿主真实凭据
+    revoke_host_build_voucher(build_dir)
+
+    # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空时安全移除
     try:
         os.rmdir(build_dir)
         print(f"  [CLEAN] 构建目录 {build_dir} 已为空，已安全移除。")

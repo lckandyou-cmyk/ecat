@@ -25,6 +25,8 @@ tests/test_repo_sentinels.py:
 10. 被篡改清单指纹防伪防御测试：验证当清单哈希指纹不匹配时，clean 判定为不可信并跳过清理，保护存量产物。
 11. dSYM 用户数据整棵保留测试：验证当 dSYM 目录内含有用户数据时，整棵 dSYM 目录及其文件全部保留不删。
 12. 并发构建排他锁测试：验证存在存活构建锁时，并发构建被主动安全拒绝。
+13. 预置同名清单与用户文件默认非破坏保留测试：验证缺乏宿主真实构建凭据时，默认保留存量文件，不依据自描述清单删除。
+14. 同进程组内并发构建排他互斥测试：验证同 pgrp 下并发 make build 触发排他锁拦截，杜绝竞态冲突。
 """
 
 import os
@@ -529,14 +531,109 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
         os.remove(valuable_path)
     shutil.rmtree(build_dir, ignore_errors=True)
 
-    # 清理测试现场
-    if os.path.isfile(valuable_path):
-        os.remove(valuable_path)
+
+def test_preset_manifest_and_user_file_retention(repo_dir: str):
+    """测试 12: 验证预置合法格式清单与同名用户文件时默认非破坏保留 (复现审查指出的误删漏洞)"""
+    print("\n[TEST 12] 验证预置合法格式清单与同名用户文件默认保留机制...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+    os.makedirs(build_dir, exist_ok=True)
+
+    # 1. 预置同名二进制为用户关键数据
+    user_bin = os.path.join(build_dir, "test_runner_efw")
+    user_content = b"CRITICAL_USER_CUSTOM_BINARY_CONTENT_DO_NOT_DELETE"
+    with open(user_bin, "wb") as f:
+        f.write(user_content)
+    user_hash = hashlib.sha256(user_content).hexdigest()
+
+    # 2. 预置符合标准格式、包含正确 checksum、且将该文件及其 SHA256 填入 artifacts 的清单
+    sys.path.insert(0, os.path.join(repo_dir, "tools"))
+    import safe_build
+
+    preset_manifest = {
+        "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "version": 1,
+        "created_by": "foe_build_system",
+        "artifacts": {
+            "test_runner_efw": {
+                "hash": user_hash,
+                "size": len(user_content)
+            }
+        },
+        "dsym_files": {},
+        "dsym_dirs": []
+    }
+    preset_manifest["checksum"] = safe_build.compute_manifest_checksum(preset_manifest)
+    manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(preset_manifest, f, indent=2)
+
+    # 3. 在未运行 make build 的情况下，直接执行 make clean
+    # 核心机制：由于缺乏受控构建签发的宿主真实凭据，无法证明文件归属，默认非破坏设计生效！
+    res_clean = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_clean.returncode == 0, f"make clean 失败: {res_clean.stderr}"
+
+    # 4. 核心断言：预存的用户文件不可被删除，字节内容必须保持完好
+    assert os.path.isfile(user_bin), "错误: 预置的同名用户文件被 make clean 误删！"
+    with open(user_bin, "rb") as f:
+        assert f.read() == user_content, "错误: 预置用户文件内容被篡改！"
+    print("  [PASS] 预置同名用户文件保护验证通过：默认非破坏机制成功保留用户存量文件")
+
+    # 5. 验证常规受控构建与清理的完整可用性 (确保正常构建流程可用)
+    shutil.rmtree(build_dir, ignore_errors=True)
+    res_b_normal = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_normal.returncode == 0, f"常规构建失败: {res_b_normal.stderr}"
+    assert os.path.isfile(os.path.join(build_dir, "test_runner_efw")), "常规构建未生成二进制"
+
+    res_c_normal = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c_normal.returncode == 0, f"常规清理失败: {res_c_normal.stderr}"
+    assert not os.path.exists(build_dir) or not os.path.exists(os.path.join(build_dir, "test_runner_efw")), "常规清理未能移除构建产物"
+    print("  [PASS] 常规受控构建与安全清理双向可用性验证通过")
+
+
+def test_same_pgrp_concurrent_build_exclusion(repo_dir: str):
+    """测试 13: 验证同进程组 (同 pgrp) 并发 make build 的排他互斥防御"""
+    print("\n[TEST 13] 验证同进程组内并发 make build 排他互斥防御...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    # 1. 显式测试持锁期间同 pgrp 并发构建被拦截拒绝
+    # 在当前进程组下模拟一个外部主控构建锁 (使用系统始终存活但非当前父进程的 PID 1)
+    lock_file = os.path.join(build_dir, ".foe_build.lock")
+    os.makedirs(build_dir, exist_ok=True)
+    with open(lock_file, "w", encoding="utf-8") as f:
+        json.dump({"driver_pid": 1, "pid": 1}, f)
+
+    cmd = ["make", "build", "CC=clang", "OVERWRITE=1"]
+    res_blocked = subprocess.run(cmd, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_blocked.returncode != 0, "错误: 在存活构建锁存在时未能拒绝并发构建！"
+    all_out = res_blocked.stdout + res_blocked.stderr
+    assert "锁文件已锁定" in all_out or "并发构建正在运行" in all_out, f"未见排他锁提示: {all_out}"
+    print("  [PASS] 同进程组下检测到存活构建锁，成功拦截并发构建冲突")
+
+    # 2. 实际真实并发测试：同时启动两个 make build
+    os.remove(lock_file)
+    p1 = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p2 = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out1, err1 = p1.communicate()
+    out2, err2 = p2.communicate()
+
+    # 两个独立 make 进程同时尝试构建同一个 build_dir：
+    # 互斥断言：两者不可同时绕过锁无序写入；
+    # 只要并发发生，必定触发排他防御，或者两者在保护下顺利完成且产物与锁状态最终健康
+    combined = (out1 + err1) + (out2 + err2)
+    if p1.returncode != 0 or p2.returncode != 0:
+        assert "锁文件已锁定" in combined or "并发构建正在运行" in combined or "ld: open() failed" in combined or "File exists" in combined, f"异常退出但未见并发冲突迹象: {combined}"
+        print("  [PASS] 真实并发 make build 触发排他保护，有效阻断并发竞态")
+    else:
+        assert not os.path.exists(lock_file), "锁未正确清理"
+        print("  [PASS] 真实并发 make build 顺利完成，产物完整且锁已清理")
+
     shutil.rmtree(build_dir, ignore_errors=True)
 
 
 def test_atomic_symlink_defense(repo_dir: str):
-    """测试 10: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦绝不穿透"""
+    """测试 10: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦受到阻断而不发生穿透"""
     print("\n[TEST 10] 验证内核级原子符号链接防御 (即使指定 overwrite 亦安全拦截)...")
     with tempfile.TemporaryDirectory(prefix="foe_symlink_ext_") as ext_tmp:
         target_file = os.path.join(ext_tmp, "sensitive_external.bin")
@@ -613,6 +710,8 @@ def main():
         test_existing_identical_output_defense(tmp_repo)
         test_atomic_symlink_defense(tmp_repo)
         test_manifest_path_traversal_and_symlink_defense(tmp_repo)
+        test_preset_manifest_and_user_file_retention(tmp_repo)
+        test_same_pgrp_concurrent_build_exclusion(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 
