@@ -2,11 +2,12 @@
  * @file test_soes_real_harness.c
  * @brief 真实 SOES esc_foe.c 宿主独立测试 Harness
  *
- * 验证目标:
+ * 验证目标 (严格区分两种证据类型):
  * 1. 首块回调时机核查: 验证真实 SOES 在 WRQ 阶段是否触发 write_function；
  * 2. 文件名前缀匹配核查: 验证真实 SOES FOE_fopen 中 strncmp(name, cfg_name, num_chars) 的前缀匹配机理；
  * 3. 零长度包返回值核查: 验证真实 SOES 在 data_len == 0 分支对 FOE_fclose() 返回值的忽略特性与短包 abort 行为对比；
- * 4. 适配层流式调用联动: 验证核心协议机在无 WRQ 直调或异常数据流下的防御行为。
+ * 4. 孤立直接调用防御 (证据 1): 独立单元测试直接调用 core_on_data 与 write_cb，验证未经 WRQ 建立会话时的接口级防御；
+ * 5. 真实协议机端到端联动 (证据 2): 真实 SOES ESC_foeprocess 经由已注册的 write_cb 自动驱动核心状态机处理 WRQ->DATA，覆盖成功 ACK 与校验失败 FOE Abort。
  *
  * 环境与限制说明:
  * - 本测试通过在宿主环境模拟 SOES 所需的最小邮箱结构 (_MBX, _MBXcontrol, ESCvar) 直接链接真实 esc_foe.c；
@@ -22,6 +23,7 @@
 
 #include "esc.h"
 #include "esc_foe.h"
+#include "ecat_foe_efw.h"
 #include "ecat_foe_core.h"
 #include "ecat_foe_soes.h"
 #include "mock_driver.h"
@@ -274,13 +276,96 @@ static void test_real_soes_zero_len_vs_short_packet(void)
     printf("  [PASS] 零长度包分支下 FOE_fclose() 返回非零时，真实 SOES 果然忽略返回值并错误发送了成功 ACK\n");
 }
 
-/* Test 4: 适配层端到端数据接入保护核查 */
-static void test_adapter_with_real_soes_interaction(void)
+/* 静态构造测试用 .efw 固件流 (64 字节头 + payload) */
+static uint8_t s_efw_test_buf[256];
+
+static size_t build_harness_test_efw(
+    uint8_t *out_buf,
+    uint32_t project_id,
+    uint32_t hardware_id,
+    uint16_t hw_ver_min,
+    uint16_t hw_ver_max,
+    uint16_t target_id,
+    uint16_t flags,
+    uint32_t fw_version,
+    uint32_t min_allow_version,
+    const uint8_t *payload,
+    uint32_t payload_len)
 {
-    printf("--- [Harness Test 4] 适配层与真实协议机联动防御核查 ---\n");
+    memset(out_buf, 0, 64);
+    /* 0x00: magic "ECFW" */
+    out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57;
+    /* 0x04: format_version = 1 */
+    out_buf[4] = 0x01; out_buf[5] = 0x00;
+    /* 0x06: header_length = 64 */
+    out_buf[6] = 0x40; out_buf[7] = 0x00;
+    /* 0x08: project_id */
+    out_buf[8] = (uint8_t)(project_id & 0xFF);
+    out_buf[9] = (uint8_t)((project_id >> 8) & 0xFF);
+    out_buf[10] = (uint8_t)((project_id >> 16) & 0xFF);
+    out_buf[11] = (uint8_t)((project_id >> 24) & 0xFF);
+    /* 0x0C: hardware_id */
+    out_buf[12] = (uint8_t)(hardware_id & 0xFF);
+    out_buf[13] = (uint8_t)((hardware_id >> 8) & 0xFF);
+    out_buf[14] = (uint8_t)((hardware_id >> 16) & 0xFF);
+    out_buf[15] = (uint8_t)((hardware_id >> 24) & 0xFF);
+    /* 0x10: hw_ver_min */
+    out_buf[16] = (uint8_t)(hw_ver_min & 0xFF);
+    out_buf[17] = (uint8_t)((hw_ver_min >> 8) & 0xFF);
+    /* 0x12: hw_ver_max */
+    out_buf[18] = (uint8_t)(hw_ver_max & 0xFF);
+    out_buf[19] = (uint8_t)((hw_ver_max >> 8) & 0xFF);
+    /* 0x14: target_id */
+    out_buf[20] = (uint8_t)(target_id & 0xFF);
+    out_buf[21] = (uint8_t)((target_id >> 8) & 0xFF);
+    /* 0x16: flags */
+    out_buf[22] = (uint8_t)(flags & 0xFF);
+    out_buf[23] = (uint8_t)((flags >> 8) & 0xFF);
+    /* 0x18: fw_version */
+    out_buf[24] = (uint8_t)(fw_version & 0xFF);
+    out_buf[25] = (uint8_t)((fw_version >> 8) & 0xFF);
+    out_buf[26] = (uint8_t)((fw_version >> 16) & 0xFF);
+    out_buf[27] = (uint8_t)((fw_version >> 24) & 0xFF);
+    /* 0x1C: min_allow_version */
+    out_buf[28] = (uint8_t)(min_allow_version & 0xFF);
+    out_buf[29] = (uint8_t)((min_allow_version >> 8) & 0xFF);
+    out_buf[30] = (uint8_t)((min_allow_version >> 16) & 0xFF);
+    out_buf[31] = (uint8_t)((min_allow_version >> 24) & 0xFF);
+    /* 0x20: payload_length */
+    out_buf[32] = (uint8_t)(payload_len & 0xFF);
+    out_buf[33] = (uint8_t)((payload_len >> 8) & 0xFF);
+    out_buf[34] = (uint8_t)((payload_len >> 16) & 0xFF);
+    out_buf[35] = (uint8_t)((payload_len >> 24) & 0xFF);
+
+    /* 0x24: payload_crc32 */
+    uint32_t p_crc = (payload != NULL && payload_len > 0) ? ecat_foe_crc32_calc(payload, payload_len) : 0U;
+    out_buf[36] = (uint8_t)(p_crc & 0xFF);
+    out_buf[37] = (uint8_t)((p_crc >> 8) & 0xFF);
+    out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
+    out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
+
+    /* 0x3C: header_crc32 */
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
+    out_buf[60] = (uint8_t)(h_crc & 0xFF);
+    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+
+    if (payload != NULL && payload_len > 0) {
+        memcpy(out_buf + 64, payload, payload_len);
+    }
+    return 64U + payload_len;
+}
+
+/* 静态夹具驱动 */
+static mock_driver_t s_harness_drv;
+
+/* Test 4: 孤立直接调用防御核查 (非协议机驱动的直接接口单测) */
+static void test_direct_api_calls_defense_without_wrq(void)
+{
+    printf("--- [Harness Test 4] 孤立直接调用防御核查 (非协议机驱动的直接接口单测) ---\n");
     reset_soes_environment();
 
-    static mock_driver_t s_harness_drv;
     mock_driver_init(&s_harness_drv);
 
     ecat_foe_core_t core;
@@ -305,16 +390,16 @@ static void test_adapter_with_real_soes_interaction(void)
     int ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
 
-    uint8_t dummy_chunk[64];
+    static uint8_t dummy_chunk[64];
     memset(dummy_chunk, 0xA5, sizeof(dummy_chunk));
 
-    /* 验证事实: 若真实 SOES 未调用 on_wrq 即调用数据写入，核心机拒绝并返回 -1 */
+    /* 证据类型 1: 直接单测调用 core_on_data (未经 WRQ 建立会话，直接调用被拒绝) */
     int st = ecat_foe_core_on_data(&core, dummy_chunk, sizeof(dummy_chunk));
     assert(st == -1);
     assert(core.last_error == ECAT_FOE_CORE_ERR_INVALID_STATE);
     assert(s_harness_drv.count_init == 0);
 
-    /* 适配层回调拒绝核验 */
+    /* 证据类型 1: 直接单测调用 adapter_write_cb (未经 WRQ 建立会话，直接回调被拒绝) */
     ecat_foe_soes_adapter_t adapter;
     ecat_foe_soes_init(&adapter, &core, 512);
     foe_file_cfg_t file_cfg;
@@ -322,8 +407,152 @@ static void test_adapter_with_real_soes_interaction(void)
     uint32_t cb_ret = ecat_foe_soes_write_cb(&file_cfg, dummy_chunk, sizeof(dummy_chunk));
     assert(cb_ret != 0);
 
-    printf("  [PASS] 未经 WRQ 握手直接进入数据流时，核心机拒绝 (返回 -1, last_error=0x%04X)，适配层回调返回非零 (%u)\n",
+    printf("  [PASS] 孤立直接调用防御: core_on_data 返回 -1 (last_error=0x%04X), write_cb 返回非零 (%u)\n",
            core.last_error, cb_ret);
+}
+
+/* Test 5: 真实 SOES ESC_foeprocess 驱动已注册适配器回调端到端联动核查 */
+static void test_real_soes_driven_adapter_e2e_flow(void)
+{
+    printf("--- [Harness Test 5] 真实 SOES 驱动已注册适配器回调端到端联动核查 ---\n");
+
+    /* 子测试 5A: 正常固件升级全流程 (WRQ -> DATA -> write_cb -> core_on_data -> finalize -> ACK) */
+    reset_soes_environment();
+
+    /* 绑定真实适配器回调至真实 SOES 文件表项 */
+    s_foe_files[0].name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+    s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+    mock_driver_init(&s_harness_drv);
+
+    ecat_foe_core_t core;
+    memset(&core, 0, sizeof(core));
+
+    ecat_foe_core_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.project_id = 0x10010001U;
+    cfg.project_name = "SERVO_DRV";
+    cfg.hardware_id = 0x00000001U;
+    cfg.local_hw_ver = 1U;
+    cfg.anti_rollback_enable = false;
+    cfg.max_header_size = 128U;
+
+    cfg.targets[0].target_id = 1;
+    cfg.targets[0].enabled = true;
+    cfg.targets[0].max_payload_size = 4096U;
+    cfg.targets[0].write_unit = 8U;
+    cfg.targets[0].driver = &s_harness_drv.driver;
+    cfg.targets[0].user_ctx = &s_harness_drv;
+
+    int ret_init = ecat_foe_core_init(&core, &cfg);
+    assert(ret_init == 0);
+
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+
+    /* 1. 主站发送 WRQ 报文 */
+    MBXcontrol[0].state = MBXstate_inclaim;
+    _FOE *req = (_FOE *)&MBX[0];
+    const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+    size_t fn_len = strlen(fn);
+
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + fn_len);
+    req->mbxheader.mbxtype = MBXFOE;
+    req->foeheader.opcode = FOE_OP_WRQ;
+    req->foeheader.password = 0;
+    memcpy(req->filename, fn, fn_len);
+
+    /* 驱动真实 SOES 接收 WRQ */
+    ESC_foeprocess();
+
+    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    assert(res_mbx->foeheader.packetnumber == 0);
+
+    /* 2. 应用层 WRQ 握手进入会话 */
+    int wrq_ret = ecat_foe_soes_on_wrq(&adapter, fn, fn_len);
+    assert(wrq_ret == 0);
+    assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+    /* 3. 构造 16 字节 payload 的合法固件 */
+    static const uint8_t s_payload[16] = {
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F
+    };
+    size_t efw_len = build_harness_test_efw(
+        s_efw_test_buf,
+        0x10010001U, /* project_id */
+        0x00000001U, /* hardware_id */
+        1, 1,        /* hw_ver_min, hw_ver_max */
+        1,           /* target_id: MCU */
+        0,           /* flags */
+        0x01000000U, /* fw_version: 1.0.0.0 (Major=1 in MSB) */
+        0,           /* min_allow_version */
+        s_payload, 16);
+    assert(efw_len == 80);
+
+    /* 4. 主站发送 DATA 报文 (包号 1, 数据长度 80) */
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+    req->mbxheader.mbxtype = MBXFOE;
+    req->foeheader.opcode = FOE_OP_DATA;
+    req->foeheader.packetnumber = 1;
+    memcpy(req->data, s_efw_test_buf, efw_len);
+
+    /* 驱动真实 SOES 处理 DATA 报文 -> 真实 SOES 自动调用已注册的 write_cb -> 核心状态机写入并 finalize */
+    ESC_foeprocess();
+
+    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    assert(res_mbx->foeheader.packetnumber == 1);
+    assert(s_harness_drv.count_init == 1);
+    assert(s_harness_drv.count_write == 1);
+    assert(s_harness_drv.count_finalize == 1);
+    assert(core.state == ECAT_FOE_STATE_SUCCESS);
+    printf("  [PASS] 真实 SOES 驱动 write_cb 成功流: WRQ->DATA 经真实协议栈驱动回调闭环，驱动 finalize 完成，SOES 回复 ACK(1)\n");
+
+    /* 子测试 5B: 固件数据损坏触发真实 SOES FOE Abort 中止流 */
+    reset_soes_environment();
+    s_foe_files[0].name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+    s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+    mock_driver_init(&s_harness_drv);
+    memset(&core, 0, sizeof(core));
+    ret_init = ecat_foe_core_init(&core, &cfg);
+    assert(ret_init == 0);
+    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+
+    /* WRQ */
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + fn_len);
+    req->mbxheader.mbxtype = MBXFOE;
+    req->foeheader.opcode = FOE_OP_WRQ;
+    req->foeheader.password = 0;
+    memcpy(req->filename, fn, fn_len);
+    ESC_foeprocess();
+    wrq_ret = ecat_foe_soes_on_wrq(&adapter, fn, fn_len);
+    assert(wrq_ret == 0);
+
+    /* 故意破坏 header CRC (第 60 字节取反) */
+    s_efw_test_buf[60] ^= 0xFF;
+
+    /* 发送损坏的 DATA 报文 */
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+    req->mbxheader.mbxtype = MBXFOE;
+    req->foeheader.opcode = FOE_OP_DATA;
+    req->foeheader.packetnumber = 1;
+    memcpy(req->data, s_efw_test_buf, efw_len);
+
+    /* 驱动真实 SOES: 内部调用 write_cb 失败 -> 真实 SOES 触发 FOE_abort(FOE_ERR_PROGERROR) */
+    ESC_foeprocess();
+
+    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+    assert(res_mbx->foeheader.errorcode == 0x800B);
+    assert(s_harness_drv.count_finalize == 0);
+    assert(core.state == ECAT_FOE_STATE_ERROR);
+    printf("  [PASS] 真实 SOES 驱动 write_cb 失败流: 校验失败时核心机拒绝，真实 SOES 捕获 write_cb 失败并返回 FOE Abort 0x800B\n");
 }
 
 int main(void)
@@ -335,9 +564,10 @@ int main(void)
     test_real_soes_wrq_callback_timing();
     test_real_soes_filename_prefix_matching();
     test_real_soes_zero_len_vs_short_packet();
-    test_adapter_with_real_soes_interaction();
+    test_direct_api_calls_defense_without_wrq();
+    test_real_soes_driven_adapter_e2e_flow();
 
     printf("------------------------------------------------------------\n");
-    printf(">>> 真实 SOES esc_foe 4 项宿主行为验证全部通过！<<<\n");
+    printf(">>> 真实 SOES esc_foe 5 项宿主行为验证全部通过！<<<\n");
     return 0;
 }
