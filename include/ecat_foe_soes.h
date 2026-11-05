@@ -82,6 +82,29 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
  */
 void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as, uint8_t *an);
 
+/**
+ * @brief SOES 邮箱前置嗅探与动态文件名同步钩子 (Mailbox Sniffer Hook)
+ *
+ * 在 PDI 主循环调用 ESC_foeprocess() 之前调用本函数。
+ * 若检测到主站下发 FOE_OP_WRQ：
+ * 1. 严格核验 EtherCAT 邮箱帧边界 (mbx_buf_len >= 12 字节，包含 6 字节 Mailbox 头与 6 字节 FoE 头)；
+ * 2. 提取动态文件名，调用核心机 ecat_foe_core_on_wrq 进行项目名、目标 ID 与版本防回滚校验；
+ * 3. 校验通过后，将文件名安全暂存至适配层静态缓冲区，并同步更新对应目标的 foe_cfg->files[idx].name；
+ * 4. 校验失败时，保持原文件名配置不予同步，放行原生 SOES 自动向主站回复 0x8001 Abort；
+ * 5. 若此前有未结束残留会话，触发核心自愈并重新建立会话；
+ * 6. 原生 SOES 密码校验与 BOOT 态检查在放行后原样生效。
+ *
+ * @param adapter     适配层上下文指针
+ * @param foe_cfg     SOES 的 foe_cfg 配置结构体指针
+ * @param mbx_buf     从站 SM2 接收邮箱缓冲区首地址 (通常为 &MBX[0])
+ * @param mbx_buf_len 接收邮箱有效数据长度
+ * @return 0 成功处理或无需拦截；非 0 表示核心机检验拒绝
+ */
+int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
+                                   foe_cfg_t *foe_cfg,
+                                   const uint8_t *mbx_buf,
+                                   size_t mbx_buf_len);
+
 #ifdef __cplusplus
 }
 #endif

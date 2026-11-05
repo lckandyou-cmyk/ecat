@@ -112,3 +112,91 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
         }
     }
 }
+
+#define ECAT_MBX_TYPE_FOE 0x04U
+#define ECAT_FOE_OP_WRQ   0x02U
+#define ECAT_MBX_HDR_SIZE 6U
+#define ECAT_FOE_HDR_SIZE 6U
+
+int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
+                                   foe_cfg_t *foe_cfg,
+                                   const uint8_t *mbx_buf,
+                                   size_t mbx_buf_len)
+{
+    if (adapter == NULL || adapter->core == NULL || foe_cfg == NULL || mbx_buf == NULL) {
+        return -1;
+    }
+
+    /* 帧边界校验：最小必须包含 6 字节 Mailbox 头 + 6 字节 FoE 头 */
+    if (mbx_buf_len < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+        return 0; /* 畸形帧放行给原生 SOES 协议栈自动中止 */
+    }
+
+    /* Mailbox Header:
+     * 字节 0-1: length (小端 uint16_t)
+     * 字节 5: 低 4 位为 mbxtype (0x04 为 FoE)
+     */
+    uint16_t mbx_payload_len = (uint16_t)(mbx_buf[0] | ((uint16_t)mbx_buf[1] << 8));
+    uint8_t mbx_type = (uint8_t)(mbx_buf[5] & 0x0FU);
+
+    if (mbx_type != ECAT_MBX_TYPE_FOE) {
+        return 0; /* 非 FoE 报文直接放行 */
+    }
+
+    if (mbx_payload_len < ECAT_FOE_HDR_SIZE) {
+        return 0;
+    }
+
+    /* 防止声明的 payload 长度越过传入缓冲区的实际边界 */
+    if (mbx_buf_len < (size_t)ECAT_MBX_HDR_SIZE + mbx_payload_len) {
+        return 0;
+    }
+
+    /* FoE Header:
+     * 字节 6: opcode (0x02 为 WRQ)
+     */
+    uint8_t opcode = mbx_buf[ECAT_MBX_HDR_SIZE];
+    if (opcode != ECAT_FOE_OP_WRQ) {
+        return 0; /* 非 WRQ 请求直接放行 */
+    }
+
+    /* 提取动态文件名 */
+    uint16_t name_len = mbx_payload_len - (uint16_t)ECAT_FOE_HDR_SIZE;
+    if (name_len == 0 || name_len > FOE_FN_MAX) {
+        /* 空文件名或超出 31 字符上限，不予同步，放行让 SOES 自动拒绝 */
+        return 0;
+    }
+
+    /* 有界检查：防止声明的长度超出实际传入的缓冲区尺寸 */
+    if ((size_t)(ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE + name_len) > mbx_buf_len) {
+        return 0;
+    }
+
+    const char *raw_name = (const char *)(mbx_buf + ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE);
+    char safe_name[FOE_FN_MAX + 1];
+    memcpy(safe_name, raw_name, name_len);
+    safe_name[name_len] = '\0';
+
+    /* 调用核心机 WRQ 逻辑进行预检与自愈建立会话 */
+    int rc = ecat_foe_core_on_wrq(adapter->core, safe_name, (size_t)name_len);
+    if (rc != 0) {
+        /* 核心机拒绝 (如项目名不匹配或防回滚拦截)：不执行名称同步，原生 SOES 比对失败将自动回复 0x8001 */
+        return rc;
+    }
+
+    /* 核心机校验通过：根据目标定位对应条目并同步动态文件名 */
+    uint16_t tid = adapter->core->req_target_id;
+    uint32_t file_idx = (tid > 0 && tid <= foe_cfg->n_files) ? (uint32_t)(tid - 1) : 0U;
+
+#ifndef ECAT_FOE_SOES_MAX_FILES
+#define ECAT_FOE_SOES_MAX_FILES 4
+#endif
+    static char s_synced_filenames[ECAT_FOE_SOES_MAX_FILES][FOE_FN_MAX + 1];
+    if (file_idx < ECAT_FOE_SOES_MAX_FILES) {
+        memcpy(s_synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
+        foe_cfg->files[file_idx].name = s_synced_filenames[file_idx];
+    }
+    s_active_adapter = adapter;
+
+    return 0;
+}

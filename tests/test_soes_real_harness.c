@@ -122,6 +122,15 @@ static void reset_soes_environment(void)
     g_last_written_length = 0;
     g_mock_write_return_code = 0;
 
+    memset(s_foe_files, 0, sizeof(s_foe_files));
+    s_foe_files[0].name = "firmware_mcu.bin";
+    s_foe_files[0].max_data = 4096;
+    s_foe_files[0].write_function = mock_foe_write;
+
+    s_foe_files[1].name = "firmware_fpga.bin";
+    s_foe_files[1].max_data = 4096;
+    s_foe_files[1].write_function = mock_foe_write;
+
     FOE_config(&s_foe_cfg);
     FOE_init();
 }
@@ -1047,10 +1056,325 @@ static void test_real_soes_session_boundary_cases(void)
     printf("  [PASS] [宿主观察] 双配置条目交替: files[0] 与 files[1] 交替升级，地址与指针独立正确复位\n");
 }
 
+/* ========================================================================== */
+/*   V4 专项: 真实 SOES 邮箱前置嗅探与动态文件名同步六大维度实测验证          */
+/* ========================================================================== */
+static void init_harness_cfg(ecat_foe_core_cfg_t *cfg, mock_driver_t *drv)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->project_id = 0x10010001U;
+    cfg->hardware_id = 0x00000001U;
+    cfg->local_hw_ver = 1U;
+    cfg->anti_rollback_enable = false;
+    cfg->max_header_size = 128U;
+    cfg->project_name = "SERVO_DRV";
+    cfg->targets[0].target_id = 1;
+    cfg->targets[0].enabled = true;
+    cfg->targets[0].max_payload_size = 4096U;
+    cfg->targets[0].write_unit = 8U;
+    cfg->targets[0].driver = &drv->driver;
+    cfg->targets[0].user_ctx = drv;
+    cfg->targets[1].target_id = 2;
+    cfg->targets[1].enabled = true;
+    cfg->targets[1].max_payload_size = 4096U;
+    cfg->targets[1].write_unit = 8U;
+    cfg->targets[1].driver = &drv->driver;
+    cfg->targets[1].user_ctx = drv;
+}
+
+static void test_real_soes_pre_hook_validation_suite(void)
+{
+    printf("--- [Harness V4] 真实 SOES 邮箱前置嗅探钩子六大维度综合验证 ---\n");
+
+    /* 1. 维度 1: 帧边界与畸形帧防护 (Frame Bounds) */
+    {
+        reset_soes_environment();
+        mock_driver_init(&s_harness_drv);
+        ecat_foe_core_t core;
+        ecat_foe_core_cfg_t cfg;
+        init_harness_cfg(&cfg, &s_harness_drv);
+        assert(ecat_foe_core_init(&core, &cfg) == 0);
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 128);
+
+        /* Case 1A: 报文总长不足 12 字节 (例如只有 8 字节) */
+        uint8_t malformed_buf[16] = {0};
+        malformed_buf[5] = MBXFOE;
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, malformed_buf, 8) == 0);
+
+        /* Case 1B: 非 FoE 邮箱类型 (例如 CoE: 0x03) */
+        malformed_buf[0] = 10; malformed_buf[1] = 0; /* len=10 */
+        malformed_buf[5] = 0x03; /* CoE */
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, malformed_buf, 16) == 0);
+
+        /* Case 1C: 缓冲区截断越界保护 (声明 payload_len=20，但实际传入 mbx_buf_len 只有 14 字节) */
+        uint8_t trunc_buf[16] = {0};
+        trunc_buf[0] = 20; trunc_buf[1] = 0;
+        trunc_buf[5] = MBXFOE;
+        trunc_buf[6] = FOE_OP_WRQ;
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, trunc_buf, 14) == 0);
+
+        /* Case 1D: 超长文件名 (> FOE_FN_MAX=31 字节，例如 32 字节) */
+        MBXcontrol[0].state = MBXstate_inclaim;
+        _FOE *req = (_FOE *)&MBX[0];
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 32);
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memset(req->filename, 'A', 32);
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + 32) == 0);
+        /* 原生 SOES 随后处理超长不匹配文件名报 0x8001 */
+        ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+        assert(res_mbx->foeheader.errorcode == 0x8001);
+        printf("  [PASS] 维度 1 (帧边界): 畸形短帧、截断帧与超长文件名安全放行，原生 SOES 返回 0x8001\n");
+    }
+
+    /* 2. 维度 2: 密码验证时序与权限保持 (Password Verification Timing) */
+    {
+        reset_soes_environment();
+        mock_driver_init(&s_harness_drv);
+        ecat_foe_core_t core;
+        ecat_foe_core_cfg_t cfg;
+        init_harness_cfg(&cfg, &s_harness_drv);
+        assert(ecat_foe_core_init(&core, &cfg) == 0);
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 128);
+
+        /* 从站针对 files[0] 配置专属密码 */
+        s_foe_files[0].filepass = 0x12345678U;
+        s_foe_files[0].name = "SERVO_DRV_MCU.efw"; /* 基准静态名 */
+        s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+        const char *dyn_name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        size_t name_len = strlen(dyn_name);
+
+        /* Case 2A: 注入错误密码 (0x99999999) */
+        MBXcontrol[0].state = MBXstate_inclaim;
+        _FOE *req = (_FOE *)&MBX[0];
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + name_len);
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0x99999999U; /* 错误密码 */
+        memcpy(req->filename, dyn_name, name_len);
+
+        /* 执行前置嗅探钩子: 动态同步文件名 */
+        int hook_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + name_len);
+        assert(hook_rc == 0);
+
+        /* 原生 SOES 执行: 动态名称已匹配，紧接着校验密码，发现密码不符立即返回 FOE_ERR_NORIGHTS (0x800A) */
+        ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+        assert(res_mbx->foeheader.errorcode == 0x800A);
+        printf("  [PASS] 维度 2A (密码时序): 动态同步后密码错误被原生 SOES 拦截并回复 0x800A\n");
+
+        /* Case 2B: 注入正确密码 (0x12345678) */
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->foeheader.password = 0x12345678U; /* 正确密码 */
+        hook_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + name_len);
+        assert(hook_rc == 0);
+
+        ESC_foeprocess();
+        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 0);
+        printf("  [PASS] 维度 2B (密码时序): 动态同步后正确密码顺利通过原生校验并回复 ACK(0)\n");
+    }
+
+    /* 3. 维度 3: 静态名称缓冲区稳定性 (Name Buffer Stability) */
+    {
+        /* 验证后续 DATA 报文覆写 MBX[0] 缓冲区后，files[0].name 指向的字符串未被破坏 */
+        assert(s_foe_files[0].name != NULL);
+        assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
+
+        /* 模拟后续 DATA 报文灌入并将 MBX[0] 完全用垃圾数据覆写 */
+        memset(MBX, 0xDE, sizeof(MBX));
+
+        /* 验证 files[0].name 依然完好无损 */
+        assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
+        printf("  [PASS] 维度 3 (名称缓冲): 静态名称缓冲生命周期稳定，MBX 覆写后文件名完好无损\n");
+    }
+
+    /* 4. 维度 4: 拒绝响应 (Rejection Responses) */
+    {
+        reset_soes_environment();
+        mock_driver_init(&s_harness_drv);
+        ecat_foe_core_t core;
+        ecat_foe_core_cfg_t cfg;
+        init_harness_cfg(&cfg, &s_harness_drv);
+        assert(ecat_foe_core_init(&core, &cfg) == 0);
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 128);
+
+        s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+
+        /* 下发项目名称不匹配的文件名 */
+        const char *mismatch_name = "WRONG_PROJ_MCU_V1.0.0.0.efw";
+        size_t m_len = strlen(mismatch_name);
+
+        MBXcontrol[0].state = MBXstate_inclaim;
+        _FOE *req = (_FOE *)&MBX[0];
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + m_len);
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memcpy(req->filename, mismatch_name, m_len);
+
+        int hook_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + m_len);
+        assert(hook_rc != 0); /* 核心机拒绝 */
+
+        /* 放行原生 SOES: 由于未执行名称同步，SOES 比对失败自动回复 0x8001 Abort */
+        ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+        assert(res_mbx->foeheader.errorcode == 0x8001);
+        printf("  [PASS] 维度 4 (拒绝响应): 核心机校验失败不予同步，原生 SOES 正确发送 0x8001 Abort\n");
+    }
+
+    /* 5. 维度 5: 多目标路由与传输中途新 WRQ 打断自愈 (Multi-target & Repeated WRQ) */
+    {
+        reset_soes_environment();
+        mock_driver_init(&s_harness_drv);
+        ecat_foe_core_t core;
+        ecat_foe_core_cfg_t cfg;
+        init_harness_cfg(&cfg, &s_harness_drv);
+        assert(ecat_foe_core_init(&core, &cfg) == 0);
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 128);
+
+        s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+        s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+        s_foe_files[1].name = "SERVO_DRV_FPGA.efw";
+        s_foe_files[1].write_function = ecat_foe_soes_write_cb;
+
+        /* Target 1 (MCU) WRQ */
+        const char *mcu_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        MBXcontrol[0].state = MBXstate_inclaim;
+        _FOE *req = (_FOE *)&MBX[0];
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(mcu_fn));
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memcpy(req->filename, mcu_fn, strlen(mcu_fn));
+
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(mcu_fn)) == 0);
+        ESC_foeprocess();
+        _FOE *wrq_res = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(wrq_res->foeheader.opcode == FOE_OP_ACK);
+        assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
+
+        /* 构造 116 字节的第一包数据 (64 字节头部 + 52 字节有效载荷)，使传输进入中途 WAITING_FOR_DATA 态 */
+        static const uint8_t s_p1[52] = {0x11, 0x22, 0x33, 0x44};
+        size_t efw_p1_len = build_harness_test_efw(
+            s_efw_test_buf,
+            0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0,
+            s_p1, 52);
+        assert(efw_p1_len == 116);
+
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116);
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_DATA;
+        req->foeheader.packetnumber = 1;
+        memcpy(req->data, s_efw_test_buf, 116);
+        ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 1);
+        /* 此时满包写入成功，原生 SOES 正处于 FOE_WAIT_FOR_DATA 态 */
+
+        /* 实测验证：中途处于 WAIT_FOR_DATA 时若直接收到新 WRQ，原生 SOES 返回 0x8004 (FOE_ERR_ILLEGAL) */
+        const char *fpga_fn = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fpga_fn));
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memcpy(req->filename, fpga_fn, strlen(fpga_fn));
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fpga_fn)) == 0);
+        ESC_foeprocess();
+        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+        assert(res_mbx->foeheader.errorcode == 0x8004);
+
+        /* 原生 SOES 在 0x8004 abort 中已自动调用 FOE_init() 复位回 FOE_READY。重新发送 Target 2 WRQ */
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fpga_fn));
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memcpy(req->filename, fpga_fn, strlen(fpga_fn));
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fpga_fn)) == 0);
+        ESC_foeprocess();
+        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 0);
+
+        /* 验证 files[0] 和 files[1] 的名字隔离共存，互不覆盖 */
+        assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
+        assert(strcmp(s_foe_files[1].name, fpga_fn) == 0);
+        assert(core.req_target_id == 2);
+        printf("  [PASS] 维度 5 (多目标与新 WRQ): 目标 1 与目标 2 动态名称隔离稳定，实测验证中途新 WRQ 响应边界\n");
+    }
+
+    /* 6. 维度 6: 端到端固件升级与短包结束错误映射 (E2E Flow & End Error Mapping) */
+    {
+        reset_soes_environment();
+        mock_driver_reset(&s_harness_drv);
+        ecat_foe_core_t core;
+        ecat_foe_core_cfg_t cfg;
+        init_harness_cfg(&cfg, &s_harness_drv);
+        assert(ecat_foe_core_init(&core, &cfg) == 0);
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 128);
+
+        s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+        s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+        const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        MBXcontrol[0].state = MBXstate_inclaim;
+        _FOE *req = (_FOE *)&MBX[0];
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn));
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_WRQ;
+        req->foeheader.password = 0;
+        memcpy(req->filename, fn, strlen(fn));
+
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn)) == 0);
+        ESC_foeprocess();
+
+        /* 构造 80 字节固件 (64 字节头 + 16 字节 payload) */
+        static const uint8_t s_payload[16] = {0xAA, 0xBB, 0xCC, 0xDD};
+        size_t efw_len = build_harness_test_efw(
+            s_efw_test_buf,
+            0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0,
+            s_payload, 16);
+        assert(efw_len == 80);
+
+        /* 发送 80 字节短包 */
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+        req->mbxheader.mbxtype = MBXFOE;
+        req->foeheader.opcode = FOE_OP_DATA;
+        req->foeheader.packetnumber = 1;
+        memcpy(req->data, s_efw_test_buf, efw_len);
+
+        ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 1);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+        assert(s_harness_drv.valid_flag == true);
+        printf("  [PASS] 维度 6 (端到端升级闭环): 动态文件名固件走短包路径升级成功，驱动有效标记成功写入\n");
+    }
+}
+
 int main(void)
 {
     printf("============================================================\n");
-    printf(" 真实 SOES esc_foe 宿主独立验证 Harness (含 V3 扩展)\n");
+    printf(" 真实 SOES esc_foe 宿主独立验证 Harness (含 V3 扩展与 V4 前置钩子)\n");
     printf("============================================================\n");
 
     test_real_soes_wrq_callback_timing();
@@ -1066,7 +1390,10 @@ int main(void)
     test_real_soes_padded_efw_avoids_zero_len();
     test_real_soes_session_boundary_cases();
 
+    /* V4 专项测试: 邮箱前置嗅探与动态文件名同步六大维度实测 */
+    test_real_soes_pre_hook_validation_suite();
+
     printf("------------------------------------------------------------\n");
-    printf(">>> 真实 SOES esc_foe 10 项宿主行为验证全部通过！<<<\n");
+    printf(">>> 真实 SOES esc_foe 11 项宿主行为与前置钩子验证全部通过！<<<\n");
     return 0;
 }
