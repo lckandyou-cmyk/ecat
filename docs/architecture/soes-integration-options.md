@@ -369,16 +369,19 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 7.3 宿主测试 Harness 设计与运行验证 (Host Harness)
 
-为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了轻量宿主测试套件：
+为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了轻量宿主测试套件，**严格区分“孤立直接 API 调用防御”与“真实协议机驱动联动”两类不同维度的证据**：
 
 - **测试设计范围**：
-  1. `test_soes_wrq_no_write_callback`：验证 WRQ 仅匹配文件名并回送 ACK，不触发 `write_function` 数据回调；
-  2. `test_soes_prefix_matching`：验证前缀匹配旁路现象，证实短前缀匹配被放行，未知文件名被正确中止；
-  3. `test_soes_zero_length_packet_ignores_close_failure`：验证短包写入失败被严格中止，而 0 长度包结束时写入失败被协议栈忽略并回送 ACK；
-  4. `test_soes_adapter_core_stream_requires_wrq`：验证核心状态机在未收到合法 WRQ 预先建立会话时，非法数据流被核心机拦截（返回 -1，设置状态错误）。
+  1. `test_real_soes_wrq_callback_timing`：验证 WRQ 仅匹配文件名并回送 ACK，不触发 `write_function` 数据回调；
+  2. `test_real_soes_filename_prefix_matching`：验证前缀匹配旁路现象，证实短前缀匹配被放行，未知文件名被正确中止；
+  3. `test_real_soes_zero_len_vs_short_packet`：验证短包写入失败被严格中止，而 0 长度包结束时写入失败被协议栈忽略并回送 ACK；
+  4. `test_direct_api_calls_defense_without_wrq`【证据 1 - 孤立直接调用防御】：独立单元级测试，不经过真实协议机调度，分别直接调用 `ecat_foe_core_on_data` 与 `ecat_foe_soes_write_cb`，验证在未经 WRQ 建立会话时，核心状态机与适配层能够在接口级直接拒绝非法调用（返回 -1 与非零）；
+  5. `test_real_soes_driven_adapter_e2e_flow`【证据 2 - 真实协议机端到端联动】：将真实适配层写入回调 `ecat_foe_soes_write_cb` 注册给真实 SOES 的文件表项，在宿主邮箱中由真实 `ESC_foeprocess()` 接收 WRQ 与 DATA 报文，由真实协议栈内部自动驱动已注册的适配器回调：
+     - **成功流**：合法固件包经协议栈自动调用回调进入核心机流式校验并执行 `finalize`，底层驱动正常生效，SOES 回复成功 ACK(1)；
+     - **失败流**：损坏固件包经协议栈调用回调被核心机拒绝，真实 SOES 捕获写入失败并在短包分支触发 `FOE_abort(FOE_ERR_PROGERROR)`，向主站回送错误码 0x800B。
 - **运行验证结果**：
   - 测试二进制 `test_runner_soes_real` 已集成入 `Makefile` 的 `test` 与 `test-asan` 目标；
-  - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下均构建并通过全部测试，退出码均为 `rc=0`。
+  - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下均构建并通过全部 5 项测试，退出码均为 `rc=0`。
 
 ### 7.4 明确未执行内容与工程边界声明 (Limitations)
 
