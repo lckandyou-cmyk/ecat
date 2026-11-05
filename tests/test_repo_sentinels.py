@@ -13,7 +13,12 @@ tests/test_repo_sentinels.py:
    核查上述所有哨兵的存在性与原始字节完整性，确认无覆盖、无误删。
 3. 测试并发调用：分别并发运行两个 make test-examples 与两个 make test 实例，
    验证彼此构建独立隔离且哨兵不受影响。
-4. 符号链接安全防御检验：验证打包工具与向量生成工具对符号链接写入的主动安全拦截。
+4. 已有非空 build 目录保护测试：验证 build/user.txt 在 make build 与 make clean 后均完好保留，
+   证明 clean 绝不递归删除未证明归属的目录或用户文件。
+5. 已有同名输出防覆盖测试：验证 make vectors 与 make build 在遇未登记的已有文件时主动报错拒绝，
+   仅在显式传入 OVERWRITE=1 时允许更新普通文件。
+6. 内核级原子符号链接防御测试：验证即使传入 --overwrite，O_NOFOLLOW 依然在内核级原子拒绝符号链接穿透，
+   外部目标文件不受篡改。
 """
 
 import os
@@ -127,25 +132,116 @@ def test_concurrent_make(repo_dir: str, target: str, expected_hashes: dict, labe
     print(f"  [PASS] 两个并发 make {target} 实例同时运行成功，独立临时目录无干扰，哨兵完整无损")
 
 
-def test_symlink_defense(repo_dir: str):
-    """测试 6: 验证打包工具与向量生成工具对符号链接写入的主动安全拒绝"""
-    print("\n[TEST 6] 验证符号链接安全防御...")
+def test_existing_non_empty_build(repo_dir: str):
+    """测试 6: 验证已有非空 build 目录及其内部用户文件在 make build 与 make clean 后均完好保留"""
+    print("\n[TEST 6] 验证已有非空 build 目录及内部用户文件保护...")
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir, exist_ok=True)
+    user_file = os.path.join(build_dir, "user.txt")
+    user_content = b"USER_IMPORTANT_DATA_MUST_NEVER_BE_DELETED"
+    with open(user_file, "wb") as f:
+        f.write(user_content)
+
+    # 1. 执行 make build
+    cmd_build = ["make", "build", "CC=clang"]
+    res_b = subprocess.run(cmd_build, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b.returncode == 0, f"make build 失败 (rc={res_b.returncode}):\n{res_b.stderr}"
+    assert os.path.isfile(user_file), "错误: make build 破坏了 user.txt"
+    with open(user_file, "rb") as f:
+        assert f.read() == user_content, "错误: user.txt 内容在 make build 后被篡改"
+
+    # 2. 执行 make clean
+    cmd_clean = ["make", "clean"]
+    res_c = subprocess.run(cmd_clean, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c.returncode == 0, f"make clean 失败 (rc={res_c.returncode}):\n{res_c.stderr}"
+
+    # 核心断言: user.txt 必须依然存在，且 build 目录不得被递归删除
+    assert os.path.isdir(build_dir), "错误: 非空 build 目录被 make clean 误删"
+    assert os.path.isfile(user_file), "错误: build/user.txt 被 make clean 误删"
+    with open(user_file, "rb") as f:
+        assert f.read() == user_content, "错误: build/user.txt 内容在 make clean 后被篡改"
+
+    # 清理测试用的 user.txt 并移除 build 目录
+    os.remove(user_file)
+    os.rmdir(build_dir)
+    print("  [PASS] 已有非空 build 目录保护验证通过：build/user.txt 完好保留，未发生递归误删")
+
+
+def test_existing_identical_output_defense(repo_dir: str):
+    """测试 7: 验证已存在同名输出文件时主动拒绝静默覆盖"""
+    print("\n[TEST 7] 验证已有同名输出文件防覆写保护...")
+
+    # 1. 验证 make vectors 遇存量向量文件时拒绝覆盖
+    vec_dir = os.path.join(repo_dir, "tests", "vectors")
+    os.makedirs(vec_dir, exist_ok=True)
+    sentinel_vec = os.path.join(vec_dir, "positive_mcu.efw")
+    preset_vec_bytes = b"PRESET_USER_VECTOR_BYTES_DO_NOT_TOUCH"
+    with open(sentinel_vec, "wb") as f:
+        f.write(preset_vec_bytes)
+
+    cmd_v_fail = ["make", "vectors"]
+    res_v1 = subprocess.run(cmd_v_fail, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_v1.returncode != 0, "错误: make vectors 在文件已存在时未报错拒绝！"
+    with open(sentinel_vec, "rb") as f:
+        assert f.read() == preset_vec_bytes, "错误: positive_mcu.efw 被静默覆盖！"
+    print("  [PASS] make vectors 遇同名文件主动安全拒绝，未发生覆盖")
+
+    # 2. 验证显式 OVERWRITE=1 时允许更新普通文件
+    cmd_v_ok = ["make", "vectors", "OVERWRITE=1"]
+    res_v2 = subprocess.run(cmd_v_ok, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_v2.returncode == 0, f"make vectors OVERWRITE=1 失败: {res_v2.stderr}"
+    with open(sentinel_vec, "rb") as f:
+        assert f.read() != preset_vec_bytes, "OVERWRITE=1 应已更新文件"
+    print("  [PASS] make vectors OVERWRITE=1 显式授权下成功更新向量")
+
+    # 3. 验证 make build 遇存量未登记文件时拒绝覆盖
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir, exist_ok=True)
+    sentinel_bin = os.path.join(build_dir, "test_runner_efw")
+    preset_bin_bytes = b"PRESET_USER_BINARY_BYTES_DO_NOT_TOUCH"
+    with open(sentinel_bin, "wb") as f:
+        f.write(preset_bin_bytes)
+
+    # 确保无 manifest
+    manifest_file = os.path.join(build_dir, ".foe_manifest.json")
+    if os.path.exists(manifest_file):
+        os.remove(manifest_file)
+
+    cmd_b_fail = ["make", "build", "CC=clang"]
+    res_b1 = subprocess.run(cmd_b_fail, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b1.returncode != 0, "错误: make build 在目标未登记时未报错拒绝！"
+    with open(sentinel_bin, "rb") as f:
+        assert f.read() == preset_bin_bytes, "错误: test_runner_efw 被静默覆盖！"
+    print("  [PASS] make build 遇未登记同名文件主动安全拒绝，未发生覆盖")
+
+    # 4. 验证显式 OVERWRITE=1 时允许更新普通文件并清理
+    cmd_b_ok = ["make", "build", "CC=clang", "OVERWRITE=1"]
+    res_b2 = subprocess.run(cmd_b_ok, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b2.returncode == 0, f"make build OVERWRITE=1 失败: {res_b2.stderr}"
+    subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    print("  [PASS] make build OVERWRITE=1 显式授权下成功生成并安全清理")
+
+
+def test_atomic_symlink_defense(repo_dir: str):
+    """测试 8: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦绝不穿透"""
+    print("\n[TEST 8] 验证内核级原子符号链接防御 (即使指定 overwrite 亦安全拦截)...")
     with tempfile.TemporaryDirectory(prefix="foe_symlink_ext_") as ext_tmp:
         target_file = os.path.join(ext_tmp, "sensitive_external.bin")
+        original_secret = b"CRITICAL_SENSITIVE_SECRET_DATA"
         with open(target_file, "wb") as f:
-            f.write(b"ORIGINAL_SENSITIVE_CONTENT")
+            f.write(original_secret)
 
         symlink_path = os.path.join(repo_dir, "tests", "vectors", "symlink_test.efw")
         if os.path.exists(symlink_path) or os.path.islink(symlink_path):
             os.remove(symlink_path)
         os.symlink(target_file, symlink_path)
 
-        # 尝试通过 efw_pack.py 打包写入该符号链接
         pack_tool = os.path.join(repo_dir, "tools", "efw_pack.py")
         raw_bin = os.path.join(ext_tmp, "raw.bin")
         with open(raw_bin, "wb") as f:
             f.write(b"\x00" * 16)
 
+        # 即使显式传入 --overwrite，O_NOFOLLOW 依然在 open 调用时由内核抛出 ELOOP
         cmd = [
             sys.executable, pack_tool, "pack",
             "--bin", raw_bin,
@@ -154,18 +250,19 @@ def test_symlink_defense(repo_dir: str):
             "--hardware-id", "0x00000001",
             "--target", "MCU",
             "--fw-version", "1.0.0.0",
-            "--out", symlink_path
+            "--out", symlink_path,
+            "--overwrite"
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        assert res.returncode != 0, "错误: efw_pack.py 未能拒绝向符号链接写入！"
+        assert res.returncode != 0, "错误: efw_pack.py 在 --overwrite 模式下未能拒绝符号链接！"
         assert "符号链接" in res.stderr or "符号链接" in res.stdout, "未输出符号链接拦截信息"
 
-        # 验证外部被链接的目标文件未被覆盖
+        # 核心断言: 外部敏感文件内容完全不受影响
         with open(target_file, "rb") as f:
-            assert f.read() == b"ORIGINAL_SENSITIVE_CONTENT", "错误: 外部敏感文件内容被符号链接写入篡改！"
+            assert f.read() == original_secret, "错误: 外部敏感文件在符号链接写入下被篡改！"
 
         os.remove(symlink_path)
-    print("  [PASS] 符号链接安全防御验证通过：主动拒绝向符号链接写入并保护目标内容")
+    print("  [PASS] 内核级原子符号链接防御验证通过：O_NOFOLLOW 有效阻断符号链接穿透")
 
 
 def main():
@@ -185,7 +282,7 @@ def main():
         run_make_target(tmp_repo, "test")
         verify_sentinels(tmp_repo, expected_hashes, "make test 执行后")
 
-        print("\n[TEST 3] 运行隔离仓库副本下的 make test-asan...")
+        print("\n[TEST 3] 运行隔离仓库副本下的 make test-asan (全套用例验证)...")
         run_make_target(tmp_repo, "test-asan")
         verify_sentinels(tmp_repo, expected_hashes, "make test-asan 执行后")
 
@@ -197,9 +294,11 @@ def main():
         test_concurrent_make(tmp_repo, "test-examples", expected_hashes, "CONCURRENT 1")
         test_concurrent_make(tmp_repo, "test", expected_hashes, "CONCURRENT 2")
 
-        test_symlink_defense(tmp_repo)
+        test_existing_non_empty_build(tmp_repo)
+        test_existing_identical_output_defense(tmp_repo)
+        test_atomic_symlink_defense(tmp_repo)
 
-    print("\n>>> 隔离仓库副本哨兵完整性、全套构建目标与并发调用验证全部通过！<<<")
+    print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 
 
 if __name__ == "__main__":

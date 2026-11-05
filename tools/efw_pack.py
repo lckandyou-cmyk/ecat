@@ -14,6 +14,32 @@ import os
 import argparse
 import struct
 import binascii
+import errno
+
+
+def safe_open_for_write(path: str, overwrite: bool = False):
+    """
+    使用 POSIX 原子标志打开文件以供写入：
+    1. O_NOFOLLOW: 在内核级直接拒绝符号链接，杜绝检查与打开之间的 TOCTOU 竞态；
+    2. 未指定 overwrite 时启用 O_EXCL: 若文件已存在直接拒绝，杜绝覆写普通文件；
+    3. 指定 overwrite 时启用 O_TRUNC: 允许截断并覆写已有普通文件，但仍受 O_NOFOLLOW 保护符号链接。
+    """
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
+    if not overwrite:
+        flags |= os.O_EXCL
+    else:
+        flags |= os.O_TRUNC
+
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            raise FileExistsError(f"安全拒绝：目标文件已存在且未指定覆盖: {path}") from e
+        if e.errno == errno.ELOOP or (hasattr(errno, 'EMLINK') and e.errno == errno.EMLINK) or os.path.islink(path):
+            raise ValueError(f"安全拒绝：目标路径为符号链接: {path}") from e
+        raise
+
+    return os.fdopen(fd, 'wb')
 
 # 格式规范常量
 EFW_MAGIC = 0x57464345  # 'ECFW' little-endian
@@ -94,7 +120,8 @@ def pack_efw(
     bin_data: bytes,
     project_name: str = "PROJECT",
     foe_packet_size: int = 0,
-    out_path: str = None
+    out_path: str = None,
+    overwrite: bool = False
 ) -> str:
     """
     打包 .efw 文件
@@ -146,16 +173,13 @@ def pack_efw(
         ver_str = format_version_int(fw_version)
         out_path = f"{project_name}_{target_name}_V{ver_str}.efw"
 
-    if os.path.islink(out_path):
-        raise ValueError(f"安全拒绝：输出文件路径为符号链接: {out_path}")
-
-    with open(out_path, 'wb') as f:
+    with safe_open_for_write(out_path, overwrite=overwrite) as f:
         f.write(efw_data)
 
     return out_path
 
 
-def inspect_efw(efw_path: str, extract_bin: str = None) -> bool:
+def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False) -> bool:
     """
     解析并验证 .efw 文件
     """
@@ -243,9 +267,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None) -> bool:
     print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
 
     if extract_bin:
-        if os.path.islink(extract_bin):
-            raise ValueError(f"安全拒绝：提取输出路径为符号链接: {extract_bin}")
-        with open(extract_bin, 'wb') as f:
+        with safe_open_for_write(extract_bin, overwrite=overwrite) as f:
             f.write(payload)
         print(f"  提取有效负载至:    {extract_bin}")
 
@@ -269,15 +291,18 @@ def main():
     pack_p.add_argument("--min-allow-version", default="0", help="防回滚允许运行下限 (默认 0)")
     pack_p.add_argument("--foe-packet-size", type=int, default=0, help="FoE 单包大小 (如 512)，用于空包规避填充")
     pack_p.add_argument("--out", "-o", default=None, help="输出 .efw 文件路径 (默认按规范自动命名)")
+    pack_p.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已有普通文件")
 
     # inspect / unpack 子命令
     inspect_p = subparsers.add_parser("inspect", help="检验并打印 .efw 容器元数据")
     inspect_p.add_argument("efw_file", help="待检验的 .efw 文件")
     inspect_p.add_argument("--extract-bin", default=None, help="提取 payload 至指定文件")
+    inspect_p.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已有提取文件")
 
     unpack_p = subparsers.add_parser("unpack", help="解包 .efw 文件 (等价于 inspect)")
     unpack_p.add_argument("efw_file", help="待解包的 .efw 文件")
     unpack_p.add_argument("--extract-bin", default=None, help="提取 payload 至指定文件")
+    unpack_p.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已有提取文件")
 
     args = parser.parse_args()
 
@@ -302,12 +327,13 @@ def main():
             bin_data=bin_data,
             project_name=args.project_name,
             foe_packet_size=args.foe_packet_size,
-            out_path=args.out
+            out_path=args.out,
+            overwrite=args.overwrite
         )
         print(f"成功打包 .efw 文件: {out_file}")
 
     elif args.command in ("inspect", "unpack"):
-        ok = inspect_efw(args.efw_file, extract_bin=args.extract_bin)
+        ok = inspect_efw(args.efw_file, extract_bin=args.extract_bin, overwrite=args.overwrite)
         sys.exit(0 if ok else 1)
     else:
         parser.print_help()

@@ -19,6 +19,7 @@ EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_f
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
 
 BUILD_DIR ?= build
+OVERWRITE ?= 0
 SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
@@ -27,16 +28,25 @@ PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
 all: test
 
-# 可选本地构建目标：生成调试二进制至 $(BUILD_DIR)/ 并写入标记文件
+# 可选本地构建目标：生成调试二进制至 $(BUILD_DIR)/ 并写入归属证明清单
 build:
 	@mkdir -p $(BUILD_DIR)
-	@touch $(BUILD_DIR)/.foe_build_artifact
+	@if [ "$(OVERWRITE)" = "1" ]; then \
+		$(PYTHON) tools/safe_build.py check --build-dir $(BUILD_DIR) --files test_runner_efw test_runner_core --overwrite; \
+	else \
+		$(PYTHON) tools/safe_build.py check --build-dir $(BUILD_DIR) --files test_runner_efw test_runner_core; \
+	fi
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner_efw $(SRC_EFW) $(TEST_EFW_SRC)
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner_core $(SRC_CORE) $(TEST_CORE_SRC)
-	@echo "  [BUILD] 本地调试二进制已生成至 $(BUILD_DIR)/"
+	@$(PYTHON) tools/safe_build.py record --build-dir $(BUILD_DIR) --files test_runner_efw test_runner_core
+	@echo "  [BUILD] 本地调试二进制已生成至 $(BUILD_DIR)/ 并完成归属登记"
 
 vectors:
-	@$(PYTHON) tests/generate_vectors.py
+	@if [ "$(OVERWRITE)" = "1" ]; then \
+		$(PYTHON) tests/generate_vectors.py --overwrite; \
+	else \
+		$(PYTHON) tests/generate_vectors.py; \
+	fi
 
 check-quotes:
 	@echo ">>> 执行 SOES 源码引文三方核验 (来源目录: $(SOES_DIR)) <<<"
@@ -129,7 +139,7 @@ test-soes:
 	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
 	echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"
 
-# ASan 内存与未定义行为核验目标
+# ASan 内存与未定义行为核验目标 (完整运行示例、Python 工具与全套 C 二进制测试)
 # 历史构建与环境条件复核说明:
 # 1. 历史复核事实 (commit 9c78bc2 与 c1792c4):
 #    - 在 macOS 下通过 GNU Make 执行 `make test-asan` 时，Make 为子进程赋予了较大栈上限 (实测为 65520KB)，测试退出码为 0；
@@ -141,24 +151,32 @@ test-soes:
 # 3. 栈帧尺寸限定：核心库代码 (src/ecat_foe_core.c) 为零动态分配，内部函数最大栈帧约 240 字节系在当前所测宿主环境
 #    (macOS arm64 / Apple Clang) 下的静态测量值，而非通用常量。
 test-asan:
+	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
+	@echo "--- 编译并运行宿主示例套件 (ASan/UBSan 模式) ---"
+	@$(MAKE) test-examples CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@TMP_ASAN_DIR=$$(mktemp -d /tmp/foe_build_asan_XXXXXX) && \
 	trap 'rm -rf "$$TMP_ASAN_DIR"' EXIT INT TERM && \
-	echo "--- 在独立隔离构建目录运行 ASan/UBSan 测试套件 (构建目录: $$TMP_ASAN_DIR) ---" && \
+	echo "--- 在独立隔离构建目录运行 ASan/UBSan 核心测试套件 (构建目录: $$TMP_ASAN_DIR) ---" && \
 	mkdir -p "$$TMP_ASAN_DIR/vectors" && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" $(PYTHON) tests/generate_vectors.py --out-dir "$$TMP_ASAN_DIR/vectors" && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
+	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
 	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \
 	(ulimit -s 1024 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
-	echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
+	echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)" && \
+	(ulimit -s 8192 && VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" >/dev/null) && \
+	(ulimit -s 1024 && VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" >/dev/null) && \
+	echo "  [PASS] ASan test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
+	$(PYTHON) tests/test_verify_quotes.py && \
+	$(PYTHON) tests/test_verify_pdf_quotes.py
 
 clean:
-	@echo "--- 执行安全清理 (安全模式: 仅清理明确由构建生成的隔离产物，不匹配或删除用户 .efw、.dSYM 或自定义文件) ---"
-	@if [ -d "$(BUILD_DIR)" ] && [ -f "$(BUILD_DIR)/.foe_build_artifact" ]; then \
-		rm -rf "$(BUILD_DIR)"; \
-		echo "  [CLEAN] 已安全移除 $(BUILD_DIR)/ 临时构建目录"; \
+	@echo "--- 执行安全清理 (安全模式: 仅清理明确由构建生成的隔离产物，不匹配或删除用户文件) ---"
+	@if [ -d "$(BUILD_DIR)" ]; then \
+		$(PYTHON) tools/safe_build.py clean --build-dir "$(BUILD_DIR)"; \
 	fi

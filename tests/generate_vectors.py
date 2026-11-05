@@ -19,10 +19,11 @@ def safe_check_not_symlink(path: str):
         raise RuntimeError(f"安全拒绝：目标路径为符号链接: {path}")
 
 
-def generate_all(out_dir: str = None):
+def generate_all(out_dir: str = None, overwrite: bool = False):
     if not out_dir:
         parser = argparse.ArgumentParser(description="生成测试固件向量包")
         parser.add_argument('--out-dir', type=str, default=None, help="向量文件输出目录")
+        parser.add_argument('--overwrite', action='store_true', default=False, help="允许覆盖已有普通文件")
         args, _ = parser.parse_known_args()
         if args.out_dir:
             out_dir = os.path.abspath(args.out_dir)
@@ -30,9 +31,12 @@ def generate_all(out_dir: str = None):
             out_dir = os.path.abspath(os.environ.get("VECTORS_DIR"))
         else:
             out_dir = os.path.join(ROOT_DIR, 'tests', 'vectors')
+        overwrite = overwrite or args.overwrite
 
     safe_check_not_symlink(out_dir)
     os.makedirs(out_dir, exist_ok=True)
+
+    extra_args = ['--overwrite'] if overwrite else []
 
     # 使用独立的临时目录存放中间 bin 文件，不污染目标向量目录
     with tempfile.TemporaryDirectory(prefix="foe_vec_tmp_") as tmp_bin_dir:
@@ -56,7 +60,7 @@ def generate_all(out_dir: str = None):
             '--fw-version', '1.2.3.4',
             '--min-allow-version', '1.0.0.0',
             '--out', out_pos
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_pos)
 
         # 2. 尾部填充例 (MCU 目标, 原始 448 字节, 加上头 64 字节恰好 512 字节, 单包 512 时补 1 字节 0xFF)
@@ -77,7 +81,7 @@ def generate_all(out_dir: str = None):
             '--fw-version', '1.2.3.4',
             '--foe-packet-size', '512',
             '--out', out_pad
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_pad)
 
         # 3. SII 偶数填充例 (SII 目标, 原始 448 字节, 加上头 64 字节恰好 512 字节, 单包 512 时补 2 字节 0xFF)
@@ -93,7 +97,7 @@ def generate_all(out_dir: str = None):
             '--fw-version', '1.0.0.0',
             '--foe-packet-size', '512',
             '--out', out_sii_pad
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_sii_pad)
 
         # 4. FPGA 目标 (Target 2)
@@ -112,7 +116,7 @@ def generate_all(out_dir: str = None):
             '--target', 'FPGA',
             '--fw-version', '2.0.0.0',
             '--out', out_fpga
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_fpga)
 
         # 5. SII 目标无填充常规例 (Target 3, 偶数 32 字节)
@@ -131,7 +135,7 @@ def generate_all(out_dir: str = None):
             '--target', 'SII',
             '--fw-version', '1.0.0.0',
             '--out', out_sii
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_sii)
 
         # 6. EEPROM 目标 (Target 4, 48 字节)
@@ -150,7 +154,7 @@ def generate_all(out_dir: str = None):
             '--target', 'EEPROM',
             '--fw-version', '1.0.1.0',
             '--out', out_eeprom
-        ]
+        ] + extra_args
         subprocess.check_call(cmd_eeprom)
 
     print(f"已在 {out_dir} 下生成固件测试向量。")
