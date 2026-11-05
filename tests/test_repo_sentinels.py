@@ -14,16 +14,18 @@ tests/test_repo_sentinels.py:
 3. 测试并发调用：分别并发运行两个 make test-examples 与两个 make test 实例，
    验证彼此构建独立隔离且哨兵不受影响。
 4. 已有非空 build 目录保护测试：验证 build/user.txt 在 make build 与 make clean 后均完好保留，
-   证明 clean 绝不递归删除未证明归属的目录或用户文件。
-5. 已有同名输出防覆盖测试：验证 make vectors 与 make build 在遇未登记的已有文件时主动报错拒绝，
-   仅在显式传入 OVERWRITE=1 时允许更新普通文件。
-6. 内核级原子符号链接防御测试：验证即使传入 --overwrite，O_NOFOLLOW 依然在内核级原子拒绝符号链接穿透，
+   证明 clean 严禁递归删除未确认归属的目录或用户文件。
+5. 用户清单与魔数归属保护测试：验证已存的用户清单在 make build 与 clean 下不被覆盖或删除。
+6. dSYM 内部用户文件保护测试：验证 dSYM 内放置的 user.txt 在 clean 下完好保留，非递归删除机制生效。
+7. 已修改产物防覆写与保留测试：验证用户修改过的构建产物在再次 build 时被主动拒绝覆盖，在 clean 时安全跳过保留。
+8. 符号链接与原子防御测试：验证即使传入 --overwrite，O_NOFOLLOW 依然在内核级原子拒绝符号链接穿透，
    外部目标文件不受篡改。
 """
 
 import os
 import sys
 import shutil
+import json
 import tempfile
 import subprocess
 import hashlib
@@ -161,15 +163,133 @@ def test_existing_non_empty_build(repo_dir: str):
     with open(user_file, "rb") as f:
         assert f.read() == user_content, "错误: build/user.txt 内容在 make clean 后被篡改"
 
-    # 清理测试用的 user.txt 并移除 build 目录
     os.remove(user_file)
-    os.rmdir(build_dir)
+    if os.path.exists(build_dir):
+        try:
+            os.rmdir(build_dir)
+        except OSError:
+            pass
     print("  [PASS] 已有非空 build 目录保护验证通过：build/user.txt 完好保留，未发生递归误删")
 
 
+def test_user_manifest_and_dsym_protection(repo_dir: str):
+    """测试 7: 验证用户预存清单与 dSYM 内部用户文件的非递归保护"""
+    print("\n[TEST 7] 验证用户清单与 dSYM 内部用户文件保护 (复现审查数据丢失场景并验证防御)...")
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir, exist_ok=True)
+
+    # 1. 复现场景 A：同时预置缺少魔数的用户清单文件与 dSYM 内部用户文件
+    manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+    user_manifest_bytes = b'{"user_key": "valuable_user_manifest_data"}'
+    with open(manifest_path, "wb") as f:
+        f.write(user_manifest_bytes)
+
+    dsym_dir = os.path.join(build_dir, "test_runner_efw.dSYM", "Contents")
+    os.makedirs(dsym_dir, exist_ok=True)
+    user_dsym_file = os.path.join(dsym_dir, "user.txt")
+    user_dsym_content = b"USER_DATA_INSIDE_DSYM_BUNDLE"
+    with open(user_dsym_file, "wb") as f:
+        f.write(user_dsym_content)
+
+    # make build 必须主动报错拒绝覆盖用户清单与既存 dSYM
+    cmd_build = ["make", "build", "CC=clang"]
+    res_b = subprocess.run(cmd_build, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b.returncode != 0, "错误: make build 未能拒绝覆盖用户预置清单！"
+    with open(manifest_path, "rb") as f:
+        assert f.read() == user_manifest_bytes, "错误: 用户清单文件内容被篡改！"
+    with open(user_dsym_file, "rb") as f:
+        assert f.read() == user_dsym_content, "错误: 用户 dSYM 文件内容被篡改！"
+    print("  [PASS] 场景 A：make build 成功拒绝覆盖用户清单与既存 dSYM，用户数据未受篡改")
+
+    # 执行 make clean：因清单缺少魔数，clean 必须跳过清理以保护用户数据
+    res_c_a = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c_a.returncode == 0, f"make clean 异常: {res_c_a.stderr}"
+    assert os.path.isfile(manifest_path), "错误: 用户清单被 make clean 误删！"
+    assert os.path.isfile(user_dsym_file), "错误: dSYM/Contents/user.txt 被 make clean 误删！"
+    print("  [PASS] 场景 A：make clean 成功跳过非归属清单，用户清单与 dSYM 文件完好保留")
+
+    # 2. 复现场景 B：无清单但预存既存 dSYM/user.txt 时，make build 拒绝非授权覆盖
+    os.remove(manifest_path)
+    res_b_pre = subprocess.run(["make", "build", "CC=clang"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_pre.returncode != 0, "错误: make build 未能拒绝存在未登记 dSYM 的构建请求！"
+    assert os.path.isfile(user_dsym_file), "错误: 既存 user.txt 在拒绝构建后丢失！"
+    print("  [PASS] 场景 B：针对无清单且存在未登记 dSYM 的场景，make build 主动拒绝")
+
+    # 3. 场景 C：以 OVERWRITE=1 重新生成受控构建，在 dSYM 目录下放置 user.txt，验证 clean 时的非递归保护
+    # 清理并以 OVERWRITE=1 生成受控构建
+    os.remove(user_dsym_file)
+    shutil.rmtree(os.path.join(build_dir, "test_runner_efw.dSYM"), ignore_errors=True)
+    res_b_ok = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_ok.returncode == 0, f"make build OVERWRITE=1 失败: {res_b_ok.stderr}"
+
+    # 在构建生成的 dSYM 内部放置 user.txt
+    os.makedirs(dsym_dir, exist_ok=True)
+    with open(user_dsym_file, "wb") as f:
+        f.write(user_dsym_content)
+
+    # 执行 make clean
+    res_c = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c.returncode == 0, f"make clean 失败: {res_c.stderr}"
+
+    # 核心断言: dSYM 内的 user.txt 严禁被删除，且 dSYM 目录不得被递归删除
+    assert os.path.isfile(user_dsym_file), "错误: dSYM/Contents/user.txt 被 make clean 误删！"
+    with open(user_dsym_file, "rb") as f:
+        assert f.read() == user_dsym_content, "错误: dSYM/Contents/user.txt 内容被篡改！"
+    assert os.path.isdir(dsym_dir), "错误: 含有用户文件的 dSYM 目录被递归删除！"
+    print("  [PASS] 场景 C：dSYM 内部用户文件保护验证通过：非递归删除机制成功保留用户文件与目录")
+
+    # 手动清理测试文件
+    os.remove(user_dsym_file)
+    shutil.rmtree(os.path.join(build_dir, "test_runner_efw.dSYM"), ignore_errors=True)
+    if os.path.exists(build_dir):
+        try:
+            os.rmdir(build_dir)
+        except OSError:
+            pass
+
+
+def test_modified_artifact_protection(repo_dir: str):
+    """测试 8: 验证用户修改过的产物在再次 build 与 clean 时均获得保留"""
+    print("\n[TEST 8] 验证已修改构建产物防覆写与保留机制...")
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir, exist_ok=True)
+
+    # 1. 成功生成合法构建
+    cmd_build = ["make", "build", "CC=clang", "OVERWRITE=1"]
+    res_b = subprocess.run(cmd_build, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b.returncode == 0, f"初始构建失败: {res_b.stderr}"
+
+    target_bin = os.path.join(build_dir, "test_runner_efw")
+    assert os.path.isfile(target_bin), "构建未生成二进制"
+
+    # 2. 模拟用户修改了该二进制
+    modified_bytes = b"USER_MODIFIED_CUSTOM_BINARY_CONTENT"
+    with open(target_bin, "wb") as f:
+        f.write(modified_bytes)
+
+    # 3. 再次运行 make build (不带 OVERWRITE=1)
+    res_b_fail = subprocess.run(["make", "build", "CC=clang"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_fail.returncode != 0, "错误: make build 未能拒绝覆盖已修改的二进制！"
+    with open(target_bin, "rb") as f:
+        assert f.read() == modified_bytes, "错误: 已修改二进制被静默覆盖！"
+    print("  [PASS] make build 成功拦截对已修改产物的覆盖")
+
+    # 4. 运行 make clean，验证因哈希不吻合而安全跳过删除
+    res_c = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_c.returncode == 0, f"make clean 失败: {res_c.stderr}"
+    assert os.path.isfile(target_bin), "错误: make clean 误删了哈希不吻合的已修改二进制！"
+    with open(target_bin, "rb") as f:
+        assert f.read() == modified_bytes, "内容被破坏"
+    print("  [PASS] make clean 成功跳过哈希不符的文件，完整保留用户改动产物")
+
+    # 清理测试现场
+    os.remove(target_bin)
+    subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
 def test_existing_identical_output_defense(repo_dir: str):
-    """测试 7: 验证已存在同名输出文件时主动拒绝静默覆盖"""
-    print("\n[TEST 7] 验证已有同名输出文件防覆写保护...")
+    """测试 9: 验证已存在同名输出文件时主动拒绝静默覆盖"""
+    print("\n[TEST 9] 验证已有同名输出文件防覆写保护...")
 
     # 1. 验证 make vectors 遇存量向量文件时拒绝覆盖
     vec_dir = os.path.join(repo_dir, "tests", "vectors")
@@ -194,37 +314,10 @@ def test_existing_identical_output_defense(repo_dir: str):
         assert f.read() != preset_vec_bytes, "OVERWRITE=1 应已更新文件"
     print("  [PASS] make vectors OVERWRITE=1 显式授权下成功更新向量")
 
-    # 3. 验证 make build 遇存量未登记文件时拒绝覆盖
-    build_dir = os.path.join(repo_dir, "build")
-    os.makedirs(build_dir, exist_ok=True)
-    sentinel_bin = os.path.join(build_dir, "test_runner_efw")
-    preset_bin_bytes = b"PRESET_USER_BINARY_BYTES_DO_NOT_TOUCH"
-    with open(sentinel_bin, "wb") as f:
-        f.write(preset_bin_bytes)
-
-    # 确保无 manifest
-    manifest_file = os.path.join(build_dir, ".foe_manifest.json")
-    if os.path.exists(manifest_file):
-        os.remove(manifest_file)
-
-    cmd_b_fail = ["make", "build", "CC=clang"]
-    res_b1 = subprocess.run(cmd_b_fail, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    assert res_b1.returncode != 0, "错误: make build 在目标未登记时未报错拒绝！"
-    with open(sentinel_bin, "rb") as f:
-        assert f.read() == preset_bin_bytes, "错误: test_runner_efw 被静默覆盖！"
-    print("  [PASS] make build 遇未登记同名文件主动安全拒绝，未发生覆盖")
-
-    # 4. 验证显式 OVERWRITE=1 时允许更新普通文件并清理
-    cmd_b_ok = ["make", "build", "CC=clang", "OVERWRITE=1"]
-    res_b2 = subprocess.run(cmd_b_ok, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    assert res_b2.returncode == 0, f"make build OVERWRITE=1 失败: {res_b2.stderr}"
-    subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    print("  [PASS] make build OVERWRITE=1 显式授权下成功生成并安全清理")
-
 
 def test_atomic_symlink_defense(repo_dir: str):
-    """测试 8: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦绝不穿透"""
-    print("\n[TEST 8] 验证内核级原子符号链接防御 (即使指定 overwrite 亦安全拦截)...")
+    """测试 10: 验证内核级原子符号链接防御 (O_NOFOLLOW)，即使传入 --overwrite 亦绝不穿透"""
+    print("\n[TEST 10] 验证内核级原子符号链接防御 (即使指定 overwrite 亦安全拦截)...")
     with tempfile.TemporaryDirectory(prefix="foe_symlink_ext_") as ext_tmp:
         target_file = os.path.join(ext_tmp, "sensitive_external.bin")
         original_secret = b"CRITICAL_SENSITIVE_SECRET_DATA"
@@ -295,6 +388,8 @@ def main():
         test_concurrent_make(tmp_repo, "test", expected_hashes, "CONCURRENT 2")
 
         test_existing_non_empty_build(tmp_repo)
+        test_user_manifest_and_dsym_protection(tmp_repo)
+        test_modified_artifact_protection(tmp_repo)
         test_existing_identical_output_defense(tmp_repo)
         test_atomic_symlink_defense(tmp_repo)
 
