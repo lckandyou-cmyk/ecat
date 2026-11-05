@@ -868,6 +868,71 @@ except Exception as e:
     shutil.rmtree(build_dir, ignore_errors=True)
 
 
+def test_user_sentinel_coord_file_retention(repo_dir: str):
+    """测试 18: 验证构建后用户替换 build/.foe_lock_coord 为哨兵数据时，make clean 默认保留不予删除 (复现审查指出的误删漏洞)"""
+    print("\n[TEST 18] 验证用户既有协调哨兵文件默认非破坏保留机制...")
+    with tempfile.TemporaryDirectory(prefix="foe_isolated_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+        build_dir = os.path.join(repo_dir, "build")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+        # 1. 执行 make build 签发宿主构建凭据
+        res1 = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res1.returncode == 0, f"make build 失败: {res1.stderr}"
+
+        # 2. 模拟用户把 build/.foe_lock_coord 替换为 USER SENTINEL 数据
+        coord_file = os.path.join(build_dir, ".foe_lock_coord")
+        sentinel_content = b"USER_CRITICAL_LOCK_COORD_SENTINEL_BYTES"
+        with open(coord_file, "wb") as f:
+            f.write(sentinel_content)
+
+        # 3. 执行 make clean
+        res2 = subprocess.run(["make", "clean"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res2.returncode == 0, f"make clean 失败: {res2.stderr}"
+
+        # 核心断言：build/.foe_lock_coord 不得被误删，字节内容保持完好
+        assert os.path.isfile(coord_file), "错误: 含有用户哨兵数据的 .foe_lock_coord 被 make clean 误删！"
+        with open(coord_file, "rb") as f:
+            assert f.read() == sentinel_content, "错误: .foe_lock_coord 用户内容被篡改！"
+        assert os.path.isdir(build_dir), "错误: 含有用户哨兵文件的 build 目录被整棵误删！"
+        print("  [PASS] 用户既有协调哨兵文件保留验证通过：非归属产物文件完好保留，未发生误删")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def test_inode_stability_and_clean_race_defense(repo_dir: str):
+    """测试 19: 验证宿主协调锁文件持久稳定不被删除，杜绝不同 inode 上的锁失效与并发清理竞态"""
+    print("\n[TEST 19] 验证宿主协调文件 inode 稳定性与清理并发互斥...")
+    with tempfile.TemporaryDirectory(prefix="foe_isolated_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+        sys.path.insert(0, os.path.join(repo_dir, "tools"))
+        import safe_build
+
+        build_dir = os.path.join(repo_dir, "build")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+        # 1. 验证协调锁文件 inode 稳定性：无论构建多少次，宿主协调锁文件不被 unlink，inode 保持稳定
+        coord_path = safe_build.get_host_coordinator_file(build_dir)
+        fd = os.open(coord_path, os.O_RDWR | os.O_CREAT, 0o600)
+        initial_ino = os.fstat(fd).st_ino
+        os.close(fd)
+
+        # 连续执行构建与清理循环
+        res1 = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res1.returncode == 0
+        res2 = subprocess.run(["make", "clean"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res2.returncode == 0
+
+        # 核心断言：协调锁文件未被删除，inode 保持一致，杜绝不同 inode 上的锁失效
+        assert os.path.isfile(coord_path), "错误: 宿主协调锁文件被意外删除！"
+        current_ino = os.stat(coord_path).st_ino
+        assert current_ino == initial_ino, f"错误: 协调锁文件 inode 发生漂移 ({current_ino} != {initial_ino})"
+        print("  [PASS] 宿主协调文件 inode 稳定性验证通过：协调文件保持稳定，未发生 inode 分裂")
+
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="foe_isolated_repo_") as tmp_repo:
         print(f"=== 搭建独立隔离仓库副本环境: {tmp_repo} ===")
@@ -909,6 +974,8 @@ def main():
         test_voucher_dir_symlink_and_chmod_safety(tmp_repo)
         test_atomic_lock_concurrency_race(tmp_repo)
         test_orphan_lock_takeover_interleaving_race(tmp_repo)
+        test_user_sentinel_coord_file_retention(tmp_repo)
+        test_inode_stability_and_clean_race_defense(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 

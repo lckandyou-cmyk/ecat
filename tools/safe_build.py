@@ -20,7 +20,6 @@ import fcntl
 MANIFEST_NAME = ".foe_manifest.json"
 MANIFEST_MAGIC = "ECAT_FOE_BUILD_MANIFEST_V1"
 LOCK_NAME = ".foe_build.lock"
-LOCK_COORD_NAME = ".foe_lock_coord"
 
 # 严格受控构建目标名称白名单（纯文件名，严禁包含路径分隔符）
 ALLOWED_TARGET_NAMES = frozenset({"test_runner_efw", "test_runner_core"})
@@ -168,6 +167,13 @@ def get_voucher_file_for_dir(build_dir: str) -> str:
     return os.path.join(get_host_voucher_dir(), f"voucher_{bdir_key}.json")
 
 
+def get_host_coordinator_file(build_dir: str) -> str:
+    """获取指定构建目录在宿主私有凭据库中的内核协调排他锁文件路径，保持 inode 唯一稳定且不予删除"""
+    real_bdir = os.path.realpath(build_dir)
+    bdir_key = hashlib.sha256(real_bdir.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(get_host_voucher_dir(), f"coord_{bdir_key}.lock")
+
+
 def save_host_build_voucher(build_dir: str, artifacts: dict, dsym_files: dict):
     """构建成功后签发宿主真实构建凭据，证明本次产物确由受控构建真实生成"""
     voucher_file = get_voucher_file_for_dir(build_dir)
@@ -295,12 +301,13 @@ def is_pid_alive(pid: int) -> bool:
 
 
 def acquire_build_lock(build_dir: str):
-    """获取构建排他标记，防范并发构建竞态。基于内核文件锁临界区与主控进程树生命周期核验"""
+    """获取构建排他标记，防范并发构建竞态。基于宿主私有文件锁临界区与主控进程树生命周期核验"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
-    coord_file = os.path.join(build_dir, LOCK_COORD_NAME)
+    coord_file = get_host_coordinator_file(build_dir)
     driver_pid = get_build_session_driver_pid()
 
-    # 打开协调互斥文件并施加内核排他互斥锁，保护检查与接管的原子临界区，杜绝交叉误删
+    # 打开宿主私有协调文件并施加内核排他互斥锁，保护检查与接管的原子临界区
+    # 该文件位于宿主临时凭据目录中，不予删除，确保所有并发进程在相同 inode 上排他
     coord_fd = os.open(coord_file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
         fcntl.flock(coord_fd, fcntl.LOCK_EX)
@@ -355,16 +362,19 @@ def acquire_build_lock(build_dir: str):
 
 def release_build_lock(build_dir: str):
     """释放构建排他标记，核验主控进程归属后安全清理"""
-    coord_file = os.path.join(build_dir, LOCK_COORD_NAME)
     lock_file = os.path.join(build_dir, LOCK_NAME)
     if not os.path.exists(lock_file):
         return
     try:
+        coord_file = get_host_coordinator_file(build_dir)
         coord_fd = os.open(coord_file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    except OSError:
-        return
+    except Exception:
+        coord_fd = None
+
     try:
-        fcntl.flock(coord_fd, fcntl.LOCK_EX)
+        if coord_fd is not None:
+            fcntl.flock(coord_fd, fcntl.LOCK_EX)
+
         if os.path.isfile(lock_file) and not os.path.islink(lock_file):
             try:
                 with open(lock_file, "r", encoding="utf-8") as f:
@@ -377,14 +387,15 @@ def release_build_lock(build_dir: str):
             except Exception:
                 pass
     finally:
-        try:
-            fcntl.flock(coord_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(coord_fd)
-        except OSError:
-            pass
+        if coord_fd is not None:
+            try:
+                fcntl.flock(coord_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(coord_fd)
+            except OSError:
+                pass
 
 
 def check_before_build(build_dir: str, target_files: list, overwrite: bool = False):
@@ -555,6 +566,39 @@ def clean_build(build_dir: str):
     if not os.path.isdir(build_dir) or os.path.islink(build_dir):
         return
 
+    # 核心互斥核验：检查是否有并发构建正在运行
+    try:
+        coord_file = get_host_coordinator_file(build_dir)
+        coord_fd = os.open(coord_file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    except Exception:
+        coord_fd = None
+
+    try:
+        if coord_fd is not None:
+            fcntl.flock(coord_fd, fcntl.LOCK_EX)
+
+        lock_file = os.path.join(build_dir, LOCK_NAME)
+        if os.path.isfile(lock_file) and not os.path.islink(lock_file):
+            try:
+                with open(lock_file, "r", encoding="utf-8") as f:
+                    lock_info = json.load(f)
+                locked_driver = lock_info.get("driver_pid") or lock_info.get("pid")
+                if locked_driver is not None and is_pid_alive(locked_driver):
+                    print(f"  [CLEAN] 检测到并发构建正在运行 (PID {locked_driver})，跳过清理以防冲突。")
+                    return
+            except Exception:
+                pass
+    finally:
+        if coord_fd is not None:
+            try:
+                fcntl.flock(coord_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(coord_fd)
+            except OSError:
+                pass
+
     manifest_path = os.path.join(build_dir, MANIFEST_NAME)
     if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
         print("  [CLEAN] 未发现合法构建清单，跳过清理以保护存量文件。")
@@ -650,18 +694,10 @@ def clean_build(build_dir: str):
     if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
         os.remove(manifest_path)
 
-    # 5. 移除锁协调文件（若存在且非符号链接）
-    coord_file = os.path.join(build_dir, LOCK_COORD_NAME)
-    if os.path.isfile(coord_file) and not os.path.islink(coord_file):
-        try:
-            os.remove(coord_file)
-        except OSError:
-            pass
-
-    # 6. 清理完成，撤销宿主真实凭据
+    # 5. 清理完成，撤销宿主真实凭据
     revoke_host_build_voucher(build_dir)
 
-    # 7. 尝试 rmdir 构建根目录：仅当目录已完全为空（无任何遗留文件或子目录）时安全移除
+    # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空（无任何遗留文件或子目录）时安全移除
     try:
         os.rmdir(build_dir)
         print(f"  [CLEAN] 构建目录 {build_dir} 已为空，已安全移除。")
