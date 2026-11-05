@@ -38,6 +38,7 @@ import subprocess
 import hashlib
 import concurrent.futures
 import stat
+import time
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -718,26 +719,20 @@ def test_dsym_empty_dir_retention_and_voucher_isolation(repo_dir: str):
 
 
 def test_voucher_dir_symlink_and_chmod_safety(repo_dir: str):
-    """测试 15: 验证宿主凭据目录符号链接防御与无条件 chmod 漏洞阻断"""
-    print("\n[TEST 15] 验证宿主凭据目录符号链接防御与 chmod 权限防护...")
+    """测试 15: 验证宿主凭据目录符号链接防御与既有目录权限防篡改保护"""
+    print("\n[TEST 15] 验证宿主凭据目录符号链接防御与既有目录权限防护...")
     with tempfile.TemporaryDirectory(prefix="foe_isolated_tmp_") as isolated_tmp:
-        # 在临时根目录下创建外部敏感目标文件，设置权限 0o755
+        # 1. 验证符号链接穿透防御：外部目标文件权限严禁受穿透修改
         target_file = os.path.join(isolated_tmp, "sensitive_target")
         os.makedirs(target_file, exist_ok=True)
         os.chmod(target_file, 0o755)
 
-        # 在凭据路径位置预先放置指向敏感目标的符号链接
         voucher_symlink = os.path.join(isolated_tmp, f".foe_build_voucher_{os.getuid()}")
         os.symlink(target_file, voucher_symlink)
 
-        # 启动 safe_build 试图获取凭据目录
-        sys.path.insert(0, os.path.join(repo_dir, "tools"))
-        import safe_build
-
-        # 必须主动抛出安全拒绝，且严禁修改目标权限
         env = os.environ.copy()
         env["TMPDIR"] = isolated_tmp
-        test_script = f"""
+        test_script_symlink = f"""
 import sys, os, stat
 sys.path.insert(0, r"{os.path.join(repo_dir, 'tools')}")
 import safe_build
@@ -751,18 +746,43 @@ except ValueError as e:
 except Exception:
     sys.exit(30)
 """
-        res = subprocess.run([sys.executable, "-c", test_script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run([sys.executable, "-c", test_script_symlink], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert res.returncode == 0, f"错误: 符号链接凭据目录未被安全拦截 (rc={res.returncode}, stderr={res.stderr})"
 
-        # 核心断言：外部目标文件权限保持 0o755 不变，未受穿透修改
         current_perms = stat.S_IMODE(os.stat(target_file).st_mode)
         assert current_perms == 0o755, f"错误: 敏感目标权限受穿透被篡改为 {oct(current_perms)}"
-        print("  [PASS] 宿主凭据目录符号链接防御通过：成功阻断符号链接穿透与非授权 chmod 修改")
+        os.remove(voucher_symlink)
+        print("  [PASS] 宿主凭据目录符号链接防御通过：成功阻断符号链接穿透")
+
+        # 2. 验证无法证明归属的既有目录权限防篡改（复现审查指出的 0755 预存目录被篡改为 0700 行为）
+        existing_dir = voucher_symlink
+        os.mkdir(existing_dir, 0o755)
+        test_script_perms = f"""
+import sys, os, stat
+sys.path.insert(0, r"{os.path.join(repo_dir, 'tools')}")
+import safe_build
+try:
+    safe_build.get_host_voucher_dir()
+    sys.exit(10)
+except ValueError as e:
+    if "权限异常" in str(e):
+        sys.exit(0)
+    sys.exit(20)
+except Exception:
+    sys.exit(30)
+"""
+        res2 = subprocess.run([sys.executable, "-c", test_script_perms], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res2.returncode == 0, f"错误: 既有非 0700 目录未被安全拒绝 (rc={res2.returncode}, stderr={res2.stderr})"
+
+        # 核心断言：既有目录权限不可被修改，保持原始 0o755
+        retained_perms = stat.S_IMODE(os.lstat(existing_dir).st_mode)
+        assert retained_perms == 0o755, f"错误: 既有目录权限被篡改为 {oct(retained_perms)}"
+        print("  [PASS] 既有目录权限防篡改保护验证通过：成功拒绝非受控既有目录且未修改其权限")
 
 
 def test_atomic_lock_concurrency_race(repo_dir: str):
-    """测试 16: 验证基于内核原子硬链接的构建排他锁在高并发下的原子互斥"""
-    print("\n[TEST 16] 验证内核原子硬链接排他锁高并发互斥防御...")
+    """测试 16: 验证基于内核文件锁临界区的构建排他锁在高并发下的原子互斥"""
+    print("\n[TEST 16] 验证内核文件锁临界区排他锁高并发互斥防御...")
     build_dir = os.path.join(repo_dir, "build")
     shutil.rmtree(build_dir, ignore_errors=True)
     os.makedirs(build_dir, exist_ok=True)
@@ -793,10 +813,57 @@ except Exception as e:
     acquired = [o for o in outputs if "ACQUIRED" in o]
     blocked = [o for o in outputs if "BLOCKED" in o]
 
-    # 核心互斥断言：在原子硬链接保证下，至多仅有 1 个进程能直接夺取锁，其他并发进程全部被安全拦截
+    # 核心互斥断言：在内核协调文件锁保护下，至多仅有 1 个进程能直接夺取锁，其他并发进程全部被安全拦截
     assert len(acquired) == 1, f"错误: 原子互斥失效，持锁进程数不为 1 (实际: {len(acquired)}, 输出: {outputs})"
     assert len(blocked) == 7, f"错误: 并发拦截数不为 7 (实际: {len(blocked)}, 输出: {outputs})"
-    print(f"  [PASS] 内核原子硬链接排他锁互斥验证通过 (成功持锁: {len(acquired)}, 安全拦截: {len(blocked)})")
+    print(f"  [PASS] 内核文件锁排他锁互斥验证通过 (成功持锁: {len(acquired)}, 安全拦截: {len(blocked)})")
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def test_orphan_lock_takeover_interleaving_race(repo_dir: str):
+    """测试 17: 验证孤儿死锁并发接管时的可控交错原子互斥 (复现审查指出的交叉误删新锁漏洞)"""
+    print("\n[TEST 17] 验证孤儿死锁并发接管原子互斥与防交叉误删机制...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+    os.makedirs(build_dir, exist_ok=True)
+
+    # 预置一个由已死亡孤儿进程留下的死锁文件 (PID 999999)
+    lock_file = os.path.join(build_dir, ".foe_build.lock")
+    dead_pid = 999999
+    with open(lock_file, "w", encoding="utf-8") as f:
+        json.dump({"driver_pid": dead_pid, "pid": dead_pid, "created_at": time.time() - 100}, f)
+
+    worker_script = f"""
+import sys, os, time
+sys.path.insert(0, r"{os.path.join(repo_dir, 'tools')}")
+import safe_build
+idx = int(sys.argv[1])
+bdir = sys.argv[2]
+try:
+    safe_build.acquire_build_lock(bdir)
+    print(f"{{idx}}:ACQUIRED", flush=True)
+    time.sleep(1.0)
+except RuntimeError as e:
+    print(f"{{idx}}:BLOCKED", flush=True)
+except Exception as e:
+    print(f"{{idx}}:ERROR:{{e}}", flush=True)
+"""
+
+    # 同时拉起 8 个并发进程同时竞态接管死锁
+    procs = []
+    for i in range(8):
+        p = subprocess.Popen([sys.executable, "-c", worker_script, str(i), build_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        procs.append(p)
+
+    outputs = [p.communicate()[0].strip() for p in procs]
+    acquired = [o for o in outputs if "ACQUIRED" in o]
+    blocked = [o for o in outputs if "BLOCKED" in o]
+
+    # 核心互斥断言：面对孤儿死锁，内核排他临界区确保仅有 1 个进程能接管成功，其余并发进程不会交叉删除新锁
+    assert len(acquired) == 1, f"错误: 孤儿锁接管竞态互斥失效，持锁进程数不为 1 (实际: {len(acquired)}, 输出: {outputs})"
+    assert len(blocked) == 7, f"错误: 孤儿锁并发拦截数不为 7 (实际: {len(blocked)}, 输出: {outputs})"
+    print(f"  [PASS] 孤儿死锁并发接管验证通过 (成功接管: {len(acquired)}, 安全拦截: {len(blocked)})")
 
     shutil.rmtree(build_dir, ignore_errors=True)
 
@@ -841,6 +908,7 @@ def main():
         test_dsym_empty_dir_retention_and_voucher_isolation(tmp_repo)
         test_voucher_dir_symlink_and_chmod_safety(tmp_repo)
         test_atomic_lock_concurrency_race(tmp_repo)
+        test_orphan_lock_takeover_interleaving_race(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 
