@@ -6,8 +6,8 @@
  * 实现端到端固件升级生命周期调度，并覆盖 8 大典型场景。
  *
  * 设计与契约特性：
- * 1. 临时隔离目录与哨兵防护：所有模拟 Flash 介质文件均创建于独立的临时隔离目录中，
- *    严禁污染当前工作目录；测试中加入当前目录同名哨兵文件保护验证，确保不误删现有文件。
+ * 1. 临时隔离目录与无副作用契约：所有模拟 Flash 介质文件均创建于独立的临时隔离目录中，
+ *    严禁在当前工作目录创建或删除任何文件；外部独立测试将严密验证预存同名哨兵文件的完整性与并发隔离。
  * 2. 非破坏性 init 与失效标记先行契约：
  *    - 驱动 init() 仅建立访问句柄，严禁截断或清空现有文件数据；
  *    - 在执行任何扇区擦除之前，必须由 invalidate() 将有效标记持久化置为无效；
@@ -53,12 +53,6 @@ static char s_host_flash_meta_file[512];
 #define HOST_FLASH_VALID_MAGIC 0x5A5AA5A5U
 #define HOST_FLASH_INVALID_MAGIC 0x00000000U
 
-/* 哨兵测试文件名 (位于当前工作目录) */
-#define LOCAL_SENTINEL_DATA "host_flash_data.bin"
-#define LOCAL_SENTINEL_META "host_flash_meta.bin"
-#define SENTINEL_CONTENT_DATA "SENTINEL_DATA_KEEP_SAFE"
-#define SENTINEL_CONTENT_META "SENTINEL_META_KEEP_SAFE"
-
 typedef struct {
     uint16_t target_id;
     uint32_t erased_watermark;
@@ -69,6 +63,15 @@ typedef struct {
 } host_flash_driver_t;
 
 static host_flash_driver_t s_host_drv;
+
+/* 安全文件同步与关闭辅助函数，杜绝因短路求值导致的 fclose 泄漏 */
+static int safe_file_close(FILE *fp)
+{
+    if (!fp) return -1;
+    int flush_rc = fflush(fp);
+    int close_rc = fclose(fp);
+    return (flush_rc == 0 && close_rc == 0) ? 0 : -1;
+}
 
 static void init_demo_env(void)
 {
@@ -137,7 +140,7 @@ static int host_flash_invalidate(void *user_ctx)
         fclose(fp);
         return -1;
     }
-    if (fflush(fp) != 0 || fclose(fp) != 0) return -1;
+    if (safe_file_close(fp) != 0) return -1;
 
     printf("[DRV] invalidate(target=%u) -> 0 (flag=0x%08X)\n", drv->target_id, flag);
     return 0;
@@ -174,7 +177,7 @@ static int host_flash_erase_to(uint32_t need_end, uint32_t *erased_end, void *us
             return -1;
         }
     }
-    if (fflush(fp) != 0 || fclose(fp) != 0) return -1;
+    if (safe_file_close(fp) != 0) return -1;
 
     drv->erased_watermark = new_watermark;
     if (erased_end) {
@@ -203,7 +206,7 @@ static int host_flash_write(uint32_t offset, const uint8_t *buf, uint32_t len, v
         fclose(fp);
         return -1;
     }
-    if (fflush(fp) != 0 || fclose(fp) != 0) return -1;
+    if (safe_file_close(fp) != 0) return -1;
 
     printf("[DRV] write(offset=%u, len=%u) -> 0\n", offset, len);
     return 0;
@@ -251,7 +254,7 @@ static int host_flash_finalize(void *user_ctx)
         fclose(fp);
         return -1;
     }
-    if (fflush(fp) != 0 || fclose(fp) != 0) return -1;
+    if (safe_file_close(fp) != 0) return -1;
 
     drv->is_finalized = true;
     printf("[DRV] finalize(target=%u) -> 0 (flag=0x%08X)\n", drv->target_id, flag);
@@ -268,8 +271,8 @@ static void host_flash_abort(void *user_ctx)
     FILE *fp = fopen(s_host_flash_meta_file, "wb");
     if (fp) {
         uint32_t flag = HOST_FLASH_INVALID_MAGIC;
-        fwrite(&flag, sizeof(flag), 1, fp);
-        fclose(fp);
+        (void)fwrite(&flag, sizeof(flag), 1, fp);
+        safe_file_close(fp);
     }
     drv->is_initialized = false;
     drv->is_finalized = false;
@@ -307,14 +310,14 @@ static void preset_flash_content(uint32_t meta_flag, uint8_t byte_val, size_t le
     FILE *fmeta = fopen(s_host_flash_meta_file, "wb");
     assert(fmeta != NULL);
     assert(fwrite(&meta_flag, sizeof(meta_flag), 1, fmeta) == 1);
-    fclose(fmeta);
+    assert(safe_file_close(fmeta) == 0);
 
     FILE *fdata = fopen(s_host_flash_data_file, "wb");
     assert(fdata != NULL);
     for (size_t i = 0; i < len; i++) {
         assert(fputc(byte_val, fdata) != EOF);
     }
-    fclose(fdata);
+    assert(safe_file_close(fdata) == 0);
 }
 
 static void assert_flash_content(uint32_t expected_meta, uint8_t expected_byte, size_t check_len)
@@ -718,7 +721,7 @@ static void run_scenario_padded_efw(const char *external_efw_file)
     if (fp) {
         total_read = fread(efw_data, 1, sizeof(efw_data), fp);
         fclose(fp);
-        printf("[PACKER] Successfully loaded external .efw from: %s (size=%zu bytes)\n", external_efw_file, total_read);
+        printf("[PACKER] Successfully loaded external .efw (size=%zu bytes)\n", total_read);
     } else {
         /* 回退机制: 若外部文件不存在，使用内置逻辑构造 */
         static const uint8_t payload[16] = {0x55, 0x66};
@@ -786,23 +789,12 @@ int main(int argc, char **argv)
     printf(" EtherCAT FoE Core Host Reference Demo (8 Scenarios)\n");
     printf("============================================================\n\n");
 
-    /* 1. 初始化临时隔离环境 */
+    /* 1. 初始化临时隔离环境 (所有模拟介质均限定在独立的系统临时隔离目录内) */
     init_demo_env();
-
-    /* 2. 预置当前目录同名哨兵文件，验证本测试决不污染/误删工作区原有文件 */
-    FILE *f_sent_data = fopen(LOCAL_SENTINEL_DATA, "wb");
-    assert(f_sent_data != NULL);
-    assert(fputs(SENTINEL_CONTENT_DATA, f_sent_data) != EOF);
-    fclose(f_sent_data);
-
-    FILE *f_sent_meta = fopen(LOCAL_SENTINEL_META, "wb");
-    assert(f_sent_meta != NULL);
-    assert(fputs(SENTINEL_CONTENT_META, f_sent_meta) != EOF);
-    fclose(f_sent_meta);
 
     const char *padded_efw_path = (argc > 1) ? argv[1] : "examples/host_demo/packed_padded.efw";
 
-    /* 3. 执行 8 大场景 */
+    /* 2. 执行 8 大场景 */
     run_scenario_success();
     run_scenario_header_crc_mismatch();
     run_scenario_project_id_mismatch();
@@ -812,27 +804,9 @@ int main(int argc, char **argv)
     run_scenario_padded_efw(padded_efw_path);
     run_scenario_finalize_defense_demo();
 
-    /* 4. 验证当前目录哨兵文件完好无损 */
-    FILE *chk_data = fopen(LOCAL_SENTINEL_DATA, "rb");
-    assert(chk_data != NULL);
-    char buf_data[64] = {0};
-    assert(fgets(buf_data, sizeof(buf_data), chk_data) != NULL);
-    fclose(chk_data);
-    assert(strcmp(buf_data, SENTINEL_CONTENT_DATA) == 0);
-
-    FILE *chk_meta = fopen(LOCAL_SENTINEL_META, "rb");
-    assert(chk_meta != NULL);
-    char buf_meta[64] = {0};
-    assert(fgets(buf_meta, sizeof(buf_meta), chk_meta) != NULL);
-    fclose(chk_meta);
-    assert(strcmp(buf_meta, SENTINEL_CONTENT_META) == 0);
-
-    /* 清理哨兵文件与临时隔离目录 */
-    remove(LOCAL_SENTINEL_DATA);
-    remove(LOCAL_SENTINEL_META);
+    /* 3. 清理临时隔离目录 (绝不触碰或删除当前工作目录任何文件) */
     destroy_demo_env();
 
-    printf("[SENTINEL] Current directory sentinel files verified untouched.\n");
     printf("============================================================\n");
     printf(" All 8 Host Scenarios Finished Successfully.\n");
     printf("============================================================\n");

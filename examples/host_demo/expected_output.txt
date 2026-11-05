@@ -61,7 +61,7 @@
 [CORE] Final State: SUCCESS, Last Error: NONE
 
 === Scenario 7: Padded Firmware End-to-End via efw_pack.py ===
-[PACKER] Successfully loaded external .efw from: examples/host_demo/packed_padded.efw (size=129 bytes)
+[PACKER] Successfully loaded external .efw (size=129 bytes)
 [DRV] init(target=1) -> 0 (non-destructive)
 [DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=64) -> erased=4096
@@ -86,7 +86,6 @@
 [NOTE] 核心机在 finalize 失败时拒绝升级、触发 abort 并保持介质处于无效状态；
        真实 SOES 在零长度结束包路径忽略应用返回值的现象已在 tests/test_soes_real_harness.c 中由真实 esc_foe.c 独立验证。
 
-[SENTINEL] Current directory sentinel files verified untouched.
 ============================================================
  All 8 Host Scenarios Finished Successfully.
 ============================================================

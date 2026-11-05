@@ -102,6 +102,8 @@ test-examples:
 	@(ulimit -s 8192 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
 	@(ulimit -s 1024 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
 	@echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常"
+	@echo "--- 运行 host_demo 外部隔离、同名哨兵保护与多实例并发验证 ---"
+	@$(PYTHON) tests/test_host_demo_isolation.py $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw
 	@rm -f examples/host_demo/packed_padded.efw
 	@echo "--- 静态编译检查驱动模板 (driver_template) ---"
 	@$(CC) $(CFLAGS) -c -o $(EXAMPLES_DRIVER_TEMPLATE_OBJ) $(EXAMPLES_DRIVER_TEMPLATE_SRC)
