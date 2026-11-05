@@ -1242,6 +1242,100 @@ def test_corrupt_or_unreadable_lock_protection(repo_dir: str):
         shutil.rmtree(build_dir, ignore_errors=True)
 
 
+def test_legacy_voucher_compatibility_and_manifest_retention(repo_dir: str):
+    """[TEST 24] 验证缺失或无效清单哈希的旧版凭据默认非破坏保留与新构建回归"""
+    print("\n[TEST 24] 验证缺失或无效清单哈希的旧版凭据默认非破坏保留与新构建回归...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="foe_legacy_compat_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+
+        # 1. 模拟旧版真实构建：先正常构建一次，然后从宿主凭据中剥离 manifest_hash 字段以模拟旧版凭据
+        res_build = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_build.returncode == 0
+        manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+        assert os.path.isfile(manifest_path)
+
+        # 检查宿主凭据并删除 manifest_hash 字段（还原旧版本凭据结构）
+        uid = os.getuid()
+        vdir = os.path.join(isolated_tmp, f".foe_build_voucher_{uid}")
+        vfiles = [os.path.join(vdir, f) for f in os.listdir(vdir) if f.startswith("voucher_")]
+        assert len(vfiles) > 0
+        vfile = vfiles[0]
+        with open(vfile, "r", encoding="utf-8") as f:
+            vdata = json.load(f)
+        vdata.pop("manifest_hash", None)
+        with open(vfile, "w", encoding="utf-8") as f:
+            json.dump(vdata, f)
+
+        # 2. 用户给清单添加 USER 自定义字段并按项目算法重算 checksum
+        sys.path.insert(0, os.path.join(repo_dir, "tools"))
+        import safe_build
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            mdata = json.load(f)
+        mdata["user_custom_note"] = "USER_IMPORTANT_DATA_PRESERVED"
+        mdata["checksum"] = safe_build.compute_manifest_checksum(mdata)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(mdata, f, indent=2)
+
+        # 3. 运行新版 make clean
+        res_clean_legacy = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean_legacy.returncode == 0
+        assert "宿主凭据缺少有效清单哈希指纹" in res_clean_legacy.stdout
+
+        # 核心断言：由于旧版凭据缺乏清单哈希证明，默认安全保留存量清单与用户数据，严禁误删
+        assert os.path.isfile(manifest_path), "错误: 旧版凭据导致用户修改的清单被误删！"
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            saved_mdata = json.load(f)
+        assert saved_mdata.get("user_custom_note") == "USER_IMPORTANT_DATA_PRESERVED"
+        print("  [PASS] 场景 A 验证通过：旧版缺失清单哈希凭据严格默认非破坏保留，存量清单完好")
+
+        # 4. 验证新版构建与清理正常可用
+        res_new_build = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_new_build.returncode == 0
+        # 验证新签发的凭据包含合法的 64 位 manifest_hash
+        with open(vfile, "r", encoding="utf-8") as f:
+            new_vdata = json.load(f)
+        assert "manifest_hash" in new_vdata
+        assert isinstance(new_vdata["manifest_hash"], str) and len(new_vdata["manifest_hash"]) == 64
+
+        # 新版构建后的正常 clean 应能安全完成
+        res_new_clean = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_new_clean.returncode == 0
+        assert not os.path.exists(build_dir), "新构建正常清理未能移除空构建目录"
+        print("  [PASS] 场景 B 验证通过：新版受控构建正常可用，凭据签发与安全清理生命周期完备")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="foe_isolated_repo_") as tmp_repo:
         print(f"=== 搭建独立隔离仓库副本环境: {tmp_repo} ===")
@@ -1289,6 +1383,7 @@ def main():
         test_clean_and_build_lifecycle_mutual_exclusion(tmp_repo)
         test_user_replaced_manifest_retention(tmp_repo)
         test_corrupt_or_unreadable_lock_protection(tmp_repo)
+        test_legacy_voucher_compatibility_and_manifest_retention(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 

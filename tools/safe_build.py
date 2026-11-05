@@ -637,13 +637,20 @@ def clean_build(build_dir: str):
             return
 
         # 核心防篡改核验：验证清单自身哈希与宿主构建凭据记录是否一致
-        # 若用户在构建后修改或替换了清单自身，判定为疑似用户文件并终止清理，绝不删除清单！
+        # 遵循默认非破坏与升级兼容安全原则：
+        # 对缺失、空或无效清单哈希指纹的旧版或非受控凭据，无法证明当前清单未被篡改，默认安全保留并终止清理以防误删！
         expected_manifest_hash = host_voucher.get("manifest_hash")
-        if expected_manifest_hash:
-            current_manifest_hash = sha256_file(manifest_path)
-            if current_manifest_hash != expected_manifest_hash:
-                print("  [CLEAN] 清单文件已被用户修改或替换（与构建凭据哈希不符），跳过清理以保护用户存量文件。")
-                return
+        if (not expected_manifest_hash or 
+            not isinstance(expected_manifest_hash, str) or 
+            len(expected_manifest_hash) != 64 or 
+            not all(c in "0123456789abcdefABCDEF" for c in expected_manifest_hash)):
+            print("  [CLEAN] 宿主凭据缺少有效清单哈希指纹（旧版凭据或非受控凭据），依据默认非破坏原则跳过清理以保护存量文件。")
+            return
+
+        current_manifest_hash = sha256_file(manifest_path)
+        if current_manifest_hash != expected_manifest_hash.lower():
+            print("  [CLEAN] 清单文件已被用户修改或替换（与构建凭据哈希不符），跳过清理以保护用户存量文件。")
+            return
 
         voucher_artifacts = host_voucher.get("artifacts", {})
         voucher_dsym_files = host_voucher.get("dsym_files", {})
@@ -712,7 +719,7 @@ def clean_build(build_dir: str):
 
         # 4. 移除清单本身（仅当确定由本次构建生成且未被修改时安全移除）
         if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
-            if not expected_manifest_hash or sha256_file(manifest_path) == expected_manifest_hash:
+            if expected_manifest_hash and sha256_file(manifest_path) == expected_manifest_hash.lower():
                 os.remove(manifest_path)
 
         # 5. 清理完成，撤销宿主真实凭据
