@@ -34,6 +34,9 @@ extern "C" {
 #define ECAT_FOE_SOES_MAX_FILES         4U
 #endif
 
+#define ECAT_MBX_HDR_SIZE               6U
+#define ECAT_FOE_HDR_SIZE               6U
+
 #define ECAT_TRANSITION_BOOT_TO_INIT    ((uint8_t)((ECAT_STATE_INIT << 4) | ECAT_STATE_BOOT)) /**< 0x13U: BOOT->INIT 迁移码 */
 #define ECAT_AL_STATUS_BOOT_ERROR       ((uint8_t)(ECAT_STATE_BOOT | ECAT_STATE_FLAG_ERROR))  /**< 0x13U: BOOT+Error 状态值 */
 #define ECAT_AL_STATUS_CODE_NO_VALID_FW 0x0014U                                               /**< ALERR_NOVALIDFIRMWARE (0x0014) */
@@ -52,6 +55,8 @@ typedef struct {
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
     uint32_t                original_n_files;   /**< 从站初始配置的真实文件条目数 */
     int8_t                  target_to_file_map[ECAT_FOE_TARGET_COUNT + 1]; /**< 目标 ID (1..4) 到 files[] 索引映射 (-1 为未映射) */
+    uint8_t                *registered_outbox_buf;     /**< 托管的发送邮箱缓冲区指针 (可选，用于新鲜度保障) */
+    size_t                  registered_outbox_max_len; /**< 托管的发送邮箱容量 */
 } ecat_foe_soes_adapter_t;
 
 /**
@@ -70,18 +75,53 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn);
 
 /**
+ * @brief 重置目标 ID 到 SOES 文件表索引的映射为全部未映射 (-1)
+ *
+ * 适用于配置稀疏或紧凑文件表前清空默认 1:1 映射，避免与既有条目发生映射冲突。
+ *
+ * @param adapter 适配层上下文指针
+ */
+void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter);
+
+/**
  * @brief 配置目标 ID 到 SOES 文件表索引的映射关系 (支持稀疏配置与紧凑文件表)
  *
  * 默认情况下，适配层采用 1:1 直接映射 (目标 1 -> files[0], 目标 2 -> files[1] 等)。
  * 当从站启用稀疏目标 (例如仅使能目标 2 与 4，且 files[] 仅声明 2 个条目) 时，
- * 可通过此接口显式指定映射，避免紧凑文件表下的越界或串项。
+ * 可先调用 ecat_foe_soes_reset_target_file_map 清空默认映射，再通过此接口显式指定映射。
+ * 若传入 file_idx < 0 则将该目标置为未映射。
  *
  * @param adapter   适配层上下文指针
  * @param target_id 目标 ID (1..ECAT_FOE_TARGET_COUNT)
- * @param file_idx  SOES foe_cfg->files[] 数组索引
+ * @param file_idx  SOES foe_cfg->files[] 数组索引 (若为 -1 表示取消映射)
+ * @return 0 成功；非 0 表示参数非法或发生重复映射冲突
+ */
+int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, int32_t file_idx);
+
+/**
+ * @brief 注册从站发送邮箱缓冲区并由适配层托管新鲜度生命周期
+ *
+ * 托管后：
+ * 1. 每次 pre_process_hook 暂存 WRQ 时，自动将发送邮箱首部清零，切断历史残留响应；
+ * 2. 若原生 SOES 因密码错误、非 BOOT、无可用输出邮箱等未能产生新响应，发送邮箱保持失效状态；
+ * 3. post_process_hook 消费 ACK(0) 激活核心会话后，自动使该响应失效，杜绝重放或旧缓存误激活。
+ *
+ * @param adapter           适配层上下文指针
+ * @param mbx_out_buf       发送邮箱缓冲区首地址
+ * @param mbx_out_max_len   发送邮箱缓冲区最大长度 (至少 12 字节)
  * @return 0 成功；非 0 表示参数非法
  */
-int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, uint32_t file_idx);
+int ecat_foe_soes_register_outbox(ecat_foe_soes_adapter_t *adapter,
+                                  uint8_t *mbx_out_buf,
+                                  size_t mbx_out_max_len);
+
+/**
+ * @brief 手动使发送邮箱缓冲区响应失效 (供未托管缓冲区的应用在 ESC_foeprocess() 前调用)
+ *
+ * @param mbx_out_buf 发送邮箱缓冲区首地址
+ * @param mbx_out_len 发送邮箱缓冲区长度
+ */
+void ecat_foe_soes_invalidate_outbox(uint8_t *mbx_out_buf, size_t mbx_out_len);
 
 /**
  * @brief SOES WRQ 检查钩子 (在主站发起 WRQ 时调用)

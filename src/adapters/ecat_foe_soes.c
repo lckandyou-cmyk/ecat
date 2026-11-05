@@ -27,6 +27,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
     adapter->original_n_files = 0;
+    adapter->registered_outbox_buf = NULL;
+    adapter->registered_outbox_max_len = 0;
     adapter->target_to_file_map[0] = -1;
     for (size_t i = 1; i <= ECAT_FOE_TARGET_COUNT; i++) {
         adapter->target_to_file_map[i] = (int8_t)(i - 1);
@@ -34,7 +36,17 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     s_active_adapter = adapter;
 }
 
-int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, uint32_t file_idx)
+void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter)
+{
+    if (adapter == NULL) {
+        return;
+    }
+    for (size_t i = 0; i <= ECAT_FOE_TARGET_COUNT; i++) {
+        adapter->target_to_file_map[i] = -1;
+    }
+}
+
+int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, int32_t file_idx)
 {
     if (adapter == NULL) {
         return -1;
@@ -42,11 +54,44 @@ int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t
     if (target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT) {
         return -1;
     }
-    if (file_idx >= ECAT_FOE_SOES_MAX_FILES) {
+    if (file_idx < 0) {
+        adapter->target_to_file_map[target_id] = -1;
+        return 0;
+    }
+    if ((uint32_t)file_idx >= ECAT_FOE_SOES_MAX_FILES) {
         return -1;
+    }
+    /* 防御重复目标映射：拒绝多个不同目标映射至相同文件表索引，防止名称与配置冲突 */
+    for (size_t t = 1; t <= ECAT_FOE_TARGET_COUNT; t++) {
+        if (t != target_id && adapter->target_to_file_map[t] == (int8_t)file_idx) {
+            return -1;
+        }
     }
     adapter->target_to_file_map[target_id] = (int8_t)file_idx;
     return 0;
+}
+
+int ecat_foe_soes_register_outbox(ecat_foe_soes_adapter_t *adapter,
+                                  uint8_t *mbx_out_buf,
+                                  size_t mbx_out_max_len)
+{
+    if (adapter == NULL || mbx_out_buf == NULL ||
+        mbx_out_max_len < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+        return -1;
+    }
+    adapter->registered_outbox_buf = mbx_out_buf;
+    adapter->registered_outbox_max_len = mbx_out_max_len;
+    ecat_foe_soes_invalidate_outbox(mbx_out_buf, mbx_out_max_len);
+    return 0;
+}
+
+void ecat_foe_soes_invalidate_outbox(uint8_t *mbx_out_buf, size_t mbx_out_len)
+{
+    if (mbx_out_buf == NULL || mbx_out_len < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+        return;
+    }
+    /* 将 Mailbox Header 与 FoE Header 区域清零，使历史残留响应失效 */
+    memset(mbx_out_buf, 0, ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE);
 }
 
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
@@ -266,6 +311,11 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     adapter->staged_target_id = tid;
     s_active_adapter = adapter;
 
+    /* 关键新鲜度保障：若注册了发送邮箱，在 SOES 处理前使发送邮箱首部失效，防范残留响应 */
+    if (adapter->registered_outbox_buf != NULL) {
+        ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
+    }
+
     return 0;
 }
 
@@ -291,18 +341,21 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
     bool is_valid_ack = false;
     if (mbx_out_buf != NULL && mbx_out_len >= (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
         uint16_t mbx_len = (uint16_t)(mbx_out_buf[0] | ((uint16_t)mbx_out_buf[1] << 8));
-        uint8_t mbx_type = (uint8_t)(mbx_out_buf[5] & 0x0FU);
-        uint8_t opcode   = mbx_out_buf[ECAT_MBX_HDR_SIZE];
-        uint32_t packet_num = (uint32_t)(mbx_out_buf[ECAT_MBX_HDR_SIZE + 2] |
-                                         ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 3] << 8) |
-                                         ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 4] << 16) |
-                                         ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
+        /* 严格核验声明长度与实际缓冲长度：声明载荷长度必须等于 ECAT_FOE_HDR_SIZE (6 字节)
+         * 且传入的缓冲区总长度必须足以容纳 Mailbox 头与声明的有效载荷 */
+        if (mbx_len == ECAT_FOE_HDR_SIZE && mbx_out_len >= (size_t)(ECAT_MBX_HDR_SIZE + mbx_len)) {
+            uint8_t mbx_type = (uint8_t)(mbx_out_buf[5] & 0x0FU);
+            uint8_t opcode   = mbx_out_buf[ECAT_MBX_HDR_SIZE];
+            uint32_t packet_num = (uint32_t)(mbx_out_buf[ECAT_MBX_HDR_SIZE + 2] |
+                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 3] << 8) |
+                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 4] << 16) |
+                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
 
-        if (mbx_type == ECAT_MBX_TYPE_FOE &&
-            mbx_len >= ECAT_FOE_HDR_SIZE &&
-            opcode == ECAT_FOE_OP_ACK &&
-            packet_num == 0) {
-            is_valid_ack = true;
+            if (mbx_type == ECAT_MBX_TYPE_FOE &&
+                opcode == ECAT_FOE_OP_ACK &&
+                packet_num == 0) {
+                is_valid_ack = true;
+            }
         }
     }
 
@@ -314,6 +367,10 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
+        /* 消费完毕：若注册了发送邮箱，立即使该响应失效，切断残留复用路径 */
+        if (adapter->registered_outbox_buf != NULL) {
+            ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
+        }
         return rc;
     } else {
         /* 原生 SOES 拒绝了 WRQ 或输出了非 ACK(0) 报文 (包括 ERR、NULL 缓冲区、短帧、非 FoE 等)：
@@ -321,6 +378,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
+        if (adapter->registered_outbox_buf != NULL) {
+            ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
+        }
         return 0;
     }
 }

@@ -38,9 +38,10 @@ _ESCvar ESCvar;
 _MBXcontrol MBXcontrol[4];
 uint8_t MBX[128 * 4];
 
+static uint8_t s_mock_claimbuffer_return = 1;
 uint8_t ESC_claimbuffer(void)
 {
-    return 1; /* 始终使用 mailbox 1 作为响应缓冲 */
+    return s_mock_claimbuffer_return;
 }
 
 /* 核心防回滚端口桩实现 */
@@ -132,6 +133,7 @@ static void reset_soes_environment(void)
     s_foe_files[1].write_function = mock_foe_write;
 
     s_foe_cfg.n_files = 2;
+    s_mock_claimbuffer_return = 1;
 
     FOE_config(&s_foe_cfg);
     FOE_init();
@@ -1656,10 +1658,11 @@ int main(void)
             uint8_t dummy_data[32] = {0};
             uint32_t wr_rc = ecat_foe_soes_write_cb(&s_foe_files[0], dummy_data, sizeof(dummy_data));
             assert(wr_rc != 0); /* 必须拒绝 */
-            /* 关键断言: 暂存被清除，Target 1 会话与驱动未被破坏，Target 2 绝未被激活 */
+            /* 关键断言: 暂存被清除，Target 1 会话与驱动未被破坏，Target 2 并未被激活 */
             assert(adapter.has_staged_wrq == false);
             assert(core.req_target_id == 1);
             assert(s_harness_drv.count_abort == 0);
+            s_mock_claimbuffer_return = 1;
 
             /* Case 1B: 后置钩子传入 NULL 缓冲区 */
             adapter.has_staged_wrq = true;
@@ -1768,9 +1771,12 @@ int main(void)
             s_foe_files[0].name = "placeholder0";
             s_foe_files[1].name = "placeholder1";
 
-            /* 显式配置稀疏映射: Target 2 -> files[0], Target 4 -> files[1] */
+            /* 显式配置稀疏映射: 先清空默认 1:1 映射，再将 Target 2 -> files[0], Target 4 -> files[1] */
+            ecat_foe_soes_reset_target_file_map(&adapter);
             assert(ecat_foe_soes_set_target_file_map(&adapter, 2, 0) == 0);
             assert(ecat_foe_soes_set_target_file_map(&adapter, 4, 1) == 0);
+            /* 校验重复目标映射防护: 尝试将 Target 1 同样映射至 files[0]，必须安全拒绝 (-1) */
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 1, 0) == -1);
 
             /* 测试 Target 2 WRQ 请求 */
             const char *fn_fpga = "SERVO_DRV_FPGA_V1.0.0.0.efw";
@@ -1850,6 +1856,127 @@ int main(void)
             assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
 
             printf("  [PASS] 深度风险 4: 证实 WRQ 预检仅核验格式与使能，防回滚在数据阶段头签名处严格生效\n");
+        }
+
+        /* 5. 深度风险 5: 声明载荷长度与实际缓冲长度边界核查 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 构造声明载荷超出传入缓冲区的畸形报文 */
+            uint8_t malformed_len_buf[32] = {0};
+            malformed_len_buf[0] = 100; malformed_len_buf[1] = 0; /* 声明 payload=100 */
+            malformed_len_buf[5] = MBXFOE;
+            malformed_len_buf[6] = FOE_OP_ACK;
+
+            adapter.has_staged_wrq = true;
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, malformed_len_buf, 16);
+            assert(adapter.has_staged_wrq == false); /* 越界声明被安全拦截 */
+
+            /* 构造载荷长度不等于 6 字节的畸形 ACK 报文 (FoE ACK 载荷必须严格为 6 字节) */
+            uint8_t wrong_payload_ack[32] = {0};
+            wrong_payload_ack[0] = 8; wrong_payload_ack[1] = 0; /* 声明 payload=8 (异常) */
+            wrong_payload_ack[5] = MBXFOE;
+            wrong_payload_ack[6] = FOE_OP_ACK;
+
+            adapter.has_staged_wrq = true;
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, wrong_payload_ack, 32);
+            assert(adapter.has_staged_wrq == false); /* 异常载荷长度被安全拒绝 */
+
+            printf("  [PASS] 深度风险 5: 声明载荷长度与实际缓冲长度边界核查通过，非标与越界声明安全拒绝\n");
+        }
+
+        /* 6. 深度风险 6: 暂存合规 WRQ 遇 SOES 拒绝且无可用输出邮箱/旧 ACK(0) 残留与新鲜度保障核查 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 注册发送邮箱至适配层以启用新鲜度生命周期托管 */
+            uint8_t *outbox_ptr = &MBX[1 * ESC_MBXSIZE];
+            assert(ecat_foe_soes_register_outbox(&adapter, outbox_ptr, ESC_MBXSIZE) == 0);
+
+            /* 启动合法 Target 1 会话 */
+            const char *fn1 = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            assert(ecat_foe_soes_on_wrq(&adapter, fn1, strlen(fn1)) == 0);
+            assert(core.req_target_id == 1);
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+            /* 模拟发送邮箱中已残留上一笔交易成功的 ACK(0) */
+            _FOE *out_foe = (_FOE *)outbox_ptr;
+            out_foe->mbxheader.length = 6;
+            out_foe->mbxheader.mbxtype = MBXFOE;
+            out_foe->foeheader.opcode = FOE_OP_ACK;
+            out_foe->foeheader.packetnumber = 0;
+
+            /* 构造故障注入：模拟 SOES 全部输出邮箱耗尽，使 ESC_claimbuffer() 返回 0 (无可用输出邮箱) */
+            s_mock_claimbuffer_return = 0;
+
+            /* 主站下发格式合法的 Target 2 WRQ，但使用错误密码 */
+            const char *fn2 = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn2));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x99999999U; /* 错误密码 */
+            memcpy(req->filename, fn2, strlen(fn2));
+
+            /* 执行前置钩子: 预检合规，暂存 Target 2，同时因注册托管自动使发送邮箱残留失效 */
+            int pre_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2));
+            assert(pre_rc == 0);
+            assert(adapter.has_staged_wrq == true);
+            assert(adapter.staged_target_id == 2);
+            /* 验证发送邮箱已被前置钩子自动清零失效 */
+            assert(out_foe->foeheader.opcode == 0);
+
+            /* 原生 SOES 处理: 密码不匹配调用 FOE_abort(0x800A)，但因无可用输出邮箱未产生任何新报文 */
+            ESC_foeprocess();
+            /* 此时发送邮箱依旧保持全 0 失效状态 */
+            assert(out_foe->foeheader.opcode == 0);
+
+            /* 执行后置钩子: 检测到发送邮箱非有效 ACK(0)，安全释放暂存 Target 2 */
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, outbox_ptr, ESC_MBXSIZE);
+            assert(adapter.has_staged_wrq == false);
+
+            /* 关键断言: 核心会话与驱动完好无损，维持 Target 1，驱动 abort 调用次数为 0 */
+            assert(core.req_target_id == 1);
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+            assert(s_harness_drv.count_abort == 0);
+            s_mock_claimbuffer_return = 1;
+
+            printf("  [PASS] 深度风险 6: 暂存WRQ在SOES密码拒绝且无输出邮箱时安全丢弃，新鲜度保障防范旧ACK残留\n");
+        }
+
+        /* 7. 深度风险 7: 重复目标映射拦截与取消映射流转核查 */
+        {
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_core_t core;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 测试重复目标映射拦截 */
+            ecat_foe_soes_reset_target_file_map(&adapter);
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 2, 0) == 0);
+            /* 重复映射至索引 0 必须返回失败 (-1) */
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 4, 0) == -1);
+
+            /* 测试取消映射与复用 */
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 2, -1) == 0); /* 取消 Target 2 映射 */
+            /* 此时索引 0 已释放，Target 4 可顺利映射至索引 0 */
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 4, 0) == 0);
+
+            printf("  [PASS] 深度风险 7: 重复目标映射安全拦截，取消映射与条目安全复用正常\n");
         }
     }
 
