@@ -1,0 +1,109 @@
+/**
+ * @file ecat_foe_ssc.c
+ * @brief Beckhoff SSC (Slave Stack Code) 协议栈适配层实现
+ *
+ * 重要声明与边界限制：
+ * 本模块为通用固件升级核心状态机接入 Beckhoff Slave Stack Code (SSC) 的薄转接层设计。
+ * 本机当前缺乏真实 Beckhoff SSC 官方源码包（受 ETG 许可约束需官方会员账号导出），
+ * 因此本模块尚未在真实 SSC 协议栈与物理硬件上进行联动测试。
+ * 严禁将本模块的抽象契约测试宣称为真实 SSC 验证！
+ */
+
+#include "ecat_foe_ssc.h"
+#include <string.h>
+
+void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size)
+{
+    if (adapter == NULL) {
+        return;
+    }
+    adapter->core = core;
+    adapter->max_packet_size = max_packet_size;
+    adapter->session_active = false;
+}
+
+uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pName, uint16_t nameSize, uint32_t password)
+{
+    (void)password;
+    if (adapter == NULL || adapter->core == NULL || pName == NULL) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+
+    /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
+    int rc = ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
+    if (rc != 0) {
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_NOTFOUND; /* 映射为 0x8001 文件未找到或未授权 */
+    }
+
+    adapter->session_active = true;
+    return 0U; /* 0 表示成功 */
+}
+
+uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pData, uint16_t length)
+{
+    if (adapter == NULL || adapter->core == NULL) {
+        return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+
+    if (!adapter->session_active) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+
+    /* 0 长度包显式定界 EOF 路径 */
+    if (length == 0U) {
+        if (ecat_foe_core_on_end(adapter->core) != 0) {
+            adapter->session_active = false;
+            return ECAT_FOE_SSC_ERR_PROGERROR;
+        }
+        adapter->session_active = false;
+        return 0U;
+    }
+
+    /* 写入常规数据块 */
+    if (ecat_foe_core_on_data(adapter->core, pData, (size_t)length) != 0) {
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+
+    /* 依据短包定界传输结束：若当前块长度小于单包最大容量，判定为最后一包 (EOF) */
+    if (adapter->max_packet_size > 0U && (uint32_t)length < adapter->max_packet_size) {
+        if (ecat_foe_core_on_end(adapter->core) != 0) {
+            adapter->session_active = false;
+            return ECAT_FOE_SSC_ERR_PROGERROR;
+        }
+        adapter->session_active = false;
+    }
+
+    return 0U;
+}
+
+uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
+{
+    if (adapter == NULL || adapter->core == NULL) {
+        return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+
+    if (!adapter->session_active) {
+        return 0U;
+    }
+
+    if (ecat_foe_core_on_end(adapter->core) != 0) {
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+
+    adapter->session_active = false;
+    return 0U;
+}
+
+void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
+{
+    (void)errorCode;
+    if (adapter == NULL || adapter->core == NULL) {
+        return;
+    }
+
+    ecat_foe_core_on_abort(adapter->core);
+    adapter->session_active = false;
+}

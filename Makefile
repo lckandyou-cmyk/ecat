@@ -18,6 +18,10 @@ SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-
 EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
 
+# 阶段 E: Beckhoff SSC 适配层抽象契约与 Mock 测试源码 (契约测试桩，非真实 SSC 验证)
+SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c
+TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
+
 BUILD_DIR ?= build
 OVERWRITE ?= 0
 SOES_DIR ?= /tmp/soes_src/soes
@@ -78,13 +82,19 @@ test: test-examples
 	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" $(PYTHON) tests/generate_vectors.py --out-dir "$$TMP_BUILD_DIR/vectors" && \
 	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
 	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
+	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_ssc_mock" $(SRC_SSC_ADAPTER) $(TEST_SSC_SRC) && \
 	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_BUILD_DIR/test_runner_core" && \
+	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (Mock 环境) ---" && \
+	"$$TMP_BUILD_DIR/test_runner_ssc_mock" && \
 	echo "--- 运行普通测试二进制受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_BUILD_DIR/test_runner_core" >/dev/null) && \
 	(ulimit -s 1024 && "$$TMP_BUILD_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] 普通 test_runner_core 在 8MB 与 1MB 栈下运行正常" && \
+	(ulimit -s 8192 && "$$TMP_BUILD_DIR/test_runner_ssc_mock" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_BUILD_DIR/test_runner_ssc_mock" >/dev/null) && \
+	echo "  [PASS] 普通 test_runner_ssc_mock 在 8MB 与 1MB 栈下运行正常" && \
 	(ulimit -s 8192 && VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" >/dev/null) && \
 	(ulimit -s 1024 && VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" >/dev/null) && \
 	echo "  [PASS] 普通 test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
@@ -161,14 +171,21 @@ test-asan:
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" $(PYTHON) tests/generate_vectors.py --out-dir "$$TMP_ASAN_DIR/vectors" && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_ssc_mock" $(SRC_SSC_ADAPTER) $(TEST_SSC_SRC) && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
+	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (ASan/UBSan Mock 环境) ---" && \
+	"$$TMP_ASAN_DIR/test_runner_ssc_mock" && \
 	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \
 	(ulimit -s 1024 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)" && \
+	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_ssc_mock" >/dev/null) && \
+	echo "  [PASS] ASan test_runner_ssc_mock 在 8MB 栈下运行正常" && \
+	(ulimit -s 1024 && "$$TMP_ASAN_DIR/test_runner_ssc_mock" >/dev/null) && \
+	echo "  [PASS] ASan test_runner_ssc_mock 在 1MB 栈下运行正常" && \
 	(ulimit -s 8192 && VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" >/dev/null) && \
 	(ulimit -s 1024 && VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" >/dev/null) && \
 	echo "  [PASS] ASan test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
