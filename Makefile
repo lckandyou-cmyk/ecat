@@ -82,13 +82,27 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN) test-examples
 test-examples:
 	@echo "--- 编译并运行宿主参考示例 (host_demo) 与对比 expected_output.txt ---"
 	@$(CC) $(CFLAGS) -o $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_HOST_DEMO_SRC)
-	@$(EXAMPLES_HOST_DEMO_BIN) > examples/host_demo/run_output.tmp
-	@diff -u examples/host_demo/expected_output.txt examples/host_demo/run_output.tmp || (rm -f examples/host_demo/run_output.tmp && exit 1)
+	@$(PYTHON) -c 'open("examples/host_demo/raw_payload.bin", "wb").write(bytes([0x55] * 64))'
+	@$(PYTHON) tools/efw_pack.py pack \
+		--bin examples/host_demo/raw_payload.bin \
+		--project-id 0x10010001 \
+		--project-name SERVO_DRV \
+		--hardware-id 0x00000001 \
+		--hw-ver-min 1 \
+		--hw-ver-max 1 \
+		--target MCU \
+		--fw-version 1.0.0.0 \
+		--foe-packet-size 64 \
+		--out examples/host_demo/packed_padded.efw >/dev/null
+	@rm -f examples/host_demo/raw_payload.bin
+	@$(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw > examples/host_demo/run_output.tmp
+	@diff -u examples/host_demo/expected_output.txt examples/host_demo/run_output.tmp || (rm -f examples/host_demo/run_output.tmp examples/host_demo/packed_padded.efw && exit 1)
 	@rm -f examples/host_demo/run_output.tmp
 	@echo "  [PASS] host_demo 输出与 expected_output.txt 逐行比对完全匹配"
-	@(ulimit -s 8192 && $(EXAMPLES_HOST_DEMO_BIN) >/dev/null)
-	@(ulimit -s 1024 && $(EXAMPLES_HOST_DEMO_BIN) >/dev/null)
+	@(ulimit -s 8192 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
+	@(ulimit -s 1024 && $(EXAMPLES_HOST_DEMO_BIN) examples/host_demo/packed_padded.efw >/dev/null)
 	@echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常"
+	@rm -f examples/host_demo/packed_padded.efw
 	@echo "--- 静态编译检查驱动模板 (driver_template) ---"
 	@$(CC) $(CFLAGS) -c -o $(EXAMPLES_DRIVER_TEMPLATE_OBJ) $(EXAMPLES_DRIVER_TEMPLATE_SRC)
 	@rm -f $(EXAMPLES_DRIVER_TEMPLATE_OBJ)
@@ -129,4 +143,4 @@ test-asan:
 	@echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
 
 clean:
-	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_DRIVER_TEMPLATE_OBJ) examples/host_demo/run_output.tmp examples/host_demo/*.dSYM
+	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_DRIVER_TEMPLATE_OBJ) examples/host_demo/run_output.tmp examples/host_demo/*.dSYM examples/host_demo/packed_padded.efw examples/host_demo/raw_payload.bin

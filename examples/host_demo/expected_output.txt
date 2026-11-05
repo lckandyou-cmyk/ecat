@@ -2,14 +2,16 @@
  EtherCAT FoE Core Host Reference Demo (8 Scenarios)
 ============================================================
 
-=== Scenario 1: Normal Success ===
+=== Scenario 1: Normal Success (With Preset Old Data Assertions) ===
 [CORE] on_wrq: SERVO_DRV_MCU_V1.0.0.0.efw -> OK
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+[CHECK] Pre-data: Old firmware data and valid flag intact
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=16) -> erased=4096
 [DRV] write(offset=0, len=16) -> 0
 [DRV] read(offset=0, len=16) -> 0
-[DRV] finalize(target=1) -> 0
+[DRV] finalize(target=1) -> 0 (flag=0x5A5AA5A5)
+[CHECK] Post-finalize: New firmware data verified and valid flag set
 [CORE] on_end -> OK
 [CORE] Final State: SUCCESS, Last Error: NONE
 
@@ -17,13 +19,15 @@
 [CORE] on_data (corrupt header CRC) -> REJECT
 [CORE] Final State: ERROR, Last Error: HDR_CRC
 
-=== Scenario 3: Project ID Mismatch ===
-[CORE] on_wrq: OTHER_PRJ_MCU_V1.0.0.0.efw -> REJECT
-[CORE] Final State: ERROR, Last Error: WRQ_PROJECT_MISMATCH
+=== Scenario 3: Project ID and Name Mismatch Suite ===
+[CORE] 3a. on_wrq: OTHER_PRJ_MCU_V1.0.0.0.efw -> REJECT (WRQ_PROJECT_MISMATCH)
+[CORE] 3b. on_wrq: SERVO_DRV_MCU_V1.0.0.0.efw -> OK
+[CORE] 3b. on_data (mismatched header project_id) -> REJECT (HDR_VERIFY)
+[CORE] Final State: ERROR, Last Error: HDR_VERIFY
 
 === Scenario 4: Stream Under-Receive ===
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=8) -> erased=4096
 [DRV] write(offset=0, len=8) -> 0
 [DRV] abort
@@ -31,8 +35,8 @@
 [CORE] Final State: ERROR, Last Error: UNDER_RECEIVE
 
 === Scenario 5: Stream Over-Receive ===
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=16) -> erased=4096
 [DRV] write(offset=0, len=16) -> 0
 [DRV] abort
@@ -40,45 +44,49 @@
 [CORE] Final State: ERROR, Last Error: OVER_RECEIVE
 
 === Scenario 6: Abort and Retry on Same Core ===
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [CORE] Simulated stream break -> calling on_abort
 [DRV] abort
 [CORE] Intermediate State: IDLE
 [CORE] Retrying with new WRQ on same core instance...
 [CORE] on_wrq retry -> OK
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=16) -> erased=4096
 [DRV] write(offset=0, len=16) -> 0
 [DRV] read(offset=0, len=16) -> 0
-[DRV] finalize(target=1) -> 0
+[DRV] finalize(target=1) -> 0 (flag=0x5A5AA5A5)
 [CORE] on_end retry -> OK
 [CORE] Final State: SUCCESS, Last Error: NONE
 
-=== Scenario 7: Padded Firmware (Avoid Zero-Len) ===
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
-[DRV] erase_to(need=16) -> erased=4096
-[DRV] write(offset=0, len=16) -> 0
-[DRV] read(offset=0, len=16) -> 0
-[DRV] finalize(target=1) -> 0
-[CORE] on_end (short packet path) -> OK
+=== Scenario 7: Padded Firmware End-to-End via efw_pack.py ===
+[PACKER] Successfully loaded external .efw from: examples/host_demo/packed_padded.efw (size=129 bytes)
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
+[DRV] erase_to(need=64) -> erased=4096
+[DRV] write(offset=0, len=64) -> 0
+[DRV] write(offset=64, len=8) -> 0
+[DRV] read(offset=0, len=64) -> 0
+[DRV] read(offset=64, len=1) -> 0
+[DRV] finalize(target=1) -> 0 (flag=0x5A5AA5A5)
+[CORE] on_end (padded firmware short packet path) -> OK
 [CORE] Final State: SUCCESS, Last Error: NONE
 
-=== Scenario 8: Zero-Length Failure Invisibility Demo (Limitation) ===
-[DRV] init(target=1) -> 0
-[DRV] invalidate(target=1) -> 0
+=== Scenario 8: Core Defense on Driver Finalize Failure ===
+[DRV] init(target=1) -> 0 (non-destructive)
+[DRV] invalidate(target=1) -> 0 (flag=0x00000000)
 [DRV] erase_to(need=16) -> erased=4096
 [DRV] write(offset=0, len=16) -> 0
 [DRV] read(offset=0, len=16) -> 0
 [DRV] finalize(target=1) -> FAIL (-1)
 [DRV] abort
-[CORE] on_end (finalize injected failure) -> REJECT
+[CORE] on_end (finalize failed) -> REJECT
 [CORE] State: ERROR, Last Error: DRV_FINALIZE
-[NOTE] 在原生 SOES 的 0 长度包结束分支中，FOE_fclose 返回值被忽略并回 ACK；
-       核心机虽处于 ERROR 态且有效标记未置位，但主站协议栈无法收到 0x800B 中止 (限制演示)。
+[NOTE] 核心机在 finalize 失败时拒绝升级、触发 abort 并保持介质处于无效状态；
+       真实 SOES 在零长度结束包路径忽略应用返回值的现象已在 tests/test_soes_real_harness.c 中由真实 esc_foe.c 独立验证。
 
+[SENTINEL] Current directory sentinel files verified untouched.
 ============================================================
  All 8 Host Scenarios Finished Successfully.
 ============================================================
