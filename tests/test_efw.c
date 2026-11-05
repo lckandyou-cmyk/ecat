@@ -12,6 +12,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -689,23 +690,29 @@ static void verify_vector_file(
  */
 static void test_vector_files_cross_check(void)
 {
+    const char *vdir = getenv("VECTORS_DIR");
+    char path_buf[512];
+#define RESOLVE_VEC(name) \
+    ((vdir && vdir[0] != '\0') ? (snprintf(path_buf, sizeof(path_buf), "%s/%s", vdir, (name)), path_buf) : "tests/vectors/" name)
+
     /* 1. 规范正例 (MCU, 16 字节, V1.2.3.4) */
-    verify_vector_file("tests/vectors/positive_mcu.efw", 1, 0x01020304U, 16, false, false);
+    verify_vector_file(RESOLVE_VEC("positive_mcu.efw"), 1, 0x01020304U, 16, false, false);
 
     /* 2. MCU 尾部填充例 (448 + 1 = 449 字节) */
-    verify_vector_file("tests/vectors/padded_mcu.efw", 1, 0x01020304U, 449, true, false);
+    verify_vector_file(RESOLVE_VEC("padded_mcu.efw"), 1, 0x01020304U, 449, true, false);
 
     /* 3. SII 偶数填充例 (448 + 2 = 450 字节) */
-    verify_vector_file("tests/vectors/padded_sii.efw", 3, 0x01000000U, 450, false, true);
+    verify_vector_file(RESOLVE_VEC("padded_sii.efw"), 3, 0x01000000U, 450, false, true);
 
     /* 4. FPGA 目标例 (Target 2, 64 字节, V2.0.0.0) */
-    verify_vector_file("tests/vectors/target_fpga.efw", 2, 0x02000000U, 64, false, false);
+    verify_vector_file(RESOLVE_VEC("target_fpga.efw"), 2, 0x02000000U, 64, false, false);
 
     /* 5. SII 常规例 (Target 3, 32 字节, V1.0.0.0) */
-    verify_vector_file("tests/vectors/target_sii.efw", 3, 0x01000000U, 32, false, false);
+    verify_vector_file(RESOLVE_VEC("target_sii.efw"), 3, 0x01000000U, 32, false, false);
 
     /* 6. EEPROM 目标例 (Target 4, 48 字节, V1.0.1.0) */
-    verify_vector_file("tests/vectors/target_eeprom.efw", 4, 0x01000100U, 48, false, false);
+    verify_vector_file(RESOLVE_VEC("target_eeprom.efw"), 4, 0x01000100U, 48, false, false);
+#undef RESOLVE_VEC
 }
 
 /* -------------------------------------------------------------------------- */

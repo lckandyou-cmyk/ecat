@@ -2,44 +2,41 @@ CC ?= clang
 CFLAGS ?= -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -Itests/stubs -O2
 PYTHON ?= python3
 
-# 阶段 A: efw 容器解析测试
+# 阶段 A: efw 容器解析测试源码
 SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
-TEST_EFW_BIN = tests/test_runner_efw
 
-# 阶段 B: 核心升级状态机、目标驱动与 SOES 适配测试
+# 阶段 B: 核心升级状态机、目标驱动与 SOES 适配测试源码
 SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
-TEST_CORE_BIN = tests/test_runner_core
 
-# 阶段 C: 真实 SOES 源码宿主独立 Harness 测试 (按需检测外部 SOES 源码)
+# 阶段 C: 真实 SOES 源码宿主独立 Harness 测试源码 (按需检测外部 SOES 源码)
 TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
-TEST_SOES_HARNESS_BIN = tests/test_runner_soes_real
 SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I$(SOES_DIR)
 
 # 阶段 D: 宿主机参考示例与驱动模板源码
 EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
 
+BUILD_DIR ?= build
 SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan test-soes test-examples test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all build clean test test-asan test-soes test-examples test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
+# 可选本地构建目标：生成调试二进制至 $(BUILD_DIR)/ 并写入标记文件
+build:
+	@mkdir -p $(BUILD_DIR)
+	@touch $(BUILD_DIR)/.foe_build_artifact
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner_efw $(SRC_EFW) $(TEST_EFW_SRC)
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner_core $(SRC_CORE) $(TEST_CORE_SRC)
+	@echo "  [BUILD] 本地调试二进制已生成至 $(BUILD_DIR)/"
+
 vectors:
 	@$(PYTHON) tests/generate_vectors.py
-
-$(TEST_EFW_BIN): $(SRC_EFW) $(TEST_EFW_SRC) include/ecat_foe_efw.h
-	$(CC) $(CFLAGS) -o $@ $(SRC_EFW) $(TEST_EFW_SRC)
-
-$(TEST_CORE_BIN): $(SRC_CORE) $(TEST_CORE_SRC) include/ecat_foe_core.h include/ecat_foe_target.h include/ecat_foe_soes.h tests/mock_driver.h
-	$(CC) $(CFLAGS) -o $@ $(SRC_CORE) $(TEST_CORE_SRC)
-
-$(TEST_SOES_HARNESS_BIN): $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c tests/soes_bsp/cc.h tests/soes_bsp/options.h tests/soes_bsp/esc_coe.h $(SOES_DIR)/esc_foe.c
-	$(CC) $(SOES_CFLAGS) -o $@ $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c $(SOES_DIR)/esc_foe.c
 
 check-quotes:
 	@echo ">>> 执行 SOES 源码引文三方核验 (来源目录: $(SOES_DIR)) <<<"
@@ -62,20 +59,27 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN) test-examples
+test: test-examples
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
-	@./$(TEST_EFW_BIN)
-	@$(PYTHON) tests/test_efw_pack.py
-	@./$(TEST_CORE_BIN)
-	@echo "--- 运行普通测试二进制受限栈回归核验 (8MB 与 1MB 栈) ---"
-	@(ulimit -s 8192 && ./$(TEST_CORE_BIN) >/dev/null)
-	@(ulimit -s 1024 && ./$(TEST_CORE_BIN) >/dev/null)
-	@echo "  [PASS] 普通 $$(basename $(TEST_CORE_BIN)) 在 8MB 与 1MB 栈下运行正常"
-	@(ulimit -s 8192 && ./$(TEST_EFW_BIN) >/dev/null)
-	@(ulimit -s 1024 && ./$(TEST_EFW_BIN) >/dev/null)
-	@echo "  [PASS] 普通 $$(basename $(TEST_EFW_BIN)) 在 8MB 与 1MB 栈下运行正常"
-	@$(PYTHON) tests/test_verify_quotes.py
-	@$(PYTHON) tests/test_verify_pdf_quotes.py
+	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
+	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
+	echo "--- 在独立隔离构建目录运行核心测试套件 (构建目录: $$TMP_BUILD_DIR) ---" && \
+	mkdir -p "$$TMP_BUILD_DIR/vectors" && \
+	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" $(PYTHON) tests/generate_vectors.py --out-dir "$$TMP_BUILD_DIR/vectors" && \
+	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
+	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
+	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" && \
+	$(PYTHON) tests/test_efw_pack.py && \
+	"$$TMP_BUILD_DIR/test_runner_core" && \
+	echo "--- 运行普通测试二进制受限栈回归核验 (8MB 与 1MB 栈) ---" && \
+	(ulimit -s 8192 && "$$TMP_BUILD_DIR/test_runner_core" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_BUILD_DIR/test_runner_core" >/dev/null) && \
+	echo "  [PASS] 普通 test_runner_core 在 8MB 与 1MB 栈下运行正常" && \
+	(ulimit -s 8192 && VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" >/dev/null) && \
+	(ulimit -s 1024 && VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" >/dev/null) && \
+	echo "  [PASS] 普通 test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
+	$(PYTHON) tests/test_verify_quotes.py && \
+	$(PYTHON) tests/test_verify_pdf_quotes.py
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
@@ -116,11 +120,14 @@ test-soes:
 		exit 1; \
 	fi
 	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)"
-	@$(MAKE) $(TEST_SOES_HARNESS_BIN) CC="$(CC)" CFLAGS="$(CFLAGS)" SOES_DIR="$(SOES_DIR)"
-	@./$(TEST_SOES_HARNESS_BIN)
-	@(ulimit -s 8192 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null)
-	@(ulimit -s 1024 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null)
-	@echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"
+	@TMP_SOES_DIR=$$(mktemp -d /tmp/foe_build_soes_XXXXXX) && \
+	trap 'rm -rf "$$TMP_SOES_DIR"' EXIT INT TERM && \
+	echo "--- 在独立隔离构建目录编译并运行真实 SOES Harness (构建目录: $$TMP_SOES_DIR) ---" && \
+	$(CC) $(SOES_CFLAGS) -o "$$TMP_SOES_DIR/test_runner_soes_real" $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c $(SOES_DIR)/esc_foe.c && \
+	"$$TMP_SOES_DIR/test_runner_soes_real" && \
+	(ulimit -s 8192 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
+	echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"
 
 # ASan 内存与未定义行为核验目标
 # 历史构建与环境条件复核说明:
@@ -132,15 +139,26 @@ test-soes:
 #    已将 tests/test_core.c 内测试夹具统一调整为静态存储 (static/BSS)。
 #    回归核验：同一 ASan 二进制在 ulimit -s 8192 与 1024 下独立执行均顺利通过 (退出码 0)。
 # 3. 栈帧尺寸限定：核心库代码 (src/ecat_foe_core.c) 为零动态分配，内部函数最大栈帧约 240 字节系在当前所测宿主环境
-#    (macOS arm64 / Apple Clang) 下的静态测量值，而非全平台通用常量。
+#    (macOS arm64 / Apple Clang) 下的静态测量值，而非通用常量。
 test-asan:
-	$(MAKE) clean
-	$(MAKE) test CC=$(CC) CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
-	@echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---"
-	@(ulimit -s 8192 && ./$(TEST_CORE_BIN) >/dev/null)
-	@echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)"
-	@(ulimit -s 1024 && ./$(TEST_CORE_BIN) >/dev/null)
-	@echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
+	@TMP_ASAN_DIR=$$(mktemp -d /tmp/foe_build_asan_XXXXXX) && \
+	trap 'rm -rf "$$TMP_ASAN_DIR"' EXIT INT TERM && \
+	echo "--- 在独立隔离构建目录运行 ASan/UBSan 测试套件 (构建目录: $$TMP_ASAN_DIR) ---" && \
+	mkdir -p "$$TMP_ASAN_DIR/vectors" && \
+	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" $(PYTHON) tests/generate_vectors.py --out-dir "$$TMP_ASAN_DIR/vectors" && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
+	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
+	"$$TMP_ASAN_DIR/test_runner_core" && \
+	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
+	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
+	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \
+	(ulimit -s 1024 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
+	echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
 
 clean:
-	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw
+	@echo "--- 执行安全清理 (安全模式: 仅清理明确由构建生成的隔离产物，不匹配或删除用户 .efw、.dSYM 或自定义文件) ---"
+	@if [ -d "$(BUILD_DIR)" ] && [ -f "$(BUILD_DIR)/.foe_build_artifact" ]; then \
+		rm -rf "$(BUILD_DIR)"; \
+		echo "  [CLEAN] 已安全移除 $(BUILD_DIR)/ 临时构建目录"; \
+	fi

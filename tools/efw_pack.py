@@ -146,6 +146,9 @@ def pack_efw(
         ver_str = format_version_int(fw_version)
         out_path = f"{project_name}_{target_name}_V{ver_str}.efw"
 
+    if os.path.islink(out_path):
+        raise ValueError(f"安全拒绝：输出文件路径为符号链接: {out_path}")
+
     with open(out_path, 'wb') as f:
         f.write(efw_data)
 
@@ -240,6 +243,8 @@ def inspect_efw(efw_path: str, extract_bin: str = None) -> bool:
     print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
 
     if extract_bin:
+        if os.path.islink(extract_bin):
+            raise ValueError(f"安全拒绝：提取输出路径为符号链接: {extract_bin}")
         with open(extract_bin, 'wb') as f:
             f.write(payload)
         print(f"  提取有效负载至:    {extract_bin}")
