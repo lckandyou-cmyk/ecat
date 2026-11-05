@@ -55,7 +55,7 @@ def is_safe_artifact_name(name: str) -> bool:
 
 
 def is_safe_dsym_relpath(rel_path: str) -> bool:
-    """核验是否为合法的 dSYM 内部相对路径"""
+    """核验是否为合法的受控 dSYM 内部文件相对路径"""
     if not isinstance(rel_path, str) or not rel_path:
         return False
     if os.path.isabs(rel_path):
@@ -73,6 +73,27 @@ def is_safe_dsym_relpath(rel_path: str) -> bool:
         f"{os.sep}Contents{os.sep}Resources{os.sep}Relocations{os.sep}" in norm
     )
     return is_std
+
+
+def is_safe_dsym_dir_relpath(rel_dir: str) -> bool:
+    """核验是否为合法的受控 dSYM 目录相对路径（严禁根路径、.. 及非受控顶层目录）"""
+    if not isinstance(rel_dir, str) or not rel_dir:
+        return False
+    if os.path.isabs(rel_dir):
+        return False
+    norm = os.path.normpath(rel_dir)
+    parts = norm.split(os.sep)
+    if any(p in ("..", ".", "") for p in parts):
+        return False
+    top_dir = parts[0]
+    if not (top_dir.endswith(".dSYM") and top_dir[:-5] in ALLOWED_TARGET_NAMES):
+        return False
+    # 子目录结构核验：允许顶层 .dSYM 目录本身或内部标准子目录层级 (Contents, Resources, DWARF, Relocations 等)
+    allowed_subdirs = {"Contents", "Resources", "DWARF", "Relocations"}
+    for sub in parts[1:]:
+        if sub not in allowed_subdirs and not any(sub.startswith(arch) for arch in ("arm", "x86", "aarch")):
+            return False
+    return True
 
 
 def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
@@ -107,53 +128,116 @@ def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
         except ValueError:
             return None
 
-    # 检查目标文件本身如果是符号链接，则拒绝
+    # 检查目标自身如果是符号链接，则拒绝
     if os.path.islink(full_path):
         return None
 
     return full_path
 
 
+def validate_manifest_integrity_and_paths(build_dir: str, manifest_data: dict) -> bool:
+    """统一安全核验构建清单：凡格式异常、指纹不符、含越界或非受控路径者一律判定为不可信"""
+    if not isinstance(manifest_data, dict):
+        return False
+
+    if manifest_data.get("magic") != MANIFEST_MAGIC:
+        return False
+
+    expected_csum = manifest_data.get("checksum")
+    actual_csum = compute_manifest_checksum(manifest_data)
+    if not expected_csum or expected_csum != actual_csum:
+        return False
+
+    raw_artifacts = manifest_data.get("artifacts", {})
+    raw_dsym_files = manifest_data.get("dsym_files", {})
+    raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
+
+    if not isinstance(raw_artifacts, dict) or not isinstance(raw_dsym_files, dict) or not isinstance(raw_dsym_dirs, list):
+        return False
+
+    # 1. 统一核验产物文件路径
+    for fname in raw_artifacts:
+        if not is_safe_artifact_name(fname):
+            return False
+        if not verify_strictly_inside_build_dir(build_dir, fname):
+            return False
+
+    # 2. 统一核验 dSYM 文件路径
+    for rel_f in raw_dsym_files:
+        if not is_safe_dsym_relpath(rel_f):
+            return False
+        if not verify_strictly_inside_build_dir(build_dir, rel_f):
+            return False
+
+    # 3. 统一核验 dSYM 目录路径（严防通过 dsym_dirs 逃逸越界删除外部目录）
+    for rel_d in raw_dsym_dirs:
+        if not is_safe_dsym_dir_relpath(rel_d):
+            return False
+        if not verify_strictly_inside_build_dir(build_dir, rel_d):
+            return False
+
+    return True
+
+
 def acquire_build_lock(build_dir: str):
-    """获取构建排他标记，防范并发构建竞态"""
+    """获取构建排他标记，防范并发构建竞态。采用父进程与进程组生命周期校验"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
     if os.path.islink(lock_file):
         raise ValueError(f"安全拒绝：锁文件为符号链接: {lock_file}")
 
+    current_ppid = os.getppid()
+    current_pgrp = os.getpgrp()
+
     if os.path.exists(lock_file):
-        old_pid = None
+        lock_info = {}
         try:
             with open(lock_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                old_pid = int(content) if content.isdigit() else None
+                lock_info = json.load(f)
         except Exception:
-            old_pid = None
+            pass
 
-        if old_pid is not None and old_pid != os.getpid():
-            # 检查原持锁进程是否存活
+        old_ppid = lock_info.get("ppid")
+        old_pgrp = lock_info.get("pgrp")
+
+        # 若原持锁进程属于当前父进程或同属当前进程组，视为同一次构建流程内部流转
+        if old_ppid == current_ppid or (old_pgrp is not None and old_pgrp == current_pgrp):
+            return
+
+        # 检查原持锁父进程是否仍然存活
+        is_alive = False
+        if old_ppid is not None:
             try:
-                os.kill(old_pid, 0)
-                raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (PID {old_pid})，锁文件已锁定")
+                os.kill(old_ppid, 0)
+                is_alive = True
             except OSError:
-                # 进程已不存在，安全接管锁
-                pass
+                is_alive = False
 
+        if is_alive:
+            raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (父进程 PID {old_ppid})，锁文件已锁定")
+
+    # 写入新锁信息（带当前会话与父进程标识）
+    lock_data = {
+        "ppid": current_ppid,
+        "pgrp": current_pgrp,
+        "pid": os.getpid()
+    }
     tmp_lock = os.path.join(build_dir, f".lock_tmp_{os.getpid()}")
     fd = os.open(tmp_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(str(os.getpid()))
+        json.dump(lock_data, f)
     os.replace(tmp_lock, lock_file)
 
 
 def release_build_lock(build_dir: str):
-    """释放构建排他标记"""
+    """释放构建排他标记，核验会话归属后安全清理"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
     if os.path.isfile(lock_file) and not os.path.islink(lock_file):
         try:
             with open(lock_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content == str(os.getpid()):
-                    os.remove(lock_file)
+                lock_info = json.load(f)
+            # 确认系当前父进程或进程组持有的锁才予以删除
+            if lock_info.get("ppid") == os.getppid() or lock_info.get("pgrp") == os.getpgrp():
+                os.remove(lock_file)
         except Exception:
             pass
 
@@ -293,7 +377,9 @@ def record_build(build_dir: str, target_files: list):
                     for d in dirs:
                         dp = os.path.join(root, d)
                         if not os.path.islink(dp) and os.path.isdir(dp):
-                            dsym_dirs.append(os.path.relpath(dp, build_dir))
+                            rel_d = os.path.relpath(dp, build_dir)
+                            if is_safe_dsym_dir_relpath(rel_d):
+                                dsym_dirs.append(rel_d)
                 if has_valid_dsym_content:
                     dsym_dirs.append(fname + ".dSYM")
 
@@ -317,7 +403,7 @@ def record_build(build_dir: str, target_files: list):
 
 
 def clean_build(build_dir: str):
-    """安全清理：仅删除经核验确由本次构建生成的具体文件，不能可靠证明归属时一律保留"""
+    """安全清理：仅删除经核验确由本次构建生成的具体文件与目录，不能可靠证明归属时一律保留"""
     if not os.path.isdir(build_dir) or os.path.islink(build_dir):
         return
 
@@ -333,36 +419,15 @@ def clean_build(build_dir: str):
         print(f"  [CLEAN] 读取构建清单失败: {e}，跳过清理以防误删。")
         return
 
-    if manifest_data.get("magic") != MANIFEST_MAGIC:
-        print("  [CLEAN] 清单文件缺少归属魔数，跳过清理以防误删用户文件。")
-        return
-
-    expected_csum = manifest_data.get("checksum")
-    actual_csum = compute_manifest_checksum(manifest_data)
-    if expected_csum != actual_csum:
-        print("  [CLEAN] 清单指纹不匹配（内容疑似被手工篡改或损坏），跳过清理以保护存量文件。")
+    # 全量统一安全校验：核验魔数、防伪指纹、产物文件、dSYM 文件及 dSYM 目录路径
+    # 凡存在未校验通过的非受控路径、越界路径或指纹不符者，一律判定不可信并终止清理
+    if not validate_manifest_integrity_and_paths(build_dir, manifest_data):
+        print("  [CLEAN] 清单存在未校验通过的非受控路径、越界路径或指纹不符，跳过清理以保护存量文件与目录。")
         return
 
     raw_artifacts = manifest_data.get("artifacts", {})
     raw_dsym_files = manifest_data.get("dsym_files", {})
     raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
-
-    # 严格路径与归属核验：如果清单中存在任何非法路径或越界路径，直接判定清单不可靠，放弃清理
-    for fname in raw_artifacts:
-        if not is_safe_artifact_name(fname):
-            print(f"  [CLEAN] 清单包含非白名单或越界产物路径 {fname!r}，判定清单不可靠，终止清理以保护用户文件。")
-            return
-        if not verify_strictly_inside_build_dir(build_dir, fname):
-            print(f"  [CLEAN] 目标 {fname!r} 存在符号链接或路径逃逸隐患，终止清理。")
-            return
-
-    for rel_f in raw_dsym_files:
-        if not is_safe_dsym_relpath(rel_f):
-            print(f"  [CLEAN] 清单包含非安全 dSYM 路径 {rel_f!r}，判定清单不可靠，终止清理以保护用户文件。")
-            return
-        if not verify_strictly_inside_build_dir(build_dir, rel_f):
-            print(f"  [CLEAN] dSYM 文件 {rel_f!r} 存在符号链接或路径逃逸隐患，终止清理。")
-            return
 
     # 检查 dSYM 目录中是否存在未登记用户文件
     # 若 dSYM 目录内含有用户数据，整棵 dSYM 目录全部保留不删
@@ -410,12 +475,14 @@ def clean_build(build_dir: str):
             else:
                 print(f"  [WARN] {rel_file} 内容已被修改，保留文件不予删除。")
 
-    # 3. 逐层尝试 rmdir 移除空的 dSYM 目录层级
+    # 3. 逐层尝试 rmdir 移除空的 dSYM 目录层级（运行时再核验路径必须严格位于构建目录内部）
     for rel_dir in sorted(raw_dsym_dirs, key=len, reverse=True):
         top_dsym = rel_dir.split(os.sep)[0]
         if top_dsym in protected_dsym_dirs:
             continue
-        dpath = os.path.join(build_dir, rel_dir)
+        dpath = verify_strictly_inside_build_dir(build_dir, rel_dir)
+        if not dpath:
+            continue
         if os.path.isdir(dpath) and not os.path.islink(dpath):
             try:
                 os.rmdir(dpath)

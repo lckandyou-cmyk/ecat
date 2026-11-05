@@ -325,6 +325,11 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
     print("\n[TEST 11] 验证路径穿越 (../valuable.txt)、系统根路径、父目录符号链接与被篡改清单防御...")
     build_dir = os.path.join(repo_dir, "build")
     os.makedirs(build_dir, exist_ok=True)
+    manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+
+    # 导入 safe_build 工具内部的 checksum 计算函数，以模拟带有效 checksum 的欺骗性清单
+    sys.path.insert(0, os.path.join(repo_dir, "tools"))
+    import safe_build
 
     # 1. 复现审查发现的逃逸删除路径：在仓库根目录放置 valuable.txt
     valuable_path = os.path.join(repo_dir, "valuable.txt")
@@ -333,14 +338,18 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
         f.write(valuable_content)
     valuable_hash = hashlib.sha256(valuable_content).hexdigest()
 
-    # 在 build/.foe_manifest.json 中写入带 ../valuable.txt 的欺骗清单
-    manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+    # 在 build/.foe_manifest.json 中写入带 ../valuable.txt 的欺骗清单，并计算正确 checksum
     escape_manifest = {
         "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "version": 1,
+        "created_by": "foe_build_system",
         "artifacts": {
-            "../valuable.txt": valuable_hash
-        }
+            "../valuable.txt": {"hash": valuable_hash, "size": len(valuable_content)}
+        },
+        "dsym_files": {},
+        "dsym_dirs": []
     }
+    escape_manifest["checksum"] = safe_build.compute_manifest_checksum(escape_manifest)
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(escape_manifest, f)
 
@@ -350,25 +359,75 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
     assert os.path.isfile(valuable_path), "错误: 仓库根目录下的 valuable.txt 被 clean 跨目录逃逸误删！"
     with open(valuable_path, "rb") as f:
         assert f.read() == valuable_content, "错误: valuable.txt 内容被篡改！"
-    print("  [PASS] 跨目录逃逸 (../valuable.txt) 成功被拦截，根目录用户文件完好无损")
+    print("  [PASS] 跨目录逃逸 (../valuable.txt) 成功被统一核验拦截，根目录用户文件完好无损")
 
-    # 2. 验证系统根路径与多级遍历组件防御
+    # 2. 验证 dsym_dirs 根路径越界删除空目录漏洞防御（独立复现审查指出的缺陷）
+    with tempfile.TemporaryDirectory(prefix="foe_ext_empty_dir_") as ext_dir:
+        target_empty_dir = os.path.join(ext_dir, "user_empty_folder")
+        os.makedirs(target_empty_dir, exist_ok=True)
+        assert os.path.isdir(target_empty_dir), "外部空目录创建失败"
+
+        # 写入包含外部空目录根路径的清单，且附带正确的 checksum
+        dsym_escape_manifest = {
+            "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+            "version": 1,
+            "created_by": "foe_build_system",
+            "artifacts": {},
+            "dsym_files": {},
+            "dsym_dirs": [target_empty_dir]
+        }
+        dsym_escape_manifest["checksum"] = safe_build.compute_manifest_checksum(dsym_escape_manifest)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(dsym_escape_manifest, f)
+
+        res_c_dsym = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res_c_dsym.returncode == 0, f"make clean 执行失败: {res_c_dsym.stderr}"
+        # 核心断言: 仓库外侧空目录严禁被 rmdir 删除
+        assert os.path.isdir(target_empty_dir), "错误: 仓库外侧空目录被 dsym_dirs 根路径越界删除！"
+        print("  [PASS] dsym_dirs 系统根路径越界删除被统一校验成功拦截，外侧空目录完好保留")
+
+        # 验证 dsym_dirs 相对路径穿越 (..) 与父级符号链接防御
+        rel_outside_dir = os.path.join(target_empty_dir, "sub_empty")
+        os.makedirs(rel_outside_dir, exist_ok=True)
+        dsym_rel_manifest = {
+            "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+            "version": 1,
+            "created_by": "foe_build_system",
+            "artifacts": {},
+            "dsym_files": {},
+            "dsym_dirs": ["../../sub_empty"]
+        }
+        dsym_rel_manifest["checksum"] = safe_build.compute_manifest_checksum(dsym_rel_manifest)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(dsym_rel_manifest, f)
+
+        res_c_rel = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res_c_rel.returncode == 0, f"make clean 失败: {res_c_rel.stderr}"
+        assert os.path.isdir(rel_outside_dir), "错误: 相对路径遍历 dsym_dirs 删除了外部目录！"
+        print("  [PASS] dsym_dirs 相对路径遍历 (..) 成功被拦截，外部目录未受触碰")
+
+    # 3. 验证系统根路径与多级遍历组件防御 (artifacts)
     root_escape_manifest = {
         "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "version": 1,
+        "created_by": "foe_build_system",
         "artifacts": {
-            "/tmp/non_existent_target": "dummy_hash",
-            "../../outside.txt": "dummy_hash"
-        }
+            "/tmp/non_existent_target": {"hash": "dummy_hash", "size": 0},
+            "../../outside.txt": {"hash": "dummy_hash", "size": 0}
+        },
+        "dsym_files": {},
+        "dsym_dirs": []
     }
+    root_escape_manifest["checksum"] = safe_build.compute_manifest_checksum(root_escape_manifest)
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(root_escape_manifest, f)
 
     res_c2 = subprocess.run(["make", "clean"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert res_c2.returncode == 0, f"make clean 失败: {res_c2.stderr}"
     assert os.path.isfile(valuable_path), "错误: valuable.txt 在系统根路径测试中被误删！"
-    print("  [PASS] 系统根路径与多级遍历逃逸清单成功被拦截，终止清理操作")
+    print("  [PASS] 系统根路径与多级遍历逃逸清单成功被统一核验拦截，终止清理操作")
 
-    # 3. 验证父目录符号链接穿透防御
+    # 4. 验证父目录符号链接穿透防御
     symlink_dir = os.path.join(build_dir, "link_to_parent")
     if os.path.exists(symlink_dir) or os.path.islink(symlink_dir):
         os.remove(symlink_dir)
@@ -376,10 +435,15 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
 
     symlink_escape_manifest = {
         "magic": "ECAT_FOE_BUILD_MANIFEST_V1",
+        "version": 1,
+        "created_by": "foe_build_system",
         "artifacts": {
-            "link_to_parent/valuable.txt": valuable_hash
-        }
+            "link_to_parent/valuable.txt": {"hash": valuable_hash, "size": len(valuable_content)}
+        },
+        "dsym_files": {},
+        "dsym_dirs": []
     }
+    symlink_escape_manifest["checksum"] = safe_build.compute_manifest_checksum(symlink_escape_manifest)
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(symlink_escape_manifest, f)
 
@@ -389,13 +453,17 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
     os.remove(symlink_dir)
     print("  [PASS] 父目录符号链接穿透成功被识别并安全拦截")
 
-    # 4. 验证被篡改的清单（指纹不匹配）安全防御
+    # 5. 验证被篡改的清单（指纹不匹配）安全防御
     # 先生成合法受控构建
     res_b = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert res_b.returncode == 0, f"make build 失败: {res_b.stderr}"
 
     target_bin = os.path.join(build_dir, "test_runner_efw")
     assert os.path.isfile(target_bin), "构建产物未生成"
+
+    # 验证构建生成的锁文件已被清理（无死锁残留）
+    lock_file = os.path.join(build_dir, ".foe_build.lock")
+    assert not os.path.exists(lock_file), "错误: 构建完成后排他锁文件未被清理！"
 
     # 人为篡改清单中的哈希（导致指纹 checksum 校验失败）
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -410,8 +478,7 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
     assert os.path.isfile(target_bin), "错误: 被篡改清单未能阻断清理，构建产物被删除！"
     print("  [PASS] 被篡改清单指纹核验生效：成功跳过清理，保护存量文件")
 
-    # 5. 验证包含用户文件的 dSYM 目录整棵保留机制
-    # 重新生成受控构建并在 dSYM 中写入 user.txt
+    # 6. 验证包含用户文件的 dSYM 目录整棵保留机制
     res_b2 = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert res_b2.returncode == 0, f"make build 失败: {res_b2.stderr}"
 
@@ -427,15 +494,40 @@ def test_manifest_path_traversal_and_symlink_defense(repo_dir: str):
     assert os.path.isdir(dsym_dir), "错误: 含有用户文件的 dSYM 目录被误删！"
     print("  [PASS] 含有用户存量数据的 dSYM 目录整棵完好保留，未发生误删")
 
-    # 6. 验证并发构建锁防竞态
-    lock_file = os.path.join(build_dir, ".foe_build.lock")
+    # 7. 验证父进程生命周期锁与并发构建竞态防御
+    # 模拟外部存活父进程持有的锁
+    fake_alive_lock = {
+        "ppid": 1,  # init / launchd 进程在 Unix/macOS 系统下始终存活，但并非当前构建的父进程
+        "pgrp": 1,
+        "pid": 1
+    }
     with open(lock_file, "w", encoding="utf-8") as f:
-        f.write(str(os.getpid()))  # 写入当前正在运行的存活进程 PID
+        json.dump(fake_alive_lock, f)
 
     res_b_race = subprocess.run(["make", "build", "CC=clang"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    assert res_b_race.returncode != 0, "错误: 在存活构建锁存在时未能拒绝并发构建！"
-    os.remove(lock_file)
-    print("  [PASS] 并发构建排他锁生效：成功拦截并发竞态构建冲突")
+    assert res_b_race.returncode != 0, "错误: 在存活外部父进程锁存在时未能拒绝并发构建！"
+    print("  [PASS] 父进程生命周期构建锁生效：成功拦截外部并发构建冲突")
+
+    # 模拟异常中断遗留锁（记录一个已死亡的孤儿进程 PID）
+    dead_pid = 999999
+    fake_dead_lock = {
+        "ppid": dead_pid,
+        "pgrp": dead_pid,
+        "pid": dead_pid
+    }
+    with open(lock_file, "w", encoding="utf-8") as f:
+        json.dump(fake_dead_lock, f)
+
+    # 执行构建：必须能够安全接管死亡遗留锁并成功完成构建
+    res_b_takeover = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert res_b_takeover.returncode == 0, f"错误: 未能安全接管死亡进程遗留锁: {res_b_takeover.stderr}"
+    assert not os.path.exists(lock_file), "构建完成后锁文件未清理"
+    print("  [PASS] 异常中断遗留锁安全接管生效：成功接管无主锁并完成构建")
+
+    # 清理测试现场
+    if os.path.isfile(valuable_path):
+        os.remove(valuable_path)
+    shutil.rmtree(build_dir, ignore_errors=True)
 
     # 清理测试现场
     if os.path.isfile(valuable_path):
