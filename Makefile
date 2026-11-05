@@ -21,7 +21,7 @@ SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all clean test test-asan test-soes vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -70,17 +70,21 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@(ulimit -s 8192 && ./$(TEST_EFW_BIN) >/dev/null)
 	@(ulimit -s 1024 && ./$(TEST_EFW_BIN) >/dev/null)
 	@echo "  [PASS] 普通 $$(basename $(TEST_EFW_BIN)) 在 8MB 与 1MB 栈下运行正常"
-	@if [ -f "$(SOES_DIR)/esc_foe.c" ]; then \
-		$(MAKE) $(TEST_SOES_HARNESS_BIN) CC="$(CC)" CFLAGS="$(CFLAGS)" SOES_DIR="$(SOES_DIR)" >/dev/null && \
-		./$(TEST_SOES_HARNESS_BIN) && \
-		(ulimit -s 8192 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null) && \
-		(ulimit -s 1024 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null) && \
-		echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"; \
-	else \
-		echo "  [SKIP] SOES 源码目录未检测到 esc_foe.c，跳过真实 SOES 宿主联调测试"; \
-	fi
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
+
+test-soes:
+	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ]; then \
+		echo "错误: SOES_DIR 缺失或未包含 esc_foe.c: '$(SOES_DIR)'"; \
+		echo "使用方法: make test-soes SOES_DIR=/path/to/soes"; \
+		exit 1; \
+	fi
+	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)"
+	@$(MAKE) $(TEST_SOES_HARNESS_BIN) CC="$(CC)" CFLAGS="$(CFLAGS)" SOES_DIR="$(SOES_DIR)"
+	@./$(TEST_SOES_HARNESS_BIN)
+	@(ulimit -s 8192 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null)
+	@(ulimit -s 1024 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null)
+	@echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"
 
 # ASan 内存与未定义行为核验目标
 # 历史构建与环境条件复核说明:
