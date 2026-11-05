@@ -325,6 +325,44 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     return 0;
 }
 
+int ecat_foe_core_validate_wrq(const ecat_foe_core_t *core,
+                               const char *filename,
+                               size_t filename_len,
+                               uint16_t *out_target_id,
+                               uint32_t *out_fw_version)
+{
+    if (core == NULL || filename == NULL) {
+        return ECAT_FOE_ERRCODE_NOTDEFINED;
+    }
+    if (!core->is_configured) {
+        return ECAT_FOE_ERRCODE_NOTDEFINED;
+    }
+    if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+
+    uint16_t parsed_tid = 0;
+    uint32_t parsed_ver = 0;
+    ecat_foe_core_err_t err = ECAT_FOE_CORE_OK;
+
+    if (!parse_filename_reverse(filename, filename_len, core->local_project_name, &parsed_tid, &parsed_ver, &err)) {
+        return ecat_foe_core_err_to_foe(err, true, false);
+    }
+
+    if (parsed_tid < 1 || parsed_tid > ECAT_FOE_TARGET_COUNT ||
+        !core->cfg.targets[parsed_tid - 1].enabled) {
+        return ECAT_FOE_ERRCODE_NOTFOUND;
+    }
+
+    if (out_target_id != NULL) {
+        *out_target_id = parsed_tid;
+    }
+    if (out_fw_version != NULL) {
+        *out_fw_version = parsed_ver;
+    }
+    return 0;
+}
+
 int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t filename_len)
 {
     if (core == NULL || filename == NULL) {
@@ -344,30 +382,19 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
     /* 每次新 WRQ 必须重置会话级运行字段，完整保留核心配置与驱动生命周期 */
     core_reset_session(core);
 
-    /* 长度边界检查 */
-    if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
-        core->last_error = ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME;
-        core->state = ECAT_FOE_STATE_ERROR;
-        return ECAT_FOE_ERRCODE_ILLEGAL;
-    }
-
-    /* 逆向切分解析文件名 (有界安全解析) */
     uint16_t parsed_tid = 0;
     uint32_t parsed_ver = 0;
-    ecat_foe_core_err_t err = ECAT_FOE_CORE_OK;
-
-    if (!parse_filename_reverse(filename, filename_len, core->local_project_name, &parsed_tid, &parsed_ver, &err)) {
-        core->last_error = err;
+    int vrc = ecat_foe_core_validate_wrq(core, filename, filename_len, &parsed_tid, &parsed_ver);
+    if (vrc != 0) {
+        if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
+            core->last_error = ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME;
+        } else {
+            ecat_foe_core_err_t err = ECAT_FOE_CORE_OK;
+            parse_filename_reverse(filename, filename_len, core->local_project_name, &parsed_tid, &parsed_ver, &err);
+            core->last_error = (err != ECAT_FOE_CORE_OK) ? err : ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
+        }
         core->state = ECAT_FOE_STATE_ERROR;
-        return ecat_foe_core_err_to_foe(err, true, false);
-    }
-
-    /* 校验目标在本地配置中是否使能 */
-    if (parsed_tid < 1 || parsed_tid > ECAT_FOE_TARGET_COUNT ||
-        !core->cfg.targets[parsed_tid - 1].enabled) {
-        core->last_error = ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
-        core->state = ECAT_FOE_STATE_ERROR;
-        return ECAT_FOE_ERRCODE_NOTFOUND;
+        return vrc;
     }
 
     core->req_target_id = parsed_tid;

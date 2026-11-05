@@ -43,6 +43,10 @@ typedef struct {
     ecat_foe_core_t        *core;
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
+    bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
+    char                    staged_filename[FOE_FN_MAX + 1]; /**< 暂存的 WRQ 文件名 */
+    uint16_t                staged_target_id;   /**< 暂存的目标 ID */
+    uint32_t                original_n_files;   /**< 从站初始配置的真实文件条目数 */
 } ecat_foe_soes_adapter_t;
 
 /**
@@ -104,6 +108,28 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
                                    foe_cfg_t *foe_cfg,
                                    const uint8_t *mbx_buf,
                                    size_t mbx_buf_len);
+
+/**
+ * @brief SOES 邮箱后置处理钩子 (Post-Process Hook)
+ *
+ * 在 PDI 主循环调用 ESC_foeprocess() 之后调用本函数。
+ * 1. 恢复 foe_cfg->n_files 为真实原始条目数；
+ * 2. 若存在暂存的 WRQ：
+ *    - 若从站发送邮箱回复了 FOE_OP_ACK 且 packetnumber == 0：
+ *      确认原生 SOES 已通过全部检查并正式接受 WRQ，正式调用 core_on_wrq 激活新会话；
+ *    - 若从站发送邮箱回复了 FOE_OP_ERR 或其他非 ACK 响应：
+ *      说明原生 SOES 拒绝了该 WRQ (密码错、非 BOOT、中途非法等)，安全丢弃暂存 WRQ，绝不打断核心旧会话。
+ *
+ * @param adapter      适配层上下文指针
+ * @param foe_cfg      SOES 的 foe_cfg 配置结构体指针
+ * @param mbx_out_buf  从站 SM3 发送邮箱缓冲区首地址 (通常为 &MBX[1 * ESC_MBXSIZE] 或实际输出邮箱)
+ * @param mbx_out_len  发送邮箱数据长度
+ * @return 0 成功
+ */
+int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
+                                    foe_cfg_t *foe_cfg,
+                                    const uint8_t *mbx_out_buf,
+                                    size_t mbx_out_len);
 
 #ifdef __cplusplus
 }

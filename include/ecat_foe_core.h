@@ -277,6 +277,22 @@ bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
 bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id);
 
 /**
+ * @brief 只读预检 FoE WRQ 写请求文件名及目标合法性 (不改变核心机状态或调用驱动)
+ *
+ * @param core           核心机上下文只读指针
+ * @param filename       主站请求写入的文件名缓冲区
+ * @param filename_len   文件名长度 (字节)
+ * @param out_target_id  输出解析出的目标 ID (可选，传 NULL 忽略)
+ * @param out_fw_version 输出解析出的固件版本号 (可选，传 NULL 忽略)
+ * @return 0 校验通过合法；非 0 返回标准 FoE 错误码 (0x8001 / 0x8004 等)
+ */
+int ecat_foe_core_validate_wrq(const ecat_foe_core_t *core,
+                               const char *filename,
+                               size_t filename_len,
+                               uint16_t *out_target_id,
+                               uint32_t *out_fw_version);
+
+/**
  * @brief 处理 FoE WRQ 写请求 (文件名解析与合法性快速判定)
  * 若上一次会话未闭环，主动调驱动 abort 并重置会话。
  * @param core         核心机上下文指针
