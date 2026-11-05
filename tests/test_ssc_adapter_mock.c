@@ -238,6 +238,89 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 6 项测试全部通过 (Mock 环境) <<<\n");
+    /* [TEST 7] 单包超出 max_packet_size 上限防御拦截 */
+    {
+        printf("[TEST 7] 验证单包超出 max_packet_size 上限拦截 (返回 0x8004 并中止)...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        build_valid_firmware(fw_buf, sizeof(fw_buf), payload, (uint32_t)sizeof(payload));
+
+        const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
+
+        /* 注入超限包: 长度 96 字节 > max_packet_size 64 字节 */
+        uint16_t err = ecat_foe_ssc_on_data(&adapter, fw_buf, 96U);
+        assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
+        assert(!adapter.session_active);
+        printf(" [PASS]\n");
+    }
+
+    /* [TEST 8] 短包定界成功落盘后，主站补发 0 长度包幂等确认 */
+    {
+        printf("[TEST 8] 验证短包定界落盘后补发 0 长度包幂等成功 (返回 0)...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        uint8_t short_payload[32];
+        memset(short_payload, 0x5A, sizeof(short_payload));
+        build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
+
+        const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
+
+        /* 分块下发: 64 满包 + 32 短包 (触发成功落盘) */
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 32U) == 0);
+        assert(s_mock_drv.valid_flag == true);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+
+        /* 主站补发 0 长度握手确认包，验证幂等通过返回 0 */
+        assert(ecat_foe_ssc_on_data(&adapter, NULL, 0U) == 0);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+        printf(" [PASS]\n");
+    }
+
+    /* [TEST 9] 升级成功后调用 on_abort 保护终态不被重置为 IDLE */
+    {
+        printf("[TEST 9] 验证升级成功终态在调用 on_abort 时保持 SUCCESS 标记...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        uint8_t short_payload[32];
+        memset(short_payload, 0x5A, sizeof(short_payload));
+        build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
+
+        const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 32U) == 0);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+
+        /* 外部调用 on_abort */
+        ecat_foe_ssc_on_abort(&adapter, 0);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+        printf(" [PASS]\n");
+    }
+
+    /* [TEST 10] 空指针且非零长度包前置防御拦截 */
+    {
+        printf("[TEST 10] 验证 pData 为空指针且非零长度包被安全拦截 (返回 0x8004)...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
+
+        uint16_t err = ecat_foe_ssc_on_data(&adapter, NULL, 32U);
+        assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
+        assert(!adapter.session_active);
+        printf(" [PASS]\n");
+    }
+
+    /* [TEST 11] WRQ 非法文件名错误码细分返回 0x8004 */
+    {
+        printf("[TEST 11] 验证 WRQ 非法文件名错误码细分映射为 0x8004 (ILLEGAL)...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        const char *bad_fn = "";
+        uint16_t err = ecat_foe_ssc_on_write(&adapter, bad_fn, 0U, 0);
+        assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
+        assert(!adapter.session_active);
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 11 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }
