@@ -12,6 +12,11 @@ SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 TEST_CORE_BIN = tests/test_runner_core
 
+# 阶段 C: 真实 SOES 源码宿主独立 Harness 测试 (按需检测外部 SOES 源码)
+TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
+TEST_SOES_HARNESS_BIN = tests/test_runner_soes_real
+SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I$(SOES_DIR)
+
 SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
@@ -28,6 +33,9 @@ $(TEST_EFW_BIN): $(SRC_EFW) $(TEST_EFW_SRC) include/ecat_foe_efw.h
 
 $(TEST_CORE_BIN): $(SRC_CORE) $(TEST_CORE_SRC) include/ecat_foe_core.h include/ecat_foe_target.h include/ecat_foe_soes.h tests/mock_driver.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_CORE) $(TEST_CORE_SRC)
+
+$(TEST_SOES_HARNESS_BIN): $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c tests/soes_bsp/cc.h tests/soes_bsp/options.h tests/soes_bsp/esc_coe.h $(SOES_DIR)/esc_foe.c
+	$(CC) $(SOES_CFLAGS) -o $@ $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c $(SOES_DIR)/esc_foe.c
 
 check-quotes:
 	@echo ">>> 执行 SOES 源码引文三方核验 (来源目录: $(SOES_DIR)) <<<"
@@ -62,6 +70,15 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@(ulimit -s 8192 && ./$(TEST_EFW_BIN) >/dev/null)
 	@(ulimit -s 1024 && ./$(TEST_EFW_BIN) >/dev/null)
 	@echo "  [PASS] 普通 $$(basename $(TEST_EFW_BIN)) 在 8MB 与 1MB 栈下运行正常"
+	@if [ -f "$(SOES_DIR)/esc_foe.c" ]; then \
+		$(MAKE) $(TEST_SOES_HARNESS_BIN) CC="$(CC)" CFLAGS="$(CFLAGS)" SOES_DIR="$(SOES_DIR)" >/dev/null && \
+		./$(TEST_SOES_HARNESS_BIN) && \
+		(ulimit -s 8192 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null) && \
+		(ulimit -s 1024 && ./$(TEST_SOES_HARNESS_BIN) >/dev/null) && \
+		echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"; \
+	else \
+		echo "  [SKIP] SOES 源码目录未检测到 esc_foe.c，跳过真实 SOES 宿主联调测试"; \
+	fi
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
 
