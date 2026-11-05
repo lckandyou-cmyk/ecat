@@ -27,7 +27,26 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
     adapter->original_n_files = 0;
+    adapter->target_to_file_map[0] = -1;
+    for (size_t i = 1; i <= ECAT_FOE_TARGET_COUNT; i++) {
+        adapter->target_to_file_map[i] = (int8_t)(i - 1);
+    }
     s_active_adapter = adapter;
+}
+
+int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, uint32_t file_idx)
+{
+    if (adapter == NULL) {
+        return -1;
+    }
+    if (target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT) {
+        return -1;
+    }
+    if (file_idx >= ECAT_FOE_SOES_MAX_FILES) {
+        return -1;
+    }
+    adapter->target_to_file_map[target_id] = (int8_t)file_idx;
+    return 0;
 }
 
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
@@ -54,15 +73,12 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
         return 1U; /* 非零表示失败 */
     }
 
-    /* 双重防御：若存在暂存的 WRQ 且尚未正式激活核心会话，在首次写入时激活 */
+    /* 安全防御：若存在尚未被后置钩子确认的暂存 WRQ，说明时序错乱或后置校验被绕过，拒绝写入并释放暂存 */
     if (adapter->has_staged_wrq) {
-        int rc_wrq = ecat_foe_core_on_wrq(adapter->core,
-                                          adapter->staged_filename,
-                                          strlen(adapter->staged_filename));
         adapter->has_staged_wrq = false;
-        if (rc_wrq != 0) {
-            return 1U;
-        }
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return 1U;
     }
 
     /* 0 长度包结束路径 */
@@ -220,7 +236,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     uint32_t ver = 0;
     int vrc = ecat_foe_core_validate_wrq(adapter->core, safe_name, (size_t)name_len, &tid, &ver);
     if (vrc != 0) {
-        /* 核心机校验失败 (项目不符、短前缀、非法格式、版本防回滚等)：
+        /* 核心机校验失败 (项目不符、短前缀、非法格式等)：
          * 关键安全防御：将 foe_cfg->n_files 置 0，切断原生 SOES 命中旧缓存或短前缀的路径！
          * 原生 SOES 将直接回复 FOE_ERR_NOTFOUND (0x8001)；
          * 绝不调用 core_on_wrq，已有活跃会话完好无损。
@@ -230,14 +246,15 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         return vrc;
     }
 
-    /* 严格目标范围校验：目标必须在文件表条目数与最大支持数范围内，坚决杜绝回退到 0 */
-    if (tid < 1 || tid > foe_cfg->n_files || tid > ECAT_FOE_SOES_MAX_FILES) {
+    /* 严格目标范围校验：通过目标映射表查找文件条目索引，支持稀疏与紧凑文件表 */
+    int8_t mapped_idx = (tid <= ECAT_FOE_TARGET_COUNT) ? adapter->target_to_file_map[tid] : -1;
+    if (mapped_idx < 0 || (uint32_t)mapped_idx >= foe_cfg->n_files || (uint32_t)mapped_idx >= ECAT_FOE_SOES_MAX_FILES) {
         foe_cfg->n_files = 0;
         adapter->has_staged_wrq = false;
         return -1;
     }
 
-    uint32_t file_idx = (uint32_t)(tid - 1);
+    uint32_t file_idx = (uint32_t)mapped_idx;
 
     /* 同步动态文件名至对应条目独立的专属缓冲区 */
     memcpy(s_synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
@@ -270,27 +287,40 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         return 0;
     }
 
-    /* 若传入了输出报文，核验 SOES 真实回复 */
+    /* 核验从站发送邮箱报文是否为有效 FoE ACK(0) */
+    bool is_valid_ack = false;
     if (mbx_out_buf != NULL && mbx_out_len >= (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
-        uint8_t opcode = mbx_out_buf[ECAT_MBX_HDR_SIZE];
+        uint16_t mbx_len = (uint16_t)(mbx_out_buf[0] | ((uint16_t)mbx_out_buf[1] << 8));
+        uint8_t mbx_type = (uint8_t)(mbx_out_buf[5] & 0x0FU);
+        uint8_t opcode   = mbx_out_buf[ECAT_MBX_HDR_SIZE];
         uint32_t packet_num = (uint32_t)(mbx_out_buf[ECAT_MBX_HDR_SIZE + 2] |
                                          ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 3] << 8) |
                                          ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 4] << 16) |
                                          ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
 
-        if (opcode == ECAT_FOE_OP_ACK && packet_num == 0) {
-            /* 原生 SOES 已正式接受 WRQ 并回复 ACK(0)：此时安全激活新会话 */
-            int rc = ecat_foe_core_on_wrq(adapter->core,
-                                          adapter->staged_filename,
-                                          strlen(adapter->staged_filename));
-            adapter->has_staged_wrq = false;
-            return rc;
-        } else {
-            /* 原生 SOES 拒绝了 WRQ (如 0x800A / 0x8008 / 0x8004 等)：丢弃暂存，绝不打扰旧会话 */
-            adapter->has_staged_wrq = false;
-            return 0;
+        if (mbx_type == ECAT_MBX_TYPE_FOE &&
+            mbx_len >= ECAT_FOE_HDR_SIZE &&
+            opcode == ECAT_FOE_OP_ACK &&
+            packet_num == 0) {
+            is_valid_ack = true;
         }
     }
 
-    return 0;
+    if (is_valid_ack) {
+        /* 原生 SOES 已正式接受 WRQ 并回复 ACK(0)：此时安全激活新会话 */
+        int rc = ecat_foe_core_on_wrq(adapter->core,
+                                      adapter->staged_filename,
+                                      strlen(adapter->staged_filename));
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return rc;
+    } else {
+        /* 原生 SOES 拒绝了 WRQ 或输出了非 ACK(0) 报文 (包括 ERR、NULL 缓冲区、短帧、非 FoE 等)：
+         * 一律释放暂存，绝不留存或打扰旧会话 */
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return 0;
+    }
 }

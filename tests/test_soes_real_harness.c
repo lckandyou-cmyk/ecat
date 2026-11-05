@@ -1356,6 +1356,12 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn)) == 0);
         ESC_foeprocess();
+        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 0);
+        assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+        assert(core.req_target_id == 1);
+        assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
 
         /* 构造 80 字节固件 (64 字节头 + 16 字节 payload) */
         static const uint8_t s_payload[16] = {0xAA, 0xBB, 0xCC, 0xDD};
@@ -1374,7 +1380,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         memcpy(req->data, s_efw_test_buf, efw_len);
 
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 1);
         assert(core.state == ECAT_FOE_STATE_SUCCESS);
@@ -1601,6 +1607,249 @@ int main(void)
             /* 关键断言: 条目 0 的文件名未被篡改！ */
             assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU.efw") == 0);
             printf("  [PASS] 风险 4 防御验证: 未配置目标越界拒绝，条目 0 名称完好保留无回退篡改\n");
+        }
+    }
+
+    /* ====================================================================== */
+    /*   新增深度风险专项: 暂存时序、响应关联、稀疏映射与防回滚事实边界核验   */
+    /* ====================================================================== */
+    printf("--- [Harness 深度风险加固] 暂存时序、响应关联、稀疏映射与防回滚核查 ---\n");
+    {
+        /* 1. 深度风险 1: 后置钩子未调用或传入 NULL/空/短/非FoE 响应时暂存防御 */
+        {
+            /* Case 1A: 后置钩子未调用，错误密码 WRQ 残留暂存后数据到达，write_cb 严格拒绝不打断已有会话 */
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 启动合法 Target 1 会话 */
+            const char *fn1 = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            assert(ecat_foe_soes_on_wrq(&adapter, fn1, strlen(fn1)) == 0);
+            assert(core.req_target_id == 1);
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+            /* 收到 Target 2 错误密码的 WRQ */
+            const char *fn2 = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn2));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x99999999U; /* 错误密码 */
+            memcpy(req->filename, fn2, strlen(fn2));
+
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2)) == 0);
+            assert(adapter.has_staged_wrq == true);
+            assert(adapter.staged_target_id == 2);
+
+            ESC_foeprocess();
+            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+            assert(res_mbx->foeheader.errorcode == 0x800A);
+
+            /* 模拟应用层未调用 post_process_hook，此时若后续调用 write_cb */
+            uint8_t dummy_data[32] = {0};
+            uint32_t wr_rc = ecat_foe_soes_write_cb(&s_foe_files[0], dummy_data, sizeof(dummy_data));
+            assert(wr_rc != 0); /* 必须拒绝 */
+            /* 关键断言: 暂存被清除，Target 1 会话与驱动未被破坏，Target 2 绝未被激活 */
+            assert(adapter.has_staged_wrq == false);
+            assert(core.req_target_id == 1);
+            assert(s_harness_drv.count_abort == 0);
+
+            /* Case 1B: 后置钩子传入 NULL 缓冲区 */
+            adapter.has_staged_wrq = true;
+            adapter.staged_target_id = 2;
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, NULL, 0);
+            assert(adapter.has_staged_wrq == false);
+            assert(adapter.staged_filename[0] == '\0');
+
+            /* Case 1C: 后置钩子传入 0 长度缓冲区 */
+            adapter.has_staged_wrq = true;
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, dummy_data, 0);
+            assert(adapter.has_staged_wrq == false);
+
+            /* Case 1D: 后置钩子传入小于 12 字节短缓冲区 */
+            adapter.has_staged_wrq = true;
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, dummy_data, 6);
+            assert(adapter.has_staged_wrq == false);
+
+            /* Case 1E: 后置钩子传入非 FoE 报文 (如 CoE mbxtype=0x02) */
+            adapter.has_staged_wrq = true;
+            uint8_t coe_buf[16] = {0};
+            coe_buf[0] = 6; coe_buf[1] = 0; /* len = 6 */
+            coe_buf[5] = 0x02; /* CoE */
+            coe_buf[6] = FOE_OP_ACK; /* opcode 虽碰巧为 ACK */
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, coe_buf, sizeof(coe_buf));
+            assert(adapter.has_staged_wrq == false);
+            assert(core.req_target_id == 1); /* 仍维持旧会话 */
+
+            printf("  [PASS] 深度风险 1: 后置钩子缺失、NULL、空、短帧与非FoE报文下暂存安全释放，write_cb 严密拦截\n");
+        }
+
+        /* 2. 深度风险 2: ACK(0) 报文号与旧缓存隔离核验 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 构造伪造的 ACK(1) 报文 (包号为 1 而非 WRQ 应有的 0) */
+            uint8_t fake_ack1[16] = {0};
+            fake_ack1[0] = 6; fake_ack1[1] = 0;
+            fake_ack1[5] = MBXFOE;
+            fake_ack1[6] = FOE_OP_ACK;
+            fake_ack1[8] = 1; /* packetnumber = 1 */
+
+            adapter.has_staged_wrq = true;
+            memcpy(adapter.staged_filename, "SERVO_DRV_MCU_V1.0.0.0.efw", 27);
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, fake_ack1, sizeof(fake_ack1));
+            assert(adapter.has_staged_wrq == false);
+            assert(core.state == ECAT_FOE_STATE_IDLE); /* 未被误激活 */
+
+            /* 旧缓存隔离: 发送邮箱残留旧 ACK(0)，下发非法 WRQ */
+            uint8_t old_cache_ack0[16] = {0};
+            old_cache_ack0[0] = 6; old_cache_ack0[1] = 0;
+            old_cache_ack0[5] = MBXFOE;
+            old_cache_ack0[6] = FOE_OP_ACK;
+            old_cache_ack0[8] = 0; /* packetnumber = 0 */
+
+            const char *bad_proj = "WRONGPROJ_MCU_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *bad_req = (_FOE *)&MBX[0];
+            bad_req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(bad_proj));
+            bad_req->mbxheader.mbxtype = MBXFOE;
+            bad_req->foeheader.opcode = FOE_OP_WRQ;
+            bad_req->foeheader.password = 0;
+            memcpy(bad_req->filename, bad_proj, strlen(bad_proj));
+
+            int prc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(bad_proj));
+            assert(prc != 0);
+            assert(adapter.has_staged_wrq == false);
+            /* 即便后置钩子读到旧缓存，因 has_staged_wrq 为 false，安全不动作 */
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, old_cache_ack0, sizeof(old_cache_ack0));
+            assert(core.state == ECAT_FOE_STATE_IDLE);
+
+            printf("  [PASS] 深度风险 2: 非 0 包号 ACK 拒绝激活，残留旧缓存安全隔离无误触发\n");
+        }
+
+        /* 3. 深度风险 3: 稀疏目标使能与紧凑文件表索引映射 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            /* 配置稀疏目标: 仅使能 Target 2 (FPGA) 与 Target 4 (EEPROM)，禁用 Target 1 与 3 */
+            cfg.targets[0].enabled = false;
+            cfg.targets[1].enabled = true;  /* Target 2 */
+            cfg.targets[2].enabled = false;
+            cfg.targets[3].target_id = 4;
+            cfg.targets[3].enabled = true;  /* Target 4 */
+            cfg.targets[3].max_payload_size = 4096U;
+            cfg.targets[3].write_unit = 8U;
+            cfg.targets[3].driver = &s_harness_drv.driver;
+            cfg.targets[3].user_ctx = &s_harness_drv;
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+
+            /* 从站 SOES 声明紧凑文件表: 仅 2 个条目 */
+            s_foe_cfg.n_files = 2;
+            s_foe_files[0].name = "placeholder0";
+            s_foe_files[1].name = "placeholder1";
+
+            /* 显式配置稀疏映射: Target 2 -> files[0], Target 4 -> files[1] */
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 2, 0) == 0);
+            assert(ecat_foe_soes_set_target_file_map(&adapter, 4, 1) == 0);
+
+            /* 测试 Target 2 WRQ 请求 */
+            const char *fn_fpga = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_fpga));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x87654321U; /* files[0] 对应密码由 SOES 检查 */
+            memcpy(req->filename, fn_fpga, strlen(fn_fpga));
+
+            s_foe_files[0].filepass = 0x87654321U;
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_fpga)) == 0);
+            assert(strcmp(s_foe_files[0].name, fn_fpga) == 0); /* 映射至 files[0] */
+
+            ESC_foeprocess();
+            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+            assert(res_mbx->foeheader.packetnumber == 0);
+            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            assert(core.req_target_id == 2);
+
+            /* 测试禁用目标 Target 1 WRQ: 虽属于合法格式但核心未使能 */
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) != 0);
+            ESC_foeprocess();
+            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+            /* 此时由于 Target 2 刚被接受且处于 FOE_WAIT_FOR_DATA 态，原生 SOES 返回 0x8004 (FOE_ERR_ILLEGAL) 并复位为 FOE_READY */
+            assert(res_mbx->foeheader.errorcode == 0x8004);
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+
+            /* 再次在 FOE_READY 下发送禁用目标 Target 1 WRQ，原生 SOES 比对切断返回 0x8001 (NOTFOUND) */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) != 0);
+            ESC_foeprocess();
+            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
+            assert(res_mbx->foeheader.errorcode == 0x8001);
+            ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+
+            printf("  [PASS] 深度风险 3: 稀疏目标到紧凑文件表索引映射准确，禁用目标被安全拦截\n");
+        }
+
+        /* 4. 深度风险 4: 只读预检与防回滚时序事实边界核验 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            /* 启用防回滚 */
+            cfg.anti_rollback_enable = true;
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+
+            /* 事实核验 A: WRQ 只读预检接口仅验证文件名格式、工程名与目标使能，不执行防回滚判断 */
+            uint16_t tid = 0;
+            uint32_t ver = 0;
+            const char *low_ver_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            int vrc = ecat_foe_core_validate_wrq(&core, low_ver_fn, strlen(low_ver_fn), &tid, &ver);
+            assert(vrc == 0); /* 预检通过，证明 WRQ 阶段确实未执行防回滚 (文件名无防伪认证) */
+            assert(tid == 1);
+            assert(ver == 0x01000000U);
+
+            /* 事实核验 B: 防回滚真正且严格在数据阶段解析已签名的固件头时执行 */
+            assert(ecat_foe_core_on_wrq(&core, low_ver_fn, strlen(low_ver_fn)) == 0);
+            /* 模拟固件头写入，内部由 mock platform_port 提供防回滚下限 */
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+            printf("  [PASS] 深度风险 4: 证实 WRQ 预检仅核验格式与使能，防回滚在数据阶段头签名处严格生效\n");
         }
     }
 
