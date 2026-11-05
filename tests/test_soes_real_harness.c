@@ -147,7 +147,7 @@ static void test_real_soes_wrq_callback_timing(void)
     _FOE *ack = (_FOE *)&MBX[1 * ESC_MBXSIZE];
     assert(ack->foeheader.opcode == FOE_OP_ACK);
     assert(ack->foeheader.packetnumber == 0);
-    printf("  [PASS] 真实 SOES 在收到 WRQ 阶段绝不调用 write_function，并回复 ACK(0)\n");
+    printf("  [PASS] 真实 SOES 在收到 WRQ 阶段不调用 write_function，并回复 ACK(0)\n");
 }
 
 /* Test 2: 文件名前缀匹配核查 */
