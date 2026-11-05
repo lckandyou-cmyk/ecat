@@ -676,7 +676,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     ret = ecat_foe_core_on_data(&core, efw, 64);
     TEST_ASSERT(ret != 0, "容量超 1 字节必须拒绝");
-    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "超容量驱动 init 绝不能调");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "超容量驱动 init 不应被调用");
 }
 
 /* 15. write_unit 8 和 256 错位残留写入、回读数据一致性与 readback CRC 不含 0xFF 填充 */
@@ -1197,10 +1197,10 @@ static void test_no_duplicate_abort_on_new_wrq(void)
     TEST_ASSERT(ret_end != 0, "少收结束必须失败");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "失败时已调用过一次 abort");
 
-    /* 此时主站重新发起 WRQ，新会话自愈绝不重复调用 abort */
+    /* 此时主站重新发起 WRQ，新会话自愈不重复调用 abort */
     int ret_new_wrq = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     TEST_ASSERT_EQ_INT(ret_new_wrq, 0, "新 WRQ 必须通过");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "新 WRQ 绝不应重复调用 abort (保持为 1)");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "新 WRQ 不重复调用 abort (保持为 1)");
 }
 
 /* 测项 22: 成功 finalize 后不再调用 abort (即便后续更新下限失败) */
@@ -1225,7 +1225,7 @@ static void test_no_abort_after_finalize_success(void)
     TEST_ASSERT(ret != 0, "更新下限失败返回错误");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE, "报 ANTI_ROLLBACK_UPDATE");
 
-    /* 固件已经成功 finalize，有效标记保持，绝不可调 abort */
+    /* 固件已经成功 finalize，有效标记保持，不可调 abort */
     TEST_ASSERT(mcu.valid_flag, "固件必须保持有效状态");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "finalize 已执行成功");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "成功 finalize 后不得调用 abort");
@@ -1362,7 +1362,7 @@ static void test_erase_to_insufficient_erased_end_fails(void)
     TEST_ASSERT(ret != 0, "路径 2: 整块写入时 erased_end < need_end 必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "报 DRV_ERASE 错误");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 2 必须调用 abort 释放资源");
-    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 2 绝不得向物理介质写入数据");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 2 不得向物理介质写入数据");
 
     /* 路径 1: core_process_payload_bytes 中凑满 residual_buf == write_unit 时触发 erase_to 擦除不足 */
     mock_driver_init(&mcu);
@@ -1398,7 +1398,7 @@ static void test_erase_to_insufficient_erased_end_fails(void)
     TEST_ASSERT(ret != 0, "路径 3: 尾部补齐时 erased_end < need_end 必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "路径 3 报 DRV_ERASE 错误");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 3 必须调用 abort 释放资源");
-    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 3 绝不得向物理介质写入数据");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "路径 3 不得向物理介质写入数据");
 }
 
 /* 测项 27: 尾部补齐容量边界防御 (aligned_len 刚好等于分区上限及补齐超限防护) */
@@ -1442,7 +1442,7 @@ static void test_padding_capacity_boundary(void)
     TEST_ASSERT(ret != 0, "补齐超出分区容量限制必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED, "报 PAYLOAD_LIMIT_EXCEEDED");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "补齐超限必须调用 abort 释放资源");
-    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "补齐超限绝不得写入介质");
+    TEST_ASSERT_EQ_INT(mcu.count_write, 0, "补齐超限不得写入介质");
 }
 
 /* 28. 失败后新 WRQ 自愈成功与生命周期解耦回归测试 */
@@ -1583,12 +1583,12 @@ static void test_core_deinit_lifecycle(void)
     ecat_foe_core_t zero_core = {0};
     ret = ecat_foe_core_deinit(&zero_core);
     TEST_ASSERT_EQ_INT(ret, 0, "deinit 显式零初始化核心机安全返回 0");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "零初始化核心机绝不得触发 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "零初始化核心机不触发 abort");
 
     memset(&core, 0, sizeof(core));
     ret = ecat_foe_core_deinit(&core);
     TEST_ASSERT_EQ_INT(ret, 0, "deinit memset 零初始化核心机返回 0");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "memset 零初始化核心机绝不得触发 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "memset 零初始化核心机不触发 abort");
 
     /* 3. 已配置但处于空闲态 (IDLE，无活跃会话) 的核心机 deinit */
     setup_default_core(&core, &mcu, NULL, NULL);
@@ -1616,10 +1616,10 @@ static void test_core_deinit_lifecycle(void)
     TEST_ASSERT(!core.is_configured, "deinit 后核心标记不可用");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "活跃会话 deinit 必须且仅调用 1 次驱动 abort");
 
-    /* 5. 幂等性测试: 连续再次调用 deinit 绝不重复触发 abort */
+    /* 5. 幂等性测试: 连续再次调用 deinit 不重复触发 abort */
     ret = ecat_foe_core_deinit(&core);
     TEST_ASSERT_EQ_INT(ret, 0, "重复 deinit 安全返回 0");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "重复 deinit 绝不发生重复 abort 泄漏");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "重复 deinit 不发生重复 abort 泄漏");
 
     /* 6. 成功 finalize 提交后的会话 deinit: 严禁调用 abort 破坏已提交的有效固件 */
     mock_driver_reset(&mcu);
@@ -2318,7 +2318,7 @@ static void test_reproduce_cross_target_incomplete_upgrade_leak(void)
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A (MCU) 的未完成状态被严格保留");
     TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "因目标 A 残缺，核心全局依然处于未闭环状态");
 
-    /* 测试 post_state_hook: 此时坚决拦截 BOOT->INIT，绝不误放行 */
+    /* 测试 post_state_hook: 此时坚决拦截 BOOT->INIT，不误放行 */
     as = ECAT_TRANSITION_BOOT_TO_INIT;
     an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
@@ -2560,7 +2560,7 @@ static void test_cross_target_init_fail_vs_invalidate_fail(void)
     }
 }
 
-/* 6. finalize 后防重复 abort 强化测试: 成功 finalize 后，后续 abort/自愈/deinit 绝不调用 abort */
+/* 6. finalize 后防重复 abort 强化测试: 成功 finalize 后，后续 abort/自愈/deinit 不调用 abort */
 static void test_cross_target_finalize_prevents_duplicate_abort(void)
 {
     static mock_driver_t mcu;
@@ -2583,15 +2583,15 @@ static void test_cross_target_finalize_prevents_duplicate_abort(void)
 
     /* 动作 1: 主动调用 on_abort */
     ecat_foe_core_on_abort(&core);
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调 on_abort 绝不触发驱动 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调 on_abort 不触发驱动 abort");
 
     /* 动作 2: 新会话 WRQ 自愈触发 */
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后新会话自愈绝不触发驱动 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后新会话自愈不触发驱动 abort");
 
     /* 动作 3: 调用 deinit */
     ecat_foe_core_deinit(&core);
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调用 deinit 绝不触发驱动 abort");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "finalize 后调用 deinit 不触发驱动 abort");
 }
 
 /* 专项测试: 公开状态查询函数在 NULL 与零初始化未配置前提下的防御性行为 */

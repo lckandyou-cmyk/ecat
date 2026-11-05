@@ -256,7 +256,7 @@ sequenceDiagram
     BL->>BL: 验 Magic, Version, Header Len, Header CRC, Flags, IDs, HW Ver, Target, 配额
     alt 校验不通过 (任意一项不符)
         BL-->>Stack: 返回非零 (SOES 数据阶段收敛回复 0x800B)
-        Stack-->>Master: FoE ERR (绝不擦除，不触碰物理存储)
+        Stack-->>Master: FoE ERR (不擦除，不触碰物理存储)
     else 全部校验通过
         BL->>Drv: drv->init() (解锁与初始化存储介质)
         BL->>Drv: drv->invalidate() (置无效标记，防止掉电重启误判)
@@ -353,7 +353,7 @@ sequenceDiagram
    - **暖切换重启规则【建议，待验证】**：Bootloader 捕获到切回 INIT 状态后，建议在 Retention RAM 中写入专用的“固件升级成功就绪”魔数（如 `0x55504752U`，即 ASCII `'UPGR'`，及其取反码 `0xAAAFB8ADU`），调用 `NVIC_SystemReset()` 软复位系统进入 APP，**全程不拉低 ESC 复位 GPIO**。
    - **理由与冷启动代价**：若执行冷启动硬件复位 ESC，ESC 内部 PHY 将被迫掉电重启导致以太网链路掉线（Link Down），TwinCAT 主站会立刻报通信中断或从站拓扑丢失；而走暖切换可保持 ESC 供电与链路全程 Link Up，主站能无缝检测到从站重新在 INIT 态就绪，避免网络抖动。
 8. **【已确定】新会话清理规则与栈层中止通知缺口自愈**：
-   - **通知缺口成因**：查阅 SOES 源码 `esc_foe.c` 中 `FOE_abort()` 函数实现，处理错误时直接重置协议栈并向主站回 ERR 包，绝不调用任何应用层写入钩子。因此从站核心协议机无法收到栈层主动下发的 `on_abort` 事件；
+   - **通知缺口成因**：查阅 SOES 源码 `esc_foe.c` 中 `FOE_abort()` 函数实现，处理错误时直接重置协议栈并向主站回 ERR 包，不调用任何应用层写入钩子。因此从站核心协议机无法收到栈层主动下发的 `on_abort` 事件；
    - **安全底线保证**：虽然核心机状态机产生残留，但由于首包解析通过后已提前调用了 `drv->invalidate()`，固件区已处于无效标记保护中，即使异常中断也不会变砖；
    - **核心自愈动作**：核心协议机在每次 `ecat_foe_core_on_wrq` 入口处强制执行清理检查：若发现上一次会话仍处于未闭环残留状态（如写状态），立即主动调用当前驱动的 `drv->abort()` 释放资源，并将核心上下文完整重置；同时，若适配层或主循环能够感知到从站退出 BOOT 状态，亦应主动调用 `ecat_foe_core_on_abort()` 提前释放驱动。
 
@@ -363,7 +363,7 @@ sequenceDiagram
 
 | 错误码常量 (`soes/esc.h`) | 数值 | 错误定义类别 | 本库理论触发场景与失败原因 | SOES 适配层实际回给主站 |
 | :--- | :--- | :--- | :--- | :--- |
-| `FOE_ERR_NOTFOUND` | `0x8001` | 文件不存在/未找到 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | `0x8001` (WRQ 阶段由 SOES 正常透传) |
+| `FOE_ERR_NOTFOUND` | `0x8001` | 文件不存在/未找到 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | 见下方限制说明：原生 SOES 在调用 `on_wrq` 前已向主站发送 ACK(0)，WRQ 阶段拒绝无法直接下发，只会在首块数据阶段转为 `0x800B`【宿主 harness 观察】 |
 | `FOE_ERR_ACCESS` | `0x8002` | 访问被拒绝/权限不足 | 收到 FoE RRQ 读请求（本库不支持读操作）；首包文件头与本地 Hardware ID 不符；本地硬件版本不在 `[hw_ver_min, hw_ver_max]` 区间；文件名与文件头字段交叉比对不一致。 | 数据阶段收敛为 `0x800B` |
 | `FOE_ERR_DISKFULL` | `0x8003` | 介质已满/容量溢出 | `payload_length` 超过本地静态配置的分区容量上限 (`ECAT_FOE_xxx_MAX_SIZE`)；或回调块累加超过 64 位期望总长（多收溢出即时熔断）。 | `0x800B` (数据阶段收敛) |
 | `FOE_ERR_ILLEGAL` | `0x8004` | 非法报文/参数格式错误 | 文件名格式不对（无法逆向切分、非 .efw 后缀或版本格式错误）；魔数错误 (`magic != 0x57464345`)；格式版本不支持 (`format_version != 1`)；头部长度非法（<64、>本地上限或非 4 倍数）；保留标志位非零 (`flags != 0`)；`reserved` 区非全 0；版本倒置 (`hw_ver_min > hw_ver_max` 或 `min_allow_version > fw_version`)；防回滚开启时 `port_get_version_floor` 失败或触发版本倒退拦截。 | 数据阶段收敛为 `0x800B` |
@@ -378,6 +378,9 @@ sequenceDiagram
 
 > **SOES 协议栈限制依据【已核实】**：
 > 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
+>
+> **SOES WRQ 阶段拒绝不可见限制【宿主 harness 观察】**：
+> 查阅 SOES 源码 `esc_foe.c` 并经宿主测试 harness 验证，SOES 在 `FOE_write()` 收到 WRQ 报文时，仅比对 `foe_cfg` 文件名列表，匹配成功即直接回复 ACK(0)，期间不调用任何用户回调或 `on_wrq`。因此若文件名校验在核心机应用层判定不通过，由于 ACK(0) 已提前发出，WRQ 阶段的拒绝在原生 SOES 下发不出去，只会在首块数据到达触发 `write_function` 时返回非零，由 SOES 发送 `0x800B (FOE_ERR_PROGERROR)` 中止。
 >
 > **0 长度包分支返回值忽略限制与拦截策略【已确定】**：
 > 查阅 SOES 源码 `esc_foe.c` 0 长度包分支，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），从站无法通过 FoE 回调向主站回复 `0x800B`。v1 架构确定接受此限制，依靠 `invalidate()` 保证不引导破损固件，并通过打包端末尾填充避开空包，以及在适配层通过 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`（详见第 1.2 节）。
@@ -433,7 +436,7 @@ sequenceDiagram
 #define ECAT_FOE_SII_WRITE_UNIT             2U
 #define ECAT_FOE_USER_EEPROM_WRITE_UNIT     4U
 
-/* 严格物理分区表 (只认本地硬编码，绝不信任文件携带地址。以下均为【示例，非规范数值】) */
+/* 严格物理分区表 (只认本地硬编码，不信任文件携带地址。以下均为【示例，非规范数值】) */
 #define ECAT_FOE_APP_BASE_ADDR              0x08020000U  /* 示例基地址 */
 #define ECAT_FOE_APP_MAX_SIZE               (384U * 1024U)
 
@@ -506,9 +509,9 @@ typedef struct ecat_foe_target_driver {
 
 #### 3. 各接口具体职责与生命周期清理契约【已确定】
 * **驱动生命周期与清理契约 (核心严格保证)**：
-  1. **`init` 失败清理责任**：若 `init()` 自身执行失败并返回非零，表示驱动初始化未完成，由驱动内部自行负责清理未完成的半成品资源；核心状态机绝不调用 `abort()`。
+  1. **`init` 失败清理责任**：若 `init()` 自身执行失败并返回非零，表示驱动初始化未完成，由驱动内部自行负责清理未完成的半成品资源；核心状态机不调用 `abort()`。
   2. **`init` 成功后异常清理责任**：一旦 `init()` 成功返回 0，驱动生命周期会话正式激活。此后发生的任何后续失败（包括紧接着的 `invalidate` 失败、按需擦除失败、写入失败、流 CRC 不匹配、物理回读失败/CRC 不符、`finalize` 失败或协议栈/主站中途中止），核心机均严格保证调用且仅调用一次 `abort()` 以恢复硬件安全加锁状态。
-  3. **`finalize` 成功后互斥保护**：`finalize()` 执行成功后固件置为有效，核心状态机永久锁定会话，此后无论发生任何后续动作或收到新请求，绝不会再调用 `abort()`。
+  3. **`finalize` 成功后互斥保护**：`finalize()` 执行成功后固件置为有效，核心状态机在当前会话内锁定不再调用 `abort()`；若后续收到新 WRQ 请求，可开启新会话重置状态机，而非整机锁定。
 
 1. `init`：
    - 触发时机：头部装配完成且“擦除前必须全过”检查全部通过后调用；
@@ -523,7 +526,7 @@ typedef struct ecat_foe_target_driver {
 4. `write`：
    - 触发时机：分包流式传输时在回调内同步调用；
    - 写入对齐规范：核心机将送达的对齐块数据直接调用 `write` 写入底层介质；
-   - 末尾对齐填充规则：传输结束时若有效数据不是 `write_unit` 的整数倍，核心机在末尾填充 `0xFF` 补齐至整对齐块下发；**计算 Payload CRC32 时严格仅覆盖原始有效字节，填充的 0xFF 绝不计入 CRC32 计算范围**。
+   - 末尾对齐填充规则：传输结束时若有效数据不是 `write_unit` 的整数倍，核心机在末尾填充 `0xFF` 补齐至整对齐块下发；**计算 Payload CRC32 时严格仅覆盖原始有效字节，填充的 0xFF 不计入 CRC32 计算范围**。
 5. `read`（物理介质底层读取与核心分步 CRC 计算）：
    - 触发时机：流 CRC 比对成功后，在最后一次回调内部同步循环调用；
    - 职责：驱动仅负责将物理存储介质中指定偏移和长度的数据读入缓冲 `buf`。由核心机分步调用 `read` 并增量计算 IEEE 802.3 CRC32，**校验范围严格仅覆盖 `payload_length` 个有效字节**；
@@ -531,7 +534,7 @@ typedef struct ecat_foe_target_driver {
 6. `finalize`：
    - 触发时机：流 CRC 与物理回读 CRC32 均比对成功后同步调用；
    - 职责：向非易失存储写入固件有效标记、更新向量跳转表、或切换 A/B 活动分区元数据。函数无参数，仅在完全成功时调用。返回 0 成功，非 0 失败；
-   - 互斥契约：执行成功后固件永久生效，核心机锁定状态，绝不调用 `abort()`。
+   - 互斥契约：finalize 成功后，同一会话内不再调用 `abort()`；新的 WRQ 开始新会话（核心会重置会话字段）。
 7. `abort`：
    - 触发时机：`init()` 成功后发生的任何元数据核验失败、驱动任一接口返回错误、FoE 传输超时、主站中途断开连接时调用；
    - 职责：锁定存储控制器、释放外设总线、清除临时写入数据，确保目标物理状态处于明确的“无效状态”。与 `finalize()` 严格互斥，且一次会话至多执行 1 次。

@@ -14,7 +14,7 @@ PDF 引文核验工具的独立全场景测试夹具套件。
    - Case 5: 文档行哈希正确但章节号不一致拦截 (A1 反例) (Exit 1)
    - Case 6: 文档行哈希正确但 PDF 页码不一致拦截 (A1 反例) (Exit 1)
    - Case 7: 错误 PDF 页码拦截 (Exit 1)
-   - Case 8: 错误章节编号拦截 (片段存在但章节所属错误，绝不放行) (Exit 1)
+   - Case 8: 错误章节编号拦截 (片段存在但章节所属错误，拦截不放行) (Exit 1)
    - Case 9: 错误章节标题拦截 (Exit 1)
    - Case 10: 截断章节标题拦截 (严格全等比对，严禁截断标题放行) (Exit 1)
    - Case 11: 错误片段字符篡改拦截 (Exit 1)
@@ -281,7 +281,7 @@ def test_pdf_fixture_suite():
         if assert_case("Case 7: 错误 PDF 页码拦截", 1, "片段未在第 2 页中找到", m, repo_root=root):
             passed += 1
 
-    # Case 8: 错误章节编号拦截 (片段存在但章节所属错误，绝不放行) (Exit 1)
+    # Case 8: 错误章节编号拦截 (片段存在但章节所属错误，拦截不放行) (Exit 1)
     total += 1
     with tempfile.TemporaryDirectory() as td:
         m, p, root, _, _, _ = setup_synthetic_fixture(td)

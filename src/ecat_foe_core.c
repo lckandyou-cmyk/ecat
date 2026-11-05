@@ -633,7 +633,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         if ((uint64_t)core->header_total_len + (uint64_t)p_len > expected_total) {
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
             core->state = ECAT_FOE_STATE_ERROR;
-            return -1; /* 拒绝且绝不调用 invalidate */
+            return -1; /* 拒绝且不调用 invalidate */
         }
 
         core->active_drv = tdesc->driver;
@@ -813,7 +813,7 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         }
     }
 
-    /* 成功提交后永久锁定，绝不可再调用 abort */
+    /* finalize 成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话（核心会重置会话字段） */
     /* 仅清除当前目标自身的未完成标志，其余目标的未完成状态严格保留 */
     if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
         core->target_incomplete_mask &= ~(1U << (core->req_target_id - 1));

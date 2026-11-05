@@ -127,7 +127,7 @@ typedef struct {
      *
      * 【内存与生命周期契约】：
      * - 调用者传入的 project_name 必须是以 '\0' 结尾的合法字符串，长度在 [1, ECAT_FOE_MAX_FILENAME_LEN] (即 1..31 字节)；
-     * - 超长 (超过 31 字节) 坚决报错拒绝初始化 (返回 -1)，绝不进行任何静默截断；
+     * - 超长 (超过 31 字节) 坚决报错拒绝初始化 (返回 -1)，不进行任何静默截断；
      * - ecat_foe_core_init 会在校验通过后将其完整深拷贝至 core->local_project_name 静态数组中；
      * - 函数返回后，调用者传入的字符串内存可立即释放或被覆写（如栈局部变量），核心内部唯一信赖 local_project_name。
      */
@@ -225,7 +225,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
  *   1. NULL (安全无操作，直接返回 0)；
  *   2. 经 ecat_foe_core_init() 成功初始化的有效 core 实例；或已显式执行零初始化（如 ecat_foe_core_t core = {0} 或 memset(&core, 0, sizeof(core))）的实例。
  * - 【严禁传入未显式初始化的脏栈内存】：
- *   本函数绝不可被声称亦不支持直接在未初始化的脏栈内存上调用。在 C 语言规范及 UBSan 检查下，
+ *   本函数不支持直接在未初始化的脏栈内存上调用。在 C 语言规范及 UBSan 检查下，
  *   读取包含未初始化垃圾数据的布尔字段（如 !core->is_configured）属于未定义行为 (UB)。
  *
  * 【资源释放与状态机重置】：

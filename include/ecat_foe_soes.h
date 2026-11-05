@@ -71,7 +71,7 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
 
 /**
  * @brief SOES 写入回调函数 (绑定至 foe_file_cfg_t 的 write_function)
- * 以 length < buffer_size 作为结束判定依据 (包含 0 长度包)。
+ * 在 SOES 上，数据包与短包的结束路径返回非零会触发 FOE_ERR_PROGERROR；零长度结束包路径忽略返回值，失败不会传给主站。
  * @return 0 成功；非 0 失败 (触发 SOES 下发 FOE_ERR_PROGERROR)
  */
 uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t length);

@@ -95,7 +95,8 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
      * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
      * 2. 若在此处改写 *an 为 BOOT|Error 并调用注入的 al_error_fn(0x0014) (在真实 SOES 中对应 ESC_ALerror)，
      *    可向 0x134 写入 AL Status Code 并阻断从站进入 INIT 正常通信态；
-     * 3. 局限性说明：当前为测试桩仿真验证，真实 SOES 源码尚未集成编译，真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
+     * 3. 局限性说明：真实 SOES esc_foe.c 已在独立宿主 Harness 中完成编译与联动验证，但生产环境目前仍未正式接入，
+     *    未在真实硬件上集成编译，未进行真实物理总线与主站动态联调；真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
      *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
      */
     bool should_block_init = false;

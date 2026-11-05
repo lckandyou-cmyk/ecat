@@ -28,7 +28,7 @@ tests/test_verify_quotes.py
 21. 同名 basename 但不同目录路径混淆反例拦截 (-> 返回 1)
 
 【安全保证】：
-本测试仅在临时目录中读写夹具，绝不修改用户真实的 /tmp/soes_src 目录与源码。
+本测试仅在临时目录中读写夹具，不修改用户真实的 /tmp/soes_src 目录与源码。
 """
 
 import os

@@ -3,7 +3,7 @@
     "source_directory": "/tmp/soes_src/soes",
     "is_git_repository": false,
     "upstream_commit": "UNKNOWN",
-    "origin_statement": "本地散文件目录 /tmp/soes_src/soes/，未包含 .git 版本元数据，上游准确 Commit ID 未知 (UNKNOWN)。散文件哈希仅代表当前本地环境真实文件的比对基线，绝不代表上游官方 Release 认证。"
+    "origin_statement": "本地散文件目录 /tmp/soes_src/soes/，未包含 .git 版本元数据，上游准确 Commit ID 未知 (UNKNOWN)。散文件哈希仅代表当前本地环境真实文件的比对基线，不代表上游官方 Release 认证。"
   },
   "file_checksums": {
     "esc.c": "1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c",

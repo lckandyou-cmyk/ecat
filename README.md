@@ -40,14 +40,25 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现初步的接口转换打样与单测桩（验证短包识别、0 长度包结束判定，以及双参数 `post_state_change_hook` 拦截与 AL 状态错误码 `0x0014` 记录仿真）。**真实 SOES 源码尚未集成编译，现场硬件与真实主站动态联调尚未开展【未核实/待开发与真机动态验证】**。
-- **原生协议栈限制与技术约束 (静态推断与动态验证界定)**：
-  - *【静态推断】文件名匹配机制与空名/短前缀风险*：原生 SOES 在 `esc_foe.c` 的 WRQ 文件名匹配逻辑中采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定**由接收长度 `num_chars` 决定前缀匹配，而非严格全字匹配**。基于静态代码分析得出两项潜在风险（【待动态实测确认】）：
-    1. **空文件名风险**：若主站发来空名（`num_chars == 0`），`strncmp(..., 0)` 恒等于 0，将无条件误命中首条配置（`files[0]` 对应 MCU 固件）；
-    2. **短前缀误绑定**：若主站发送公共前缀，会命中首个具有该前缀的表项，引发跨目标误绑定。
-  - *【静态推断】0 长度结束包与 AL 错误*：原生 SOES 在 `esc_foe.c` 的 0 长度结束包分支中忽略了 `FOE_fclose()` 的返回值。适配层目前在单测桩中验证了通过 `post_state_change_hook`（`*as == 0x13U`）改写目标状态为 `0x13 (BOOT|Error)` 并记录错误码 `0x0014`，**但在真实物理环境下，进入 post hook 时物理邮箱已通过 `ESC_stopmbx()` 停止，能否防止错误固件被引导仍取决于 Bootloader 前置校验和硬件原子性，不应宣称真机已验证拦截**。
-  - *【静态推断】关闭 RRQ 的真实编译方式（不可定义为 0）*：原生 SOES 使用 `#ifdef FOE_READ_SUPPORTED` 控制代码编译。**不可通过定义为 0（如 `-DFOE_READ_SUPPORTED=0`）来禁用**！因 C 预处理器 `#ifdef` 仅判断宏是否存在，定义为 0 仍会被判定为真而编入 RRQ 逻辑并引发缓冲区越界读 (Buffer Over-read) 风险。**必须保持该宏完全未定义或显式 `#undef`**，方可走 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现接口转换打样与单测桩。**已有宿主测试 harness 编译链接真实 SOES `esc_foe.c` 并观察到短前缀匹配、0 长度包忽略写回调错误等真实协议栈行为（均为宿主观察，非物理硬件测试）**。在 harness 端到端测试（Test 5）中，测试代码手动调用了 `ecat_foe_soes_on_wrq`，但在原生 SOES 生产现实中并没有调用该 WRQ 钩子的调用方【仍属于宿主环境仿真，现场硬件与真实主站动态联调尚未开展】。
+- **原生协议栈限制与技术约束 (宿主 harness 观察与工程约束)**：
+  - *【宿主观察】文件名匹配机制与空名/短前缀风险*：原生 SOES 在 `esc_foe.c` 的 WRQ 文件名匹配逻辑中采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定由接收长度 `num_chars` 决定前缀匹配，而非全名比对。宿主 harness 实测证实短前缀会误命中首个具有该前缀的表项，且空文件名（`num_chars == 0`）无条件命中 `files[0]`；
+  - *【宿主观察】0 长度结束包与写回调错误忽略*：原生 SOES 在 `esc_foe.c` 的 0 长度结束包分支中直接忽略了 `FOE_fclose()` 的返回值并发送成功 ACK。宿主 harness 实测证实短包分支会严格触发 `FOE_abort(0x800B)`，但 0 长度结束包写失败无法通知主站；
+  - *【语法核实】关闭 RRQ 的真实编译方式（不可定义为 0）*：原生 SOES 使用 `#ifdef FOE_READ_SUPPORTED` 控制代码编译。**不可通过定义为 0（如 `-DFOE_READ_SUPPORTED=0`）来禁用**！因 C 预处理器 `#ifdef` 仅判断宏是否存在，定义为 0 仍会被判定为真而编入 RRQ 逻辑并引发缓冲区越界读 (Buffer Over-read) 风险。**必须保持该宏完全未定义或显式 `#undef`**，方可走 `default:` 分支直接返回 `0x8000 (FOE_ERR_NOTDEFINED)`。
 - **源码与规范引用清单**：关于 SOES、LAN9252 手册及 ETG 规范的全局行号引用与核验状态，详见 [soes-integration-options.md 第 6 节](docs/architecture/soes-integration-options.md#6-全局行号与外部规范引用盘点表-reference-inventory)。
+
+### 验证矩阵 (Verification Matrix)
+
+| 规范声明 / 功能特性 | 证据类型 | 验证位置 / 证据文件 | 状态与边界说明 |
+| :--- | :--- | :--- | :--- |
+| **核心升级状态机流式校验** | 宿主单元测试 (RAM 驱动) | `tests/test_core.c` | 通过，宿主内存仿真，MCU 物理足迹未测 |
+| **.efw 二进制头解构与安全校验** | 宿主单元测试 | `tests/test_efw.c` | 通过，覆盖大小端、对齐与异常截断 |
+| **内存安全与受限栈 (1MB/8MB)** | ASan / 宿主受限栈测试 | `tests/test_runner_core` | 通过，无泄漏、无越界，宿主栈深度达标 |
+| **SOES WRQ 不调数据写回调** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 1) | 宿主观察，证实 WRQ 阶段不触发 `write_function` |
+| **SOES 短前缀匹配特性** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 2) | 宿主观察，证实短前缀匹配，非硬件总线测试 |
+| **SOES 零长度包忽略写回调错误** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 3) | 宿主观察，证实 0 长度包忽略 `FOE_fclose` 失败回复 ACK |
+| **SOES 驱动已注册回调端到端** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 5) | 宿主观察，Test 5 手动调用 `on_wrq`，生产中无调用方 |
+| **SOES 真实从站硬件与主站联调** | 物理硬件 / 现场总线 | - | 【未核实/待开发与真机动态验证】 |
 
 ### 2. Beckhoff Slave Stack Code (SSC) 接入
 - **状态**：【未核实 / 待开发】。目前适配层仅规划了接口边界，尚未包含面向真实 SSC 协议栈的回调实现。
