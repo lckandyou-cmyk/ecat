@@ -1,0 +1,84 @@
+============================================================
+ EtherCAT FoE Core Host Reference Demo (8 Scenarios)
+============================================================
+
+=== Scenario 1: Normal Success ===
+[CORE] on_wrq: SERVO_DRV_MCU_V1.0.0.0.efw -> OK
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=16) -> erased=4096
+[DRV] write(offset=0, len=16) -> 0
+[DRV] read(offset=0, len=16) -> 0
+[DRV] finalize(target=1) -> 0
+[CORE] on_end -> OK
+[CORE] Final State: SUCCESS, Last Error: NONE
+
+=== Scenario 2: Header CRC Mismatch ===
+[CORE] on_data (corrupt header CRC) -> REJECT
+[CORE] Final State: ERROR, Last Error: HDR_CRC
+
+=== Scenario 3: Project ID Mismatch ===
+[CORE] on_wrq: OTHER_PRJ_MCU_V1.0.0.0.efw -> REJECT
+[CORE] Final State: ERROR, Last Error: WRQ_PROJECT_MISMATCH
+
+=== Scenario 4: Stream Under-Receive ===
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=8) -> erased=4096
+[DRV] write(offset=0, len=8) -> 0
+[DRV] abort
+[CORE] on_end (truncated stream) -> REJECT
+[CORE] Final State: ERROR, Last Error: UNDER_RECEIVE
+
+=== Scenario 5: Stream Over-Receive ===
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=16) -> erased=4096
+[DRV] write(offset=0, len=16) -> 0
+[DRV] abort
+[CORE] on_data (overflow data) -> REJECT
+[CORE] Final State: ERROR, Last Error: OVER_RECEIVE
+
+=== Scenario 6: Abort and Retry on Same Core ===
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[CORE] Simulated stream break -> calling on_abort
+[DRV] abort
+[CORE] Intermediate State: IDLE
+[CORE] Retrying with new WRQ on same core instance...
+[CORE] on_wrq retry -> OK
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=16) -> erased=4096
+[DRV] write(offset=0, len=16) -> 0
+[DRV] read(offset=0, len=16) -> 0
+[DRV] finalize(target=1) -> 0
+[CORE] on_end retry -> OK
+[CORE] Final State: SUCCESS, Last Error: NONE
+
+=== Scenario 7: Padded Firmware (Avoid Zero-Len) ===
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=16) -> erased=4096
+[DRV] write(offset=0, len=16) -> 0
+[DRV] read(offset=0, len=16) -> 0
+[DRV] finalize(target=1) -> 0
+[CORE] on_end (short packet path) -> OK
+[CORE] Final State: SUCCESS, Last Error: NONE
+
+=== Scenario 8: Zero-Length Failure Invisibility Demo (Limitation) ===
+[DRV] init(target=1) -> 0
+[DRV] invalidate(target=1) -> 0
+[DRV] erase_to(need=16) -> erased=4096
+[DRV] write(offset=0, len=16) -> 0
+[DRV] read(offset=0, len=16) -> 0
+[DRV] finalize(target=1) -> FAIL (-1)
+[DRV] abort
+[CORE] on_end (finalize injected failure) -> REJECT
+[CORE] State: ERROR, Last Error: DRV_FINALIZE
+[NOTE] 在原生 SOES 的 0 长度包结束分支中，FOE_fclose 返回值被忽略并回 ACK；
+       核心机虽处于 ERROR 态且有效标记未置位，但主站协议栈无法收到 0x800B 中止 (限制演示)。
+
+============================================================
+ All 8 Host Scenarios Finished Successfully.
+============================================================

@@ -17,11 +17,17 @@ TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
 TEST_SOES_HARNESS_BIN = tests/test_runner_soes_real
 SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I$(SOES_DIR)
 
+# 阶段 D: 宿主机参考示例与驱动模板
+EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
+EXAMPLES_HOST_DEMO_BIN = examples/host_demo/host_demo
+EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
+EXAMPLES_DRIVER_TEMPLATE_OBJ = examples/driver_template/driver_template.o
+
 SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all clean test test-asan test-soes vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all clean test test-asan test-soes test-examples vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -58,7 +64,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
+test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN) test-examples
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@./$(TEST_EFW_BIN)
 	@$(PYTHON) tests/test_efw_pack.py
@@ -72,6 +78,22 @@ test: vectors $(TEST_EFW_BIN) $(TEST_CORE_BIN)
 	@echo "  [PASS] 普通 $$(basename $(TEST_EFW_BIN)) 在 8MB 与 1MB 栈下运行正常"
 	@$(PYTHON) tests/test_verify_quotes.py
 	@$(PYTHON) tests/test_verify_pdf_quotes.py
+
+test-examples:
+	@echo "--- 编译并运行宿主参考示例 (host_demo) 与对比 expected_output.txt ---"
+	@$(CC) $(CFLAGS) -o $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_HOST_DEMO_SRC)
+	@$(EXAMPLES_HOST_DEMO_BIN) > examples/host_demo/run_output.tmp
+	@diff -u examples/host_demo/expected_output.txt examples/host_demo/run_output.tmp || (rm -f examples/host_demo/run_output.tmp && exit 1)
+	@rm -f examples/host_demo/run_output.tmp
+	@echo "  [PASS] host_demo 输出与 expected_output.txt 逐行比对完全匹配"
+	@(ulimit -s 8192 && $(EXAMPLES_HOST_DEMO_BIN) >/dev/null)
+	@(ulimit -s 1024 && $(EXAMPLES_HOST_DEMO_BIN) >/dev/null)
+	@echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常"
+	@echo "--- 静态编译检查驱动模板 (driver_template) ---"
+	@$(CC) $(CFLAGS) -c -o $(EXAMPLES_DRIVER_TEMPLATE_OBJ) $(EXAMPLES_DRIVER_TEMPLATE_SRC)
+	@rm -f $(EXAMPLES_DRIVER_TEMPLATE_OBJ)
+	@echo "  [PASS] driver_template 编译检查通过 (-Wall -Wextra -Werror -pedantic)"
+	@rm -f $(EXAMPLES_HOST_DEMO_BIN)
 
 test-soes:
 	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ]; then \
@@ -107,4 +129,4 @@ test-asan:
 	@echo "  [PASS] ASan 二进制在 ulimit -s 1024 (1MB 栈) 下直接运行正常退出 (rc=0)"
 
 clean:
-	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw
+	rm -rf $(TEST_EFW_BIN) $(TEST_CORE_BIN) tests/test_runner* tests/*.dSYM *.dSYM *.efw tests/*.efw $(EXAMPLES_HOST_DEMO_BIN) $(EXAMPLES_DRIVER_TEMPLATE_OBJ) examples/host_demo/run_output.tmp examples/host_demo/*.dSYM
