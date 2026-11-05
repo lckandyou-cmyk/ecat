@@ -14,6 +14,7 @@ import argparse
 import errno
 import tempfile
 import subprocess
+import stat
 
 MANIFEST_NAME = ".foe_manifest.json"
 MANIFEST_MAGIC = "ECAT_FOE_BUILD_MANIFEST_V1"
@@ -135,13 +136,29 @@ def verify_strictly_inside_build_dir(build_dir: str, rel_path: str):
 
 
 def get_host_voucher_dir() -> str:
-    """获取宿主系统临时安全凭据目录，权限仅当前系统用户可读写 (0o700)"""
+    """获取宿主系统临时安全凭据目录，严禁对符号链接或外来预存目录盲目 chmod"""
     vdir = os.path.join(tempfile.gettempdir(), f".foe_build_voucher_{os.getuid()}")
     try:
-        os.makedirs(vdir, mode=0o700, exist_ok=True)
-        os.chmod(vdir, 0o700)
-    except Exception:
-        pass
+        st = os.lstat(vdir)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"安全拒绝：宿主凭据路径为符号链接: {vdir}")
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"安全拒绝：宿主凭据路径非普通目录: {vdir}")
+        if st.st_uid != os.getuid():
+            raise ValueError(f"安全拒绝：宿主凭据目录归属不符 (UID {st.st_uid} != {os.getuid()})")
+        current_perms = stat.S_IMODE(st.st_mode)
+        if current_perms != 0o700:
+            if hasattr(os, "supports_follow_symlinks") and os.chmod in os.supports_follow_symlinks:
+                os.chmod(vdir, 0o700, follow_symlinks=False)
+            else:
+                os.chmod(vdir, 0o700)
+    except FileNotFoundError:
+        try:
+            os.mkdir(vdir, 0o700)
+        except FileExistsError:
+            st = os.lstat(vdir)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                raise ValueError(f"安全拒绝：并发创建的宿主凭据目录异常: {vdir}")
     return vdir
 
 
@@ -259,7 +276,7 @@ def get_build_session_driver_pid() -> int:
             cur = next_ppid
         else:
             break
-    return top_make if top_make is not None else os.getppid()
+    return top_make if top_make is not None else os.getpid()
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -279,45 +296,97 @@ def is_pid_alive(pid: int) -> bool:
 
 
 def acquire_build_lock(build_dir: str):
-    """获取构建排他标记，防范并发构建竞态。基于主控 make 进程 PID 树生命周期核验"""
+    """获取构建排他标记，防范并发构建竞态。基于内核原子硬链接与主控进程树生命周期核验"""
     lock_file = os.path.join(build_dir, LOCK_NAME)
-    if os.path.islink(lock_file):
-        raise ValueError(f"安全拒绝：锁文件为符号链接: {lock_file}")
-
     driver_pid = get_build_session_driver_pid()
 
-    if os.path.exists(lock_file):
-        lock_info = {}
-        try:
-            with open(lock_file, "r", encoding="utf-8") as f:
-                lock_info = json.load(f)
-        except Exception:
-            pass
+    # 首先核验已有锁文件是否为符号链接
+    try:
+        st = os.lstat(lock_file)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"安全拒绝：锁文件为符号链接: {lock_file}")
+    except FileNotFoundError:
+        pass
 
-        locked_driver = lock_info.get("driver_pid")
-        if locked_driver is None:
-            locked_driver = lock_info.get("pid")
-        if locked_driver is None:
-            locked_driver = lock_info.get("ppid")
-
-        # 仅当持锁主控进程就是当前构建的同一主控 make 时，才视为同一次构建流程内部的后续步骤
-        if locked_driver is not None and locked_driver == driver_pid:
-            return
-
-        # 检查原持锁主控进程是否仍然存活
-        if locked_driver is not None and is_pid_alive(locked_driver):
-            raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (主控进程 PID {locked_driver})，锁文件已锁定")
-
-    # 写入新锁信息，记录主控构建驱动进程的 PID
+    # 准备完整的锁数据
     lock_data = {
         "driver_pid": driver_pid,
-        "pid": os.getpid()
+        "pid": os.getpid(),
+        "created_at": time.time()
     }
-    tmp_lock = os.path.join(build_dir, f".lock_tmp_{os.getpid()}")
+    tmp_lock = os.path.join(build_dir, f".lock_tmp_{os.getpid()}_{time.time_ns()}")
+
+    # 写入完整的临时锁文件
     fd = os.open(tmp_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(lock_data, f)
-    os.replace(tmp_lock, lock_file)
+
+    # 尝试使用内核原子硬链接获取排他锁 (os.link 在目标已存在时原子抛出 FileExistsError，不发生静默覆盖)
+    acquired = False
+    try:
+        os.link(tmp_lock, lock_file)
+        acquired = True
+    except FileExistsError:
+        acquired = False
+    finally:
+        try:
+            os.remove(tmp_lock)
+        except OSError:
+            pass
+
+    if acquired:
+        return
+
+    # 若未直接获取到锁，读取并核验已存在的持锁信息
+    lock_info = {}
+    try:
+        with open(lock_file, "r", encoding="utf-8") as f:
+            lock_info = json.load(f)
+    except Exception:
+        pass
+
+    locked_driver = lock_info.get("driver_pid")
+    if locked_driver is None:
+        locked_driver = lock_info.get("pid")
+    if locked_driver is None:
+        locked_driver = lock_info.get("ppid")
+
+    # 仅当持锁主控进程就是当前构建的同一主控 make 时，才视为同一次构建流程内部的后续步骤
+    if locked_driver is not None and locked_driver == driver_pid:
+        return
+
+    # 检查原持锁主控进程是否仍然存活
+    if locked_driver is not None and is_pid_alive(locked_driver):
+        raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (主控进程 PID {locked_driver})，锁文件已锁定")
+
+    # 若原持锁进程已消亡（孤儿锁），安全接管：先移除无主死锁，然后重试原子获取
+    try:
+        os.remove(lock_file)
+    except OSError:
+        pass
+
+    tmp_lock2 = os.path.join(build_dir, f".lock_tmp_{os.getpid()}_{time.time_ns()}")
+    fd2 = os.open(tmp_lock2, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(fd2, "w", encoding="utf-8") as f:
+        json.dump(lock_data, f)
+    try:
+        os.link(tmp_lock2, lock_file)
+    except FileExistsError:
+        try:
+            with open(lock_file, "r", encoding="utf-8") as f:
+                new_info = json.load(f)
+            new_driver = new_info.get("driver_pid") or new_info.get("pid") or new_info.get("ppid")
+            if new_driver != driver_pid and is_pid_alive(new_driver):
+                raise RuntimeError(f"安全拒绝：检测到并发构建正在运行 (主控进程 PID {new_driver})，锁文件已锁定")
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError("安全拒绝：并发构建锁冲突，未能获取构建排他锁")
+    finally:
+        try:
+            os.remove(tmp_lock2)
+        except OSError:
+            pass
 
 
 def release_build_lock(build_dir: str):
@@ -592,22 +661,8 @@ def clean_build(build_dir: str):
             else:
                 print(f"  [WARN] {rel_file} 内容已被修改，保留文件不予删除。")
 
-    # 3. 逐层尝试 rmdir 移除空的 dSYM 目录层级（运行时再核验路径必须严格位于构建目录内部）
-    for rel_dir in sorted(raw_dsym_dirs, key=len, reverse=True):
-        top_dsym = rel_dir.split(os.sep)[0]
-        if top_dsym in protected_dsym_dirs:
-            continue
-        dpath = verify_strictly_inside_build_dir(build_dir, rel_dir)
-        if not dpath:
-            continue
-        if os.path.isdir(dpath) and not os.path.islink(dpath):
-            try:
-                os.rmdir(dpath)
-            except OSError as e:
-                if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
-                    print(f"  [CLEAN] 目录 {rel_dir} 内仍有存量文件，保留目录不予删除。")
-                else:
-                    raise
+    # 3. 默认非破坏设计：文件凭据无法证明目录归属，不依赖自描述清单删除目录，所有目录一律保留以防误删
+    # 无论清单中的 dsym_dirs 如何声明，严禁根据清单直接 rmdir 目录
 
     # 4. 移除清单本身
     if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
@@ -616,13 +671,13 @@ def clean_build(build_dir: str):
     # 5. 清理完成，撤销宿主真实凭据
     revoke_host_build_voucher(build_dir)
 
-    # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空时安全移除
+    # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空（无任何遗留文件或子目录）时安全移除
     try:
         os.rmdir(build_dir)
         print(f"  [CLEAN] 构建目录 {build_dir} 已为空，已安全移除。")
     except OSError as e:
         if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
-            print(f"  [CLEAN] 构建目录 {build_dir} 内仍有存量文件，保留目录不予删除。")
+            print(f"  [CLEAN] 构建目录 {build_dir} 内仍有存量目录或文件，保留目录以防误删。")
         else:
             raise
 

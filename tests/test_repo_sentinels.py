@@ -37,6 +37,7 @@ import tempfile
 import subprocess
 import hashlib
 import concurrent.futures
+import stat
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -675,6 +676,131 @@ def test_atomic_symlink_defense(repo_dir: str):
     print("  [PASS] 内核级原子符号链接防御验证通过：O_NOFOLLOW 有效阻断符号链接穿透")
 
 
+def test_dsym_empty_dir_retention_and_voucher_isolation(repo_dir: str):
+    """测试 14: 验证创建 dSYM 空目录并加入清单后，make clean 默认保留不予删除 (复现独立审查复现场景)"""
+    print("\n[TEST 14] 验证 dSYM 目录默认非破坏保留与自描述清单解耦机制...")
+    with tempfile.TemporaryDirectory(prefix="foe_isolated_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+        build_dir = os.path.join(repo_dir, "build")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+        # 1. 执行 make build 签发宿主构建凭据
+        res1 = subprocess.run(["make", "build", "CC=clang", "OVERWRITE=1"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res1.returncode == 0, f"make build 失败: {res1.stderr}"
+
+        # 2. 随后创建 build/test_runner_efw.dSYM 空目录
+        dsym_dir = os.path.join(build_dir, "test_runner_efw.dSYM")
+        os.makedirs(dsym_dir, exist_ok=True)
+        assert os.path.isdir(dsym_dir)
+
+        # 3. 将其加入清单 dsym_dirs 并重新计算 checksum
+        manifest_file = os.path.join(build_dir, ".foe_manifest.json")
+        with open(manifest_file, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if "test_runner_efw.dSYM" not in manifest.get("dsym_dirs", []):
+            manifest["dsym_dirs"].append("test_runner_efw.dSYM")
+
+        sys.path.insert(0, os.path.join(repo_dir, "tools"))
+        import safe_build
+        manifest["checksum"] = safe_build.compute_manifest_checksum(manifest)
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        # 4. 执行 make clean
+        res2 = subprocess.run(["make", "clean"], cwd=repo_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res2.returncode == 0, f"make clean 失败: {res2.stderr}"
+
+        # 核心断言：无法证明目录归属时默认保留，不得依赖自描述清单删除用户目录
+        assert os.path.isdir(dsym_dir), "错误: 未能证明归属的 dSYM 目录被 make clean 误删！"
+        print("  [PASS] dSYM 目录默认非破坏保留验证通过：未受文件凭据证明的目录完好保留")
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def test_voucher_dir_symlink_and_chmod_safety(repo_dir: str):
+    """测试 15: 验证宿主凭据目录符号链接防御与无条件 chmod 漏洞阻断"""
+    print("\n[TEST 15] 验证宿主凭据目录符号链接防御与 chmod 权限防护...")
+    with tempfile.TemporaryDirectory(prefix="foe_isolated_tmp_") as isolated_tmp:
+        # 在临时根目录下创建外部敏感目标文件，设置权限 0o755
+        target_file = os.path.join(isolated_tmp, "sensitive_target")
+        os.makedirs(target_file, exist_ok=True)
+        os.chmod(target_file, 0o755)
+
+        # 在凭据路径位置预先放置指向敏感目标的符号链接
+        voucher_symlink = os.path.join(isolated_tmp, f".foe_build_voucher_{os.getuid()}")
+        os.symlink(target_file, voucher_symlink)
+
+        # 启动 safe_build 试图获取凭据目录
+        sys.path.insert(0, os.path.join(repo_dir, "tools"))
+        import safe_build
+
+        # 必须主动抛出安全拒绝，且严禁修改目标权限
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+        test_script = f"""
+import sys, os, stat
+sys.path.insert(0, r"{os.path.join(repo_dir, 'tools')}")
+import safe_build
+try:
+    safe_build.get_host_voucher_dir()
+    sys.exit(10)
+except ValueError as e:
+    if "符号链接" in str(e):
+        sys.exit(0)
+    sys.exit(20)
+except Exception:
+    sys.exit(30)
+"""
+        res = subprocess.run([sys.executable, "-c", test_script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert res.returncode == 0, f"错误: 符号链接凭据目录未被安全拦截 (rc={res.returncode}, stderr={res.stderr})"
+
+        # 核心断言：外部目标文件权限保持 0o755 不变，未受穿透修改
+        current_perms = stat.S_IMODE(os.stat(target_file).st_mode)
+        assert current_perms == 0o755, f"错误: 敏感目标权限受穿透被篡改为 {oct(current_perms)}"
+        print("  [PASS] 宿主凭据目录符号链接防御通过：成功阻断符号链接穿透与非授权 chmod 修改")
+
+
+def test_atomic_lock_concurrency_race(repo_dir: str):
+    """测试 16: 验证基于内核原子硬链接的构建排他锁在高并发下的原子互斥"""
+    print("\n[TEST 16] 验证内核原子硬链接排他锁高并发互斥防御...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+    os.makedirs(build_dir, exist_ok=True)
+
+    worker_script = f"""
+import sys, os, time
+sys.path.insert(0, r"{os.path.join(repo_dir, 'tools')}")
+import safe_build
+idx = int(sys.argv[1])
+bdir = sys.argv[2]
+try:
+    safe_build.acquire_build_lock(bdir)
+    print(f"{{idx}}:ACQUIRED", flush=True)
+    time.sleep(1.0)
+except RuntimeError as e:
+    print(f"{{idx}}:BLOCKED", flush=True)
+except Exception as e:
+    print(f"{{idx}}:ERROR:{{e}}", flush=True)
+"""
+
+    # 同时拉起 8 个并发子进程同时竞争获取同一个构建锁
+    procs = []
+    for i in range(8):
+        p = subprocess.Popen([sys.executable, "-c", worker_script, str(i), build_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        procs.append(p)
+
+    outputs = [p.communicate()[0].strip() for p in procs]
+    acquired = [o for o in outputs if "ACQUIRED" in o]
+    blocked = [o for o in outputs if "BLOCKED" in o]
+
+    # 核心互斥断言：在原子硬链接保证下，至多仅有 1 个进程能直接夺取锁，其他并发进程全部被安全拦截
+    assert len(acquired) == 1, f"错误: 原子互斥失效，持锁进程数不为 1 (实际: {len(acquired)}, 输出: {outputs})"
+    assert len(blocked) == 7, f"错误: 并发拦截数不为 7 (实际: {len(blocked)}, 输出: {outputs})"
+    print(f"  [PASS] 内核原子硬链接排他锁互斥验证通过 (成功持锁: {len(acquired)}, 安全拦截: {len(blocked)})")
+
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="foe_isolated_repo_") as tmp_repo:
         print(f"=== 搭建独立隔离仓库副本环境: {tmp_repo} ===")
@@ -712,6 +838,9 @@ def main():
         test_manifest_path_traversal_and_symlink_defense(tmp_repo)
         test_preset_manifest_and_user_file_retention(tmp_repo)
         test_same_pgrp_concurrent_build_exclusion(tmp_repo)
+        test_dsym_empty_dir_retention_and_voucher_isolation(tmp_repo)
+        test_voucher_dir_symlink_and_chmod_safety(tmp_repo)
+        test_atomic_lock_concurrency_race(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 
