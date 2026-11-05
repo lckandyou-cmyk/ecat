@@ -325,3 +325,65 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 6.5 嵌入式 MCU 资源占用与硬件局限
 - **MCU 足迹未测**：当前代码仅在 macOS 宿主机通过 Clang 针对宿主环境构建并进行单元测试；未在嵌入式交叉编译器（如 `arm-none-eabi-gcc`）下进行目标固件编译与尺寸测量。核心机与适配层的实际 Flash 代码体积、常量占用、静态 RAM 与运行时最大调用栈深度均处于未测状态，明确标记为“MCU 足迹未测”。
+
+---
+
+## 7. 真实 SOES 源码验证与宿主测试 Harness (Real SOES Verification)
+
+本项目遵循“不凭空猜测、以真实代码为准”的工程原则，针对本地真实 SOES 协议栈源文件进行了仅编译验证、源码关键逻辑核对，并构建了宿主隔离测试 Harness。
+
+### 7.1 源码版本基线与仅编译核验 (Compile-only Verification)
+
+- **源码路径与版本**：
+  - 本地源文件：`/tmp/soes_src/soes/esc_foe.c`
+  - 源文件 SHA-256：`cd1709f103e5c4b786fb0be2857760f0e180c9123a553a2efa410accbf17a2b7`
+  - 版本元数据：上游 Git Commit ID 未知 (UNKNOWN)，本地为散文件环境。
+- **裸编译核验 (无 BSP 桩)**：
+  - 编译命令：`clang -c /tmp/soes_src/soes/esc_foe.c -o /tmp/esc_foe.o`
+  - 执行结果：退出码 `rc=1`，报错为缺失平台头文件 `fatal error: 'cc.h' file not found`。证实 SOES 源码依赖外部 BSP 平台定义（如大小端、数据类型对齐宏）。
+- **宿主 BSP 适配编译核验**：
+  - 编译器与选项：引入项目轻量宿主 BSP 桩目录 `tests/soes_bsp/`，提供最小化 `cc.h`、`options.h` 与 `esc_coe.h`。因 SOES 源码包含 C99 GNU 扩展（如零长数组、匿名联合与无原型函数），需指定相应兼容选项：
+    `clang -Wall -Wextra -Werror -std=c99 -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I/tmp/soes_src/soes -c /tmp/soes_src/soes/esc_foe.c -o /tmp/esc_foe.o`
+  - 执行结果：退出码 `rc=0`，编译成功。
+- **目标文件未定义符号核对 (`nm -u`)**：
+  - 符号清单：`_ESC_claimbuffer`、`_ESCvar`、`_MBX`、`_MBXcontrol`、`_strncmp`。
+  - 依赖定性：`_strncmp` 为 C 标准库函数；其余 4 个符号为 SOES 协议栈主模块（`esc.c`）和邮箱通信原语，表明 `esc_foe.c` 必须与 `esc.c` 的邮箱缓冲区及全局状态结构协同链接。
+
+### 7.2 真实源码关键逻辑核对与代码行证据 (Code Evidence)
+
+针对协议栈在实际升级交互中的关键行为，对照本地真实源码进行了逐项核查与事实确认：
+
+1. **首块回调时机 (WRQ vs DATA)**：
+   - **源码事实**：在 `FOE_write` 函数中，SOES 处理来自主站的 WRQ 写请求。其逻辑仅解析请求的文件名与密码，调用 `FOE_fopen` 校验文件存在性并回送 ACK(0)，将状态置为 `FOE_WAIT_FOR_DATA`；**WRQ 阶段完全不调用应用注册的 `write_function` 回调**。
+   - **数据流动**：实际首块固件数据回调发生在后续收到首个 DATA 报文并累积到缓冲区满（`FOE_fwrite`）或文件传输结束时（`FOE_fclose`）。这意味着适配层必须等到首个 DATA 块到达时方可向底层核心机喂入实际数据流。
+
+2. **文件名前缀匹配隐患 (Prefix Matching)**：
+   - **源码事实**：已在清单登记条目 Quote `Q1_ESC_FOE_STRNCMP` 中明确证实，`FOE_fopen` 遍历配置列表时执行 `0 == strncmp(foe_file_name, foe_cfg->files[i].name, num_chars)`。
+   - **缺陷表现**：比较长度 `num_chars` 严格取自主站请求报文中的文件名长度，未检查配置项文件名的完整长度。例如：主站请求短前缀 `"firmware"` 时，能够错误匹配上系统配置的 `"firmware_mcu.bin"`，导致非法短名称逃逸校验。
+
+3. **零长度包返回值处理不对称性 (Zero-length Packet Close)**：
+   - **源码事实**：对比已在清单登记的 Quote `Q2_ESC_FOE_ZERO_LEN_CLOSE` 与 Quote `Q3_ESC_FOE_SHORT_PACKET_CLOSE`：
+     - 在短包分支（Quote `Q3`）中，源码对 `FOE_fclose()` 的返回值进行了严格检查，失败时会中止传输并回送错误码；
+     - 但在 0 长度包结束分支（Quote `Q2`）中，源码直接调用 `FOE_fclose();`，**完全忽略其返回值**，随后无条件发送 ACK 并初始化完成。
+   - **潜在风险**：若固件传输以独立的 0 长度包结束，即使底层硬件写入失败或核心机校验失败，SOES 仍会向上位机回送 ACK 宣告成功，造成虚假成功确认。
+
+### 7.3 宿主测试 Harness 设计与运行验证 (Host Harness)
+
+为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了轻量宿主测试套件：
+
+- **测试设计范围**：
+  1. `test_soes_wrq_no_write_callback`：验证 WRQ 仅匹配文件名并回送 ACK，不触发 `write_function` 数据回调；
+  2. `test_soes_prefix_matching`：验证前缀匹配旁路现象，证实短前缀匹配被放行，未知文件名被正确中止；
+  3. `test_soes_zero_length_packet_ignores_close_failure`：验证短包写入失败被严格中止，而 0 长度包结束时写入失败被协议栈忽略并回送 ACK；
+  4. `test_soes_adapter_core_stream_requires_wrq`：验证核心状态机在未收到合法 WRQ 预先建立会话时，非法数据流被核心机拦截（返回 -1，设置状态错误）。
+- **运行验证结果**：
+  - 测试二进制 `test_runner_soes_real` 已集成入 `Makefile` 的 `test` 与 `test-asan` 目标；
+  - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下均构建并通过全部测试，退出码均为 `rc=0`。
+
+### 7.4 明确未执行内容与工程边界声明 (Limitations)
+
+本项目客观如实界定本次真实 SOES 核验的边界，以下内容受环境限制**明确未执行**：
+1. **无物理从站硬件**：未在真实物理芯片（如 Microchip LAN9252 或 Beckhoff ET1100 从站控制器 ASIC）上执行；
+2. **无物理总线与收发器通信**：未连接物理网线、RJ45/MII 接口及物理 PHY 收发器，所有报文交互均在宿主机内存模拟邮箱中完成；
+3. **无真实 EtherCAT 主站轮询**：未连接 TwinCAT、SOEM 等真实主站运行周期性过程数据通信与状态机轮询；
+4. **嵌入式 MCU 足迹未测**：当前仅在 macOS 宿主环境 Clang 编译器下构建测试，未在 ARM Cortex-M 等嵌入式目标架构交叉编译器下构建，MCU 的 Flash 固件尺寸与最大调用栈深度尚未实际测量。
