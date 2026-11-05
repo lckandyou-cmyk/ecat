@@ -633,4 +633,4 @@ typedef struct ecat_foe_target_driver {
 
 ### 5.2 待决策清单
 
-截至当前版本（v0.1），所有核心架构层决策均已拍板定稿，本节无未决事项。开放性技术细节与外部依赖项集中移交至 [open-issues.md](file:///Users/milo/Documents/antigravity/elegant-carson/docs/open-issues.md) 跟踪推进。
+截至当前版本（v0.1），所有核心架构层决策均已拍板定稿，本节无未决事项。开放性技术细节与外部依赖项集中移交至 [open-issues.md](../open-issues.md) 跟踪推进。

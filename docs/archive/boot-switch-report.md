@@ -103,7 +103,7 @@
 ## 二、未核实清单（说明原因与所需支持）
 
 1. **ETG 官方规范原文（ETG.1000.6、ETG.2000、ETG.2010）**：
-   * **未核实原因**：尝试直接从 `https://www.ethercat.org/download/documents/` 下载 `ETG1000_6_*.pdf`、`ETG2000_*.pdf`、`ETG2010_*.pdf`，服务器（CloudFront）均返回 **HTTP 403 Forbidden**（需 ETG 会员登录鉴权），无法在本地打开阅读；
+   * **未核实原因**：尝试直接从 `https://www.ethercat.org/download/documents/` 下载 `ETG1000_6_*.pdf`、`ETG2000_*.pdf`、`ETG2010_*.pdf`，服务器（CloudFront）均返回 **HTTP 403 Forbidden**（访问受拒的具体原因未核实），无法在本地打开阅读；
    * **需提供文件**：由 ETG 官网登录下载的 ETG.1000.6、ETG.2000、ETG.2010 官方规范 PDF。
 2. **Beckhoff 官方 SSC 内部实现（ecatslv.c、bootmode.c）**：
    * **未核实原因**：ET9300 SSC 工具源码需 ETG 账号在官方工具生成，公开网络无直接可读的官方原版文件；
