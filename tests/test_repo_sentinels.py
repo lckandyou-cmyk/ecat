@@ -933,6 +933,206 @@ def test_inode_stability_and_clean_race_defense(repo_dir: str):
         shutil.rmtree(build_dir, ignore_errors=True)
 
 
+def test_fail_closed_clean_when_coordinator_unavailable(repo_dir: str):
+    """[TEST 20] 验证无法取得协调锁时的失败安全（Fail-Closed）默认退出保护"""
+    print("\n[TEST 20] 验证无法取得协调锁时的失败安全（Fail-Closed）默认退出保护...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="foe_fail_closed_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+
+        # 先正常构建一次，生成合法产物、清单与凭据
+        res_build = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_build.returncode == 0, f"构建失败: {res_build.stderr}"
+        efw_path = os.path.join(build_dir, "test_runner_efw")
+        manifest_path = os.path.join(build_dir, ".foe_manifest.json")
+        assert os.path.isfile(efw_path), "构建产物未生成"
+        assert os.path.isfile(manifest_path), "清单未生成"
+        orig_efw_bytes = open(efw_path, "rb").read()
+
+        # 场景 A: 宿主协调锁文件不可读写 (chmod 000)，模拟 os.open 失败
+        vdir = os.path.join(isolated_tmp, f".foe_build_voucher_{os.getuid()}")
+        coord_file = None
+        for f in os.listdir(vdir):
+            if f.startswith("coord_"):
+                coord_file = os.path.join(vdir, f)
+                break
+        assert coord_file is not None, "未找到宿主协调锁文件"
+        os.chmod(coord_file, 0o000)
+
+        # 运行 make clean，核验失败安全机制
+        res_clean_a = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean_a.returncode == 0
+        assert "无法安全获取宿主协调互斥锁" in res_clean_a.stdout, "未输出失败安全拦截提示"
+        # 核心断言：产物与清单均未被删除，严格保护存量数据
+        assert os.path.isfile(efw_path), "错误: 失败开放导致产物被误删！"
+        assert open(efw_path, "rb").read() == orig_efw_bytes, "产物内容被篡改"
+        assert os.path.isfile(manifest_path), "错误: 清单被误删"
+        print("  [PASS] 场景 A 验证通过：协调锁打开失败时严格默认安全退出，产物与清单完好保留")
+
+        # 恢复权限以进行场景 B 测试
+        os.chmod(coord_file, 0o600)
+
+        # 场景 B: 宿主凭据目录异常 (chmod 0755)，导致 get_host_coordinator_file 安全拒绝
+        os.chmod(vdir, 0o755)
+        res_clean_b = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean_b.returncode == 0
+        assert "无法安全获取宿主协调互斥锁" in res_clean_b.stdout, "未输出异常拦截提示"
+        # 核心断言：产物依然完好保留
+        assert os.path.isfile(efw_path), "错误: 凭据目录异常时产物被误删！"
+        assert os.path.isfile(manifest_path), "错误: 凭据目录异常时清单被误删！"
+        print("  [PASS] 场景 B 验证通过：宿主凭据目录异常时严格默认安全退出，存量数据完好保留")
+
+        # 恢复权限后执行正常 clean
+        os.chmod(vdir, 0o700)
+        res_clean_normal = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_clean_normal.returncode == 0
+        assert not os.path.exists(efw_path), "正常清理未能移除产物"
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def test_clean_and_build_lifecycle_mutual_exclusion(repo_dir: str):
+    """[TEST 21] 验证 clean 与完整构建生命周期的全流程排他互斥"""
+    print("\n[TEST 21] 验证 clean 与完整构建生命周期的全流程排他互斥...")
+    build_dir = os.path.join(repo_dir, "build")
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="foe_lifecycle_mutex_tmp_") as isolated_tmp:
+        env = os.environ.copy()
+        env["TMPDIR"] = isolated_tmp
+
+        # 场景 A: 构建进行中，验证 clean 安全拦截
+        # 启动一个存活的长时子进程作为模拟构建驱动进程
+        driver_proc = subprocess.Popen(["sleep", "10"])
+        try:
+            os.makedirs(build_dir, exist_ok=True)
+            lock_file = os.path.join(build_dir, ".foe_build.lock")
+            lock_data = {
+                "driver_pid": driver_proc.pid,
+                "pid": os.getpid(),
+                "created_at": time.time()
+            }
+            with open(lock_file, "w", encoding="utf-8") as f:
+                json.dump(lock_data, f)
+
+            sentinel_artifact = os.path.join(build_dir, "test_runner_efw")
+            with open(sentinel_artifact, "wb") as f:
+                f.write(b"ACTIVE_BUILD_SENTINEL_BYTES")
+
+            res_clean = subprocess.run(
+                ["make", "clean"],
+                cwd=repo_dir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            assert res_clean.returncode == 0
+            assert "检测到并发构建正在运行" in res_clean.stdout, "未能拦截活动构建"
+            assert os.path.isfile(sentinel_artifact), "错误: 活动构建下的文件被误删！"
+            assert open(sentinel_artifact, "rb").read() == b"ACTIVE_BUILD_SENTINEL_BYTES"
+            print("  [PASS] 场景 A 验证通过：构建生命周期中 clean 准确识别存活进程并安全跳过")
+        finally:
+            driver_proc.kill()
+            driver_proc.wait()
+            shutil.rmtree(build_dir, ignore_errors=True)
+
+        # 场景 B: clean 全生命周期持锁互斥，防范交错穿透
+        # 先正常构建一次
+        res_build = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_build.returncode == 0
+        efw_path = os.path.join(build_dir, "test_runner_efw")
+        assert os.path.isfile(efw_path)
+
+        # 获取宿主协调文件并由外部进程持续持有排他锁 0.8s
+        # 期间启动并发 make build，验证 build 会被排他等待直到释放
+        vdir = os.path.join(isolated_tmp, f".foe_build_voucher_{os.getuid()}")
+        coord_file = None
+        for f in os.listdir(vdir):
+            if f.startswith("coord_"):
+                coord_file = os.path.join(vdir, f)
+                break
+        assert coord_file is not None
+
+        holder_code = f"""
+import os, fcntl, time
+fd = os.open({repr(coord_file)}, os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+time.sleep(0.8)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+        holder_proc = subprocess.Popen([sys.executable, "-c", holder_code])
+        time.sleep(0.2) # 确保持锁进程已获取锁
+
+        # 在持锁期间发起 make build，应被排他阻塞直到 0.8s 锁释放
+        t_start = time.time()
+        res_build_concurrent = subprocess.run(
+            ["make", "build", "CC=clang", "OVERWRITE=1"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        elapsed = time.time() - t_start
+        holder_proc.wait()
+
+        assert res_build_concurrent.returncode == 0
+        assert elapsed >= 0.5, f"错误: 未能排他互斥，构建穿透了持锁临界区 (耗时仅 {elapsed:.2f}s)"
+        print(f"  [PASS] 场景 B 验证通过：全生命周期协调锁互斥有效，并发构建被安全串行化 (等待 {elapsed:.2f}s)")
+
+        # 最终清理验证
+        res_final_clean = subprocess.run(
+            ["make", "clean"],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        assert res_final_clean.returncode == 0
+        assert not os.path.exists(efw_path)
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="foe_isolated_repo_") as tmp_repo:
         print(f"=== 搭建独立隔离仓库副本环境: {tmp_repo} ===")
@@ -976,6 +1176,8 @@ def main():
         test_orphan_lock_takeover_interleaving_race(tmp_repo)
         test_user_sentinel_coord_file_retention(tmp_repo)
         test_inode_stability_and_clean_race_defense(tmp_repo)
+        test_fail_closed_clean_when_coordinator_unavailable(tmp_repo)
+        test_clean_and_build_lifecycle_mutual_exclusion(tmp_repo)
 
     print("\n>>> 隔离仓库副本哨兵完整性、非空目录保护、同名防覆盖与全套测试验证全部通过！<<<")
 

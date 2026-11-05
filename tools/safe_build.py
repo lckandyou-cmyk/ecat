@@ -368,13 +368,12 @@ def release_build_lock(build_dir: str):
     try:
         coord_file = get_host_coordinator_file(build_dir)
         coord_fd = os.open(coord_file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        fcntl.flock(coord_fd, fcntl.LOCK_EX)
     except Exception:
-        coord_fd = None
+        # 遵循失败安全（Fail-Closed）原则：无法取得协调锁时安全放弃，严禁无保护清理锁
+        return
 
     try:
-        if coord_fd is not None:
-            fcntl.flock(coord_fd, fcntl.LOCK_EX)
-
         if os.path.isfile(lock_file) and not os.path.islink(lock_file):
             try:
                 with open(lock_file, "r", encoding="utf-8") as f:
@@ -387,15 +386,14 @@ def release_build_lock(build_dir: str):
             except Exception:
                 pass
     finally:
-        if coord_fd is not None:
-            try:
-                fcntl.flock(coord_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(coord_fd)
-            except OSError:
-                pass
+        try:
+            fcntl.flock(coord_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(coord_fd)
+        except OSError:
+            pass
 
 
 def check_before_build(build_dir: str, target_files: list, overwrite: bool = False):
@@ -566,17 +564,19 @@ def clean_build(build_dir: str):
     if not os.path.isdir(build_dir) or os.path.islink(build_dir):
         return
 
-    # 核心互斥核验：检查是否有并发构建正在运行
+    # 1. 尝试获取宿主私有协调文件的排他锁（保证与构建生命周期互斥）
+    # 遵循失败安全（Fail-Closed）原则：若无法取得协调排他锁，默认安全退出，严禁执行清理！
     try:
         coord_file = get_host_coordinator_file(build_dir)
         coord_fd = os.open(coord_file, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    except Exception:
-        coord_fd = None
+        fcntl.flock(coord_fd, fcntl.LOCK_EX)
+    except Exception as e:
+        print(f"  [CLEAN] 无法安全获取宿主协调互斥锁 ({e})，依据失败安全原则终止清理以保护存量数据。")
+        return
 
+    # 2. 在宿主协调排他锁保护下，执行全流程清理（检查、校验、删除、撤销凭据、目录清理）
+    # 直到清理完全结束或异常退出前，全程保持排他持锁，防范构建与清理生命周期并发交叉
     try:
-        if coord_fd is not None:
-            fcntl.flock(coord_fd, fcntl.LOCK_EX)
-
         lock_file = os.path.join(build_dir, LOCK_NAME)
         if os.path.isfile(lock_file) and not os.path.islink(lock_file):
             try:
@@ -588,124 +588,124 @@ def clean_build(build_dir: str):
                     return
             except Exception:
                 pass
-    finally:
-        if coord_fd is not None:
-            try:
-                fcntl.flock(coord_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(coord_fd)
-            except OSError:
-                pass
 
-    manifest_path = os.path.join(build_dir, MANIFEST_NAME)
-    if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
-        print("  [CLEAN] 未发现合法构建清单，跳过清理以保护存量文件。")
-        return
+        manifest_path = os.path.join(build_dir, MANIFEST_NAME)
+        if not os.path.isfile(manifest_path) or os.path.islink(manifest_path):
+            print("  [CLEAN] 未发现合法构建清单，跳过清理以保护存量文件。")
+            return
 
-    try:
-        with open(manifest_path, 'r', encoding='utf-8') as f:
-            manifest_data = json.load(f)
-    except Exception as e:
-        print(f"  [CLEAN] 读取构建清单失败: {e}，跳过清理以防误删。")
-        return
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest_data = json.load(f)
+        except Exception as e:
+            print(f"  [CLEAN] 读取构建清单失败: {e}，跳过清理以防误删。")
+            return
 
-    # 全量统一安全校验：核验魔数、防伪指纹、产物文件、dSYM 文件及 dSYM 目录路径
-    # 凡存在未校验通过的非受控路径、越界路径或指纹不符者，一律判定不可信并终止清理
-    if not validate_manifest_integrity_and_paths(build_dir, manifest_data):
-        print("  [CLEAN] 清单存在未校验通过的非受控路径、越界路径或指纹不符，跳过清理以保护存量文件与目录。")
-        return
+        # 全量统一安全校验：核验魔数、防伪指纹、产物文件、dSYM 文件及 dSYM 目录路径
+        # 凡存在未校验通过的非受控路径、越界路径或指纹不符者，一律判定不可信并终止清理
+        if not validate_manifest_integrity_and_paths(build_dir, manifest_data):
+            print("  [CLEAN] 清单存在未校验通过的非受控路径、越界路径或指纹不符，跳过清理以保护存量文件与目录。")
+            return
 
-    # 核心非破坏校验：核验是否存在有效的宿主真实构建凭据
-    # 若用户直接在工作区中预置了清单和文件，而未真实执行受控构建，则凭据库中无凭据
-    # 遵循非破坏原则：无法可靠证明归属时默认保留，不依据自描述清单删除！
-    host_voucher = verify_host_build_voucher(build_dir)
-    if not host_voucher:
-        print("  [CLEAN] 缺乏有效的宿主真实构建凭据（疑似预存用户文件或外来清单），默认保留存量文件以防误删。")
-        return
+        # 核心非破坏校验：核验是否存在有效的宿主真实构建凭据
+        # 若用户直接在工作区中预置了清单和文件，而未真实执行受控构建，则凭据库中无凭据
+        # 遵循非破坏原则：无法可靠证明归属时默认保留，不依据自描述清单删除！
+        host_voucher = verify_host_build_voucher(build_dir)
+        if not host_voucher:
+            print("  [CLEAN] 缺乏有效的宿主真实构建凭据（疑似预存用户文件或外来清单），默认保留存量文件以防误删。")
+            return
 
-    voucher_artifacts = host_voucher.get("artifacts", {})
-    voucher_dsym_files = host_voucher.get("dsym_files", {})
+        voucher_artifacts = host_voucher.get("artifacts", {})
+        voucher_dsym_files = host_voucher.get("dsym_files", {})
 
-    raw_artifacts = manifest_data.get("artifacts", {})
-    raw_dsym_files = manifest_data.get("dsym_files", {})
-    raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
+        raw_artifacts = manifest_data.get("artifacts", {})
+        raw_dsym_files = manifest_data.get("dsym_files", {})
+        raw_dsym_dirs = manifest_data.get("dsym_dirs", [])
 
-    # 检查 dSYM 目录中是否存在未登记用户文件
-    # 若 dSYM 目录内含有用户数据，整棵 dSYM 目录全部保留不删
-    protected_dsym_dirs = set()
-    for dsym in raw_dsym_dirs:
-        dsym_path = os.path.join(build_dir, dsym)
-        if os.path.isdir(dsym_path) and not os.path.islink(dsym_path):
-            has_unknown_file = False
-            for root, _, files in os.walk(dsym_path):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    rel = os.path.relpath(fp, build_dir)
-                    if rel not in raw_dsym_files:
-                        has_unknown_file = True
+        # 检查 dSYM 目录中是否存在未登记用户文件
+        # 若 dSYM 目录内含有用户数据，整棵 dSYM 目录全部保留不删
+        protected_dsym_dirs = set()
+        for dsym in raw_dsym_dirs:
+            dsym_path = os.path.join(build_dir, dsym)
+            if os.path.isdir(dsym_path) and not os.path.islink(dsym_path):
+                has_unknown_file = False
+                for root, _, files in os.walk(dsym_path):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        rel = os.path.relpath(fp, build_dir)
+                        if rel not in raw_dsym_files:
+                            has_unknown_file = True
+                            break
+                    if has_unknown_file:
                         break
                 if has_unknown_file:
-                    break
-            if has_unknown_file:
-                print(f"  [CLEAN] 调试符号目录 {dsym} 内检测到用户存量文件，整棵目录予以保留不删。")
-                protected_dsym_dirs.add(dsym)
+                    print(f"  [CLEAN] 调试符号目录 {dsym} 内检测到用户存量文件，整棵目录予以保留不删。")
+                    protected_dsym_dirs.add(dsym)
 
-    # 1. 逐一删除经哈希校验且与真实构建凭据吻合的二进制文件
-    for fname, finfo in raw_artifacts.items():
-        fpath = os.path.join(build_dir, fname)
-        if os.path.isfile(fpath) and not os.path.islink(fpath):
-            expected_hash = finfo.get("hash") if isinstance(finfo, dict) else finfo
-            # 严格双重校验：必须与宿主真实凭据吻合
-            if fname not in voucher_artifacts or voucher_artifacts[fname] != expected_hash:
-                print(f"  [WARN] {fname} 缺乏真实构建凭证或哈希与构建凭据不符，保留文件不予删除。")
+        # 1. 逐一删除经哈希校验且与真实构建凭据吻合的二进制文件
+        for fname, finfo in raw_artifacts.items():
+            fpath = os.path.join(build_dir, fname)
+            if os.path.isfile(fpath) and not os.path.islink(fpath):
+                expected_hash = finfo.get("hash") if isinstance(finfo, dict) else finfo
+                # 严格双重校验：必须与宿主真实凭据吻合
+                if fname not in voucher_artifacts or voucher_artifacts[fname] != expected_hash:
+                    print(f"  [WARN] {fname} 缺乏真实构建凭证或哈希与构建凭据不符，保留文件不予删除。")
+                    continue
+
+                actual_hash = sha256_file(fpath)
+                if actual_hash == expected_hash:
+                    os.remove(fpath)
+                    print(f"  [CLEAN] 已安全清理构建产物: {fname}")
+                else:
+                    print(f"  [WARN] {fname} 内容已被修改，保留文件不予删除。")
+
+        # 2. 逐一删除经哈希校验且与真实构建凭据吻合的 dSYM 具体文件（非受保护目录下的）
+        for rel_file, expected_hash in raw_dsym_files.items():
+            top_dsym = rel_file.split(os.sep)[0]
+            if top_dsym in protected_dsym_dirs:
                 continue
 
-            actual_hash = sha256_file(fpath)
-            if actual_hash == expected_hash:
-                os.remove(fpath)
-                print(f"  [CLEAN] 已安全清理构建产物: {fname}")
+            fpath = os.path.join(build_dir, rel_file)
+            if os.path.isfile(fpath) and not os.path.islink(fpath):
+                if rel_file not in voucher_dsym_files or voucher_dsym_files[rel_file] != expected_hash:
+                    print(f"  [WARN] {rel_file} 缺乏真实构建凭据，保留文件不予删除。")
+                    continue
+
+                if sha256_file(fpath) == expected_hash:
+                    os.remove(fpath)
+                    print(f"  [CLEAN] 已安全清理调试符号文件: {rel_file}")
+                else:
+                    print(f"  [WARN] {rel_file} 内容已被修改，保留文件不予删除。")
+
+        # 3. 默认非破坏设计：文件凭据无法证明目录归属，不依赖自描述清单删除目录，所有目录一律保留以防误删
+        # 无论清单中的 dsym_dirs 如何声明，严禁根据清单直接 rmdir 目录
+
+        # 4. 移除清单本身
+        if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
+            os.remove(manifest_path)
+
+        # 5. 清理完成，撤销宿主真实凭据
+        revoke_host_build_voucher(build_dir)
+
+        # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空（无任何遗留文件或子目录）时安全移除
+        try:
+            os.rmdir(build_dir)
+            print(f"  [CLEAN] 构建目录 {build_dir} 已为空，已安全移除。")
+        except OSError as e:
+            if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                print(f"  [CLEAN] 构建目录 {build_dir} 内仍有存量目录或文件，保留目录以防误删。")
             else:
-                print(f"  [WARN] {fname} 内容已被修改，保留文件不予删除。")
-
-    # 2. 逐一删除经哈希校验且与真实构建凭据吻合的 dSYM 具体文件（非受保护目录下的）
-    for rel_file, expected_hash in raw_dsym_files.items():
-        top_dsym = rel_file.split(os.sep)[0]
-        if top_dsym in protected_dsym_dirs:
-            continue
-
-        fpath = os.path.join(build_dir, rel_file)
-        if os.path.isfile(fpath) and not os.path.islink(fpath):
-            if rel_file not in voucher_dsym_files or voucher_dsym_files[rel_file] != expected_hash:
-                print(f"  [WARN] {rel_file} 缺乏真实构建凭据，保留文件不予删除。")
-                continue
-
-            if sha256_file(fpath) == expected_hash:
-                os.remove(fpath)
-                print(f"  [CLEAN] 已安全清理调试符号文件: {rel_file}")
-            else:
-                print(f"  [WARN] {rel_file} 内容已被修改，保留文件不予删除。")
-
-    # 3. 默认非破坏设计：文件凭据无法证明目录归属，不依赖自描述清单删除目录，所有目录一律保留以防误删
-    # 无论清单中的 dsym_dirs 如何声明，严禁根据清单直接 rmdir 目录
-
-    # 4. 移除清单本身
-    if os.path.isfile(manifest_path) and not os.path.islink(manifest_path):
-        os.remove(manifest_path)
-
-    # 5. 清理完成，撤销宿主真实凭据
-    revoke_host_build_voucher(build_dir)
-
-    # 6. 尝试 rmdir 构建根目录：仅当目录已完全为空（无任何遗留文件或子目录）时安全移除
-    try:
-        os.rmdir(build_dir)
-        print(f"  [CLEAN] 构建目录 {build_dir} 已为空，已安全移除。")
-    except OSError as e:
-        if e.errno in (errno.ENOTEMPTY, errno.EEXIST):
-            print(f"  [CLEAN] 构建目录 {build_dir} 内仍有存量目录或文件，保留目录以防误删。")
-        else:
-            raise
+                raise
+    finally:
+        # 清理操作完全结束或异常退出后，统一释放协调排他锁并关闭描述符
+        try:
+            fcntl.flock(coord_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(coord_fd)
+        except OSError:
+            pass
 
 
 def main():
