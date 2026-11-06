@@ -40,7 +40,17 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现生产级前后置邮箱钩子架构（`ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`）。**在宿主测试 Harness 中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路**。通过前置嗅探暂存 WRQ、后置核验响应并就地将异常中和为标准 `FOE_OP_ERR (0x8000)`、严格保持原有信箱头计数器 `mbxcnt`，并通过 `ecat_foe_soes_set_foe_reset_fn()` 注入 `FOE_init` 实现了立即复位自愈，消除了原生 SOES 无 WRQ 回调的缺陷与假 ACK 风险。提供配套最小 Bootloader 接入参考与 5 大场景集成验证（`examples/bootloader_soes/`）。【仍属于宿主环境仿真，物理硬件与现场真实主站动态联调尚未开展】。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现基于前后置邮箱嗅探与中和钩子的零侵入接入方案（`ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`）。**在宿主测试 Harness 中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路**。通过前置嗅探暂存 WRQ、后置核验响应并就地将异常中和为标准 `FOE_OP_ERR (0x8000)`、严格保持原有信箱头计数器 `mbxcnt`，并通过 `ecat_foe_soes_set_foe_reset_fn()` 注入 `FOE_init` 实现了立即复位自愈，消除了原生 SOES 无 WRQ 回调的缺陷与假 ACK 风险。提供配套最小 Bootloader 接入参考与 5 大场景集成验证（`examples/bootloader_soes/`）。【仍属于宿主环境仿真，物理硬件板卡与现场真实主站动态联调待现场开展】。
+- **SOES 获取方式与版本哈希基线**：
+  - 用户请直接从官方开源仓库获取 SOES 源码：`git clone https://github.com/openEtherCATsociety/SOES.git`
+  - 宿主测试套件使用的 SOES 源码文件提取自本地散文件目录，无上游 git 元数据，无法确定具体的上游 commit 或发布标签。
+  - 严禁将持续演进的 master 分支假设为固定版本。测试套件仅对以下 4 个关键文件的 SHA-256 哈希基线负责：
+    - `esc.c`: `1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c`
+    - `esc.h`: `9c76c2d4a20b4f827539a4416383354cb45e95a9d086f444a26a0bbb5ff9a579`
+    - `esc_foe.c`: `cd1709f103e5c4b786fb0be2857760f0e180c9123a553a2efa410accbf17a2b7`
+    - `esc_foe.h`: `84f5011c258d1e25d8d9ab22bfb74f4ab45b1e6b01f3a6be13e5cf2138034eb7`
+  - 用户可运行 `sha256sum soes/esc.c soes/esc.h soes/esc_foe.c soes/esc_foe.h` 比对基线；若上游后续变动导致哈希或函数行为改变，以本库适配层接口契约为准。
+  - **无第三方源码分发**：本仓库遵循严格的合规性与洁净原则，**不包含、不分发任何 SOES 第三方源码**。测试时通过环境变量（如 `SOES_DIR=/path/to/soes`）指定外部源码目录。
 - **原生协议栈限制与技术约束 (宿主 harness 观察与工程约束)**：
   - *【宿主观察】文件名匹配机制与空名/短前缀风险*：原生 SOES 在 `esc_foe.c` 的 WRQ 文件名匹配逻辑中采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定由接收长度 `num_chars` 决定前缀匹配，而非全名比对。宿主 harness 实测证实短前缀会误命中首个具有该前缀的表项，且空文件名（`num_chars == 0`）无条件命中 `files[0]`；
   - *【宿主观察】0 长度结束包与写回调错误忽略*：原生 SOES 在 `esc_foe.c` 的 0 长度结束包分支中直接忽略了 `FOE_fclose()` 的返回值并发送成功 ACK。宿主 harness 实测证实短包分支会严格触发 `FOE_abort(0x800B)`，但 0 长度结束包写失败无法通知主站；
@@ -66,14 +76,114 @@
 
 ---
 
-## ⚠️ 硬件验证限制 (Limitations)
+## 🔐 完整性校验与安全边界说明
 
-目前全部代码、状态机及适配层均在 **macOS 宿主机环境** 下通过 GCC/Clang 编译器结合 RAM 模拟驱动（`mock_driver`）完成仿真测试与 ASan/UBSan 内存安全性检验。
-以下事项受限于当前开发阶段，**尚未在物理硬件上完成实机测试**：
-1. **【待真机验证】MCU 片内 Flash 擦写总线冻结 (Bus Stall)**：片内 Flash 擦除时可能导致 CPU 停止响应中断或协议栈丢包，需实测确认主站超时时间与单步擦除粒度；
-2. **【待真机验证】外部低速 SPI Flash 物理全量回读耗时**：大容量固件（如 2MB~4MB FPGA 镜像）在最后一次回调中同步回读并计算 CRC32 的总耗时是否会突破 TwinCAT 单包超时阈值；
-3. **【待真机验证】真实 ESC 芯片与主站联调**：如 Beckhoff ET1100、AX58100 或 LAN9252 芯片与 TwinCAT/EtherCAT 运动控制器之间的现场升级；
-4. **【待真机验证】MCU 足迹未测 (Footprint)**：代码与适配层在真实嵌入式交叉编译器（如 GCC ARM Embedded / armclang）下的实际 Flash 占用（`.text` + `.rodata`）、静态 RAM 占用（`.data` + `.bss`）以及运行时栈深度尚未经过实机测量，明确处于“MCU 足迹未测”状态。
+- **传输与介质完整性校验 (CRC32)**：
+  - 固件容器解析与 Flash 驱动采用标准 IEEE 802.3 CRC32 算法，包含数据流实时累加校验与物理介质回读比对；
+  - 该机制仅用于捕获通信线路干扰产生的偶发误码以及 Flash 介质的物理坏块或写入不一致；
+- **非密码学身份认证 (No Cryptographic Authentication)**：
+  - CRC32 **不具备**任何防篡改、防伪造、抗碰撞或防重放攻击的密码学保护能力；
+  - 固件头中的 `project_id` 与 `hardware_id` 仅用于工程标识与硬件版本的兼容性匹配过滤，不代表设备身份认证或许可凭据；
+- **未实现能力声明**：
+  - 本库当前**未实现任何非对称数字签名（如 Ed25519、ECDSA）或密码学身份认证**，亦未集成安全启动（Secure Boot）密钥链；
+  - 严禁将本库的 CRC32 校验或 ID 比对当作防御恶意固件注入的安全屏障；若目标系统存在防恶意攻击需求，用户须在固件载荷外增加密码学签名校验，或在主从站间建立安全通信信道。
+
+---
+
+## 🚀 最短上手路径 (Quickstart)
+
+### 1. 运行核心机自动化测试
+无需任何第三方依赖，直接验证状态机与容器解析核心逻辑：
+```bash
+# 使用 clang 构建并运行核心测试套件
+make clean && make test CC=clang
+
+# 启用 ASan/UBSan 内存安全性检查
+make test-asan CC=clang
+```
+
+### 2. （可选）基于真实 SOES 源码运行宿主集成测试
+用户自行克隆官方 SOES 源码后，指定目录运行真实协议栈宿主集成测试：
+```bash
+# 获取官方 SOES 源码
+git clone https://github.com/openEtherCATsociety/SOES.git /tmp/soes
+
+# 运行真实 SOES 邮箱协议与 Bootloader 集成测试
+make test-soes SOES_DIR=/tmp/soes
+make test-bootloader SOES_DIR=/tmp/soes
+```
+
+### 3. 生成与打包固件镜像
+使用内置脚本将编译好的应用固件打包为符合规范的 `.efw` 容器：
+```bash
+python3 tools/efw_pack.py \
+  --project-id 0x10010001 \
+  --hardware-id 0x00000001 \
+  --version 1.0.0.0 \
+  --payload path/to/app.bin \
+  --output SERVO_DRV_MCU_V1.0.0.0.efw
+```
+
+---
+
+## 📋 首次移植准备与清单 (Porting Guide)
+
+首次将本库移植到物理硬件或新工程时，请完成以下准备与适配：
+
+### 1. 板级分区与工程参数配置 (`bootloader_config.h`)
+在工程配置中定义从站设备自身的物理边界与工程信息（参见 `examples/bootloader_soes/bootloader_config.h`）：
+- `APP_FLASH_BASE_ADDR`: 应用固件物理存储起始地址（本地硬编码裁决，不信任外部报文）；
+- `APP_FLASH_MAX_SIZE`: 应用分区容量上限（严格边界防越界踩踏）；
+- `APP_FLASH_SECTOR_SIZE`: 目标介质的物理扇区擦除粒度；
+- `APP_FLASH_WRITE_UNIT`: 目标介质的最小写入对齐单位（如 4 或 8 字节）；
+- `BOOTLOADER_PROJECT_ID` / `BOOTLOADER_HARDWARE_ID`: 本地预设的工程标识符与硬件板型码。
+
+### 2. 实现目标存储驱动接口 (`ecat_foe_target_driver_t`)
+用户需基于目标板的 Flash HAL 库实现以下 8 个驱动函数（参考 `examples/bootloader_soes/bootloader_flash_driver.c`）：
+1. `init`: 初始化存储外设，失败时自行释放资源；
+2. `invalidate`: 清除原有固件有效标记（早于擦除执行）；
+3. `erase_to`: 扇区按需擦除，确保擦除范围覆盖当前请求；
+4. `write`: 写入数据至本地基地址偏移处；
+5. `read`: 从物理介质读回已写入数据用于回读比对；
+6. `finalize`: 双重 CRC 校验一致后提交固件有效标记；
+7. `abort`: 异常发生时恢复外设至安全态，保持固件为无效态；
+8. `get_flash_status`: 查询当前介质状态与进度。
+
+### 3. 协议栈串行调度接入
+在从站主循环或轮询任务中，严格按照单执行流原子互斥顺序调用：
+- `ecat_foe_soes_pre_process_hook`: 前置检查报文、暂存 WRQ；
+- 协议栈原生处理进程（如 SOES 的 FoE 进程）；
+- `ecat_foe_soes_post_process_hook`: 后置核验并中和异常响应。
+
+---
+
+## ⚠️ 已知限制与未覆盖范围 (Known Limitations)
+
+目前全部代码、状态机及适配层均在 **macOS 宿主机环境** 下通过 GCC/Clang 编译器结合 RAM 模拟驱动（`mock_driver`）完成仿真测试与 ASan/UBSan 内存安全性检验。以下事项受限于当前开发阶段，明确未覆盖或具备已知约束：
+1. **真实硬件板卡与现场主站联调待现场开展**：
+   - **MCU 片内 Flash 擦写总线冻结 (Bus Stall)**：片内 Flash 擦除时可能导致 CPU 停止响应中断或协议栈丢包，需现场实测确认主站超时时间与单步擦除粒度；
+   - **外部低速 SPI Flash 物理全量回读耗时**：大容量固件（如 2MB~4MB FPGA 镜像）在最后一次回调中同步回读并计算 CRC32 的总耗时是否会突破 TwinCAT 单包超时阈值；
+   - **真实 ESC 芯片与主站联调**：如 Beckhoff ET1100、AX58100 或 LAN9252 芯片与 TwinCAT/EtherCAT 运动控制器之间的现场升级；
+   - **MCU 足迹未测 (Footprint)**：代码与适配层在真实嵌入式交叉编译器（如 GCC ARM Embedded / armclang）下的实际 Flash 占用（`.text` + `.rodata`）、静态 RAM 占用（`.data` + `.bss`）以及运行时栈深度尚未经过实机测量，明确处于“MCU 足迹未测”状态。
+2. **原生 SOES 零长度包忽略写回调错误限制**：
+   - 原生 SOES 在收到零长度结束包时，调用 `FOE_fclose()` 后直接忽略其返回值并发送成功 ACK。主站收到最后一包 ACK 无法证明固件成功提交，集成方需要提供并验证主站可读取的状态标记。
+3. **原生 SOES 短前缀匹配特性**：
+   - 原生 SOES 采用接收长度前缀匹配而非全名比对，空文件名默认命中首个表项。从站配置表文件名需避免前缀重叠。
+4. **单执行流互斥要求**：
+   - SOES 协议栈及其前后置钩子非线程安全，必须在同一执行流或关中断保护下串行执行，禁止并发或中断插入。
+5. **分包长度约束**：
+   - 数据发送阶段非末尾包长度必须严格等于邮箱载荷上限，不可中途将满包拆分为短包，首个短包即标志文件传输结束。
+6. **无密码学身份认证**：
+   - CRC32 仅为偶发数据损坏检测，无防伪造、防篡改能力。
+
+---
+
+## 🤝 问题反馈与社区协作 (Issue Reporting)
+
+若在移植或使用过程中遇到问题，欢迎提交 GitHub Issue：
+- **Bug 报告**：请使用 [Bug Report 模板](.github/ISSUE_TEMPLATE/bug_report.md)，提供复现步骤、环境信息（ECAT commit、SOES 源码来源与 SHA-256 哈希、硬件板卡型号、主站版本及编译器）以及脱敏日志；
+- **功能需求**：请使用 [Feature Request 模板](.github/ISSUE_TEMPLATE/feature_request.md)；
+- **安全警告**：提交任何抓包和日志前，**切勿包含**真实的 FoE 通信密码、私钥、证书凭据或专有商业固件二进制！
 
 ---
 
@@ -84,18 +194,6 @@
 - Python 3.8+ (用于固件打包与测试向量生成)
 - `pdftotext` (poppler-utils 套件，用于厂商 PDF 数据手册引文自动化核验)
 - `make`
-
-### 运行单元测试
-```bash
-# 默认使用 clang 构建并运行全量测试
-make clean && make test
-
-# 使用 GNU GCC 构建并运行全量测试
-make clean && make test CC=gcc-16
-
-# 启用 AddressSanitizer 与 UndefinedBehaviorSanitizer 内存安全检查
-make test-asan CC=clang
-```
 
 ### 工具说明
 - `gen_pdf_cite_table.py --update` 会回写 manifest 的 `doc_line` 和 `line_text_hash`，防漂移依赖 `--check` 与 PDF 校验。
