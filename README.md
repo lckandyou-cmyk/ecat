@@ -40,7 +40,7 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现基于前后置邮箱嗅探与中和钩子的零侵入接入方案（`ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`）。**在宿主测试 Harness 中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路**。通过前置嗅探暂存 WRQ、后置核验响应并就地将异常中和为标准 `FOE_OP_ERR (0x8000)`、严格保持原有信箱头计数器 `mbxcnt`，并通过 `ecat_foe_soes_set_foe_reset_fn()` 注入 `FOE_init` 实现了立即复位自愈，消除了原生 SOES 无 WRQ 回调的缺陷与假 ACK 风险。提供配套最小 Bootloader 接入参考与 5 大场景集成验证（`examples/bootloader_soes/`）。【仍属于宿主环境仿真，物理硬件板卡与现场真实主站动态联调待现场开展】。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现基于前后置邮箱嗅探与中和钩子的零侵入接入方案（`ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`）。**在宿主测试 Harness 中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖基于端口桩的邮箱发送与多槽轮转路径**。通过前置嗅探暂存 WRQ、后置核验响应并就地将异常中和为标准 `FOE_OP_ERR (0x8000)`、严格保持原有信箱头计数器 `mbxcnt`，并通过 `ecat_foe_soes_set_foe_reset_fn()` 注入 `FOE_init` 实现了立即复位自愈，消除了原生 SOES 无 WRQ 回调的缺陷与假 ACK 风险。提供配套最小 Bootloader 接入参考与 5 大场景集成验证（`examples/bootloader_soes/`）。【仍属于宿主环境仿真，物理硬件板卡与现场真实主站动态联调待现场开展】。
 - **SOES 获取方式与版本哈希基线**：
   - 用户请直接从官方开源仓库获取 SOES 源码：`git clone https://github.com/openEtherCATsociety/SOES.git`
   - 宿主测试套件使用的 SOES 源码文件提取自本地散文件目录，无上游 git 元数据，无法确定具体的上游 commit 或发布标签。
@@ -93,7 +93,7 @@
 ## 🚀 最短上手路径 (Quickstart)
 
 ### 1. 运行核心机自动化测试
-无需任何第三方依赖，直接验证状态机与容器解析核心逻辑：
+需要 C 编译器、Python 3、make 和用于 PDF 引文检查的 `pdftotext`：
 ```bash
 # 使用 clang 构建并运行核心测试套件
 make clean && make test CC=clang
@@ -106,22 +106,24 @@ make test-asan CC=clang
 用户自行克隆官方 SOES 源码后，指定目录运行真实协议栈宿主集成测试：
 ```bash
 # 获取官方 SOES 源码
-git clone https://github.com/openEtherCATsociety/SOES.git /tmp/soes
+git clone https://github.com/openEtherCATsociety/SOES.git /path/to/SOES
 
 # 运行真实 SOES 邮箱协议与 Bootloader 集成测试
-make test-soes SOES_DIR=/tmp/soes
-make test-bootloader SOES_DIR=/tmp/soes
+make test-soes SOES_DIR=/path/to/SOES/soes
+make test-bootloader SOES_DIR=/path/to/SOES/soes
 ```
 
 ### 3. 生成与打包固件镜像
 使用内置脚本将编译好的应用固件打包为符合规范的 `.efw` 容器：
 ```bash
-python3 tools/efw_pack.py \
+python3 tools/efw_pack.py pack \
+  --bin path/to/app.bin \
   --project-id 0x10010001 \
+  --project-name SERVO_DRV \
   --hardware-id 0x00000001 \
-  --version 1.0.0.0 \
-  --payload path/to/app.bin \
-  --output SERVO_DRV_MCU_V1.0.0.0.efw
+  --target MCU \
+  --fw-version 1.0.0.0 \
+  --out SERVO_DRV_MCU_V1.0.0.0.efw
 ```
 
 ---
@@ -139,7 +141,7 @@ python3 tools/efw_pack.py \
 - `BOOTLOADER_PROJECT_ID` / `BOOTLOADER_HARDWARE_ID`: 本地预设的工程标识符与硬件板型码。
 
 ### 2. 实现目标存储驱动接口 (`ecat_foe_target_driver_t`)
-用户需基于目标板的 Flash HAL 库实现以下 8 个驱动函数（参考 `examples/bootloader_soes/bootloader_flash_driver.c`）：
+用户需基于目标板的 Flash HAL 库实现以下 7 个驱动函数（参考 `examples/bootloader_soes/bootloader_flash_driver.c`）：
 1. `init`: 初始化存储外设，失败时自行释放资源；
 2. `invalidate`: 清除原有固件有效标记（早于擦除执行）；
 3. `erase_to`: 扇区按需擦除，确保擦除范围覆盖当前请求；
@@ -147,7 +149,6 @@ python3 tools/efw_pack.py \
 5. `read`: 从物理介质读回已写入数据用于回读比对；
 6. `finalize`: 双重 CRC 校验一致后提交固件有效标记；
 7. `abort`: 异常发生时恢复外设至安全态，保持固件为无效态；
-8. `get_flash_status`: 查询当前介质状态与进度。
 
 ### 3. 协议栈串行调度接入
 在从站主循环或轮询任务中，严格按照单执行流原子互斥顺序调用：

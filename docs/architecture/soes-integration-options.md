@@ -374,7 +374,7 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 7.3 宿主测试 Harness 设计与运行验证 (Host Harness)
 
-为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机、前后置钩子的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了宿主测试套件，直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路：
+为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机、前后置钩子的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了宿主测试套件，直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖基于端口桩的邮箱发送与多槽轮转路径：
 
 - **测试设计范围**：
   1. **11 组核心协议行为测试**：
@@ -394,7 +394,7 @@ void ESC_ALerror (uint16_t errornumber);
      - 风险 8: `FOE_WAIT_FOR_DATA` 态自愈恢复与重试；
      - 风险 9: 多槽轮转隔离与真实硬件端口桩收发。
 - **运行验证结果**：
-  - 测试二进制 `test_runner_soes_real` 已集成入 `Makefile` 的 `test-soes` 与 `test-asan` 目标；
+  - 测试二进制 `test_runner_soes_real` 由 `Makefile` 的 `test-soes` 目标构建和运行；`test-asan` 不运行该 SOES 测试；
   - 配套最小 Bootloader 接入参考集成测试 `test_bootloader_integration` 已集成入 `test-bootloader` 目标（覆盖 5 大场景）；
   - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下全量测试通过，退出码均为 `rc=0`。
 
