@@ -38,10 +38,61 @@ _ESCvar ESCvar;
 _MBXcontrol MBXcontrol[4];
 uint8_t MBX[128 * 4];
 
-static uint8_t s_mock_claimbuffer_return = 1;
+static uint8_t s_mock_claimbuffer_override = 0xFF; /* 0xFF: 正常执行分配; 0: 强制返回 0 (模拟邮箱耗尽) */
+static uint8_t s_mock_claimbuffer_return = 1;     /* 默认分配槽位 1 */
+static uint8_t s_mock_claimbuffer_mode = 0;       /* 0: 指定槽位分配; 1: 真实 SOES 3..1 扫描分配 */
+
 uint8_t ESC_claimbuffer(void)
 {
-    return s_mock_claimbuffer_return;
+    if (s_mock_claimbuffer_override == 0) {
+        return 0;
+    }
+    uint8_t n = 0;
+    if (s_mock_claimbuffer_mode == 1) {
+        /* 真实 SOES 多槽扫描逻辑 (从 ESC_MBXBUFFERS - 1 往下寻找首个空闲槽位) */
+        n = 4 - 1;
+        while ((n > 0) && (MBXcontrol[n].state)) {
+            n--;
+        }
+    } else {
+        n = s_mock_claimbuffer_return;
+    }
+    if (n && n < 4) {
+        MBXcontrol[n].state = MBXstate_outclaim;
+        _MBXh *MBh = (_MBXh *)&MBX[n * ESC_MBXSIZE];
+        ESCvar.mbxcnt++;
+        ESCvar.mbxcnt = (ESCvar.mbxcnt & 0x07);
+        if (ESCvar.mbxcnt == 0) {
+            ESCvar.mbxcnt = 1;
+        }
+        MBh->address = 0x0000;
+        MBh->channel = 0;
+        MBh->priority = 0;
+        MBh->mbxcnt = ESCvar.mbxcnt & 0xFU;
+        ESCvar.txcue++;
+    }
+    return n;
+}
+
+/* 模拟 SOES 发送邮箱向硬件写入函数 (ESC_writembx) */
+static uint8_t s_last_sent_mbx[128];
+static uint16_t s_last_sent_len = 0;
+static uint8_t s_last_sent_slot = 0;
+static int s_esc_writembx_calls = 0;
+
+void ESC_writembx(uint8_t n)
+{
+    if (n >= 4) return;
+    _MBXh *MBh = (_MBXh *)&MBX[n * ESC_MBXSIZE];
+    uint16_t length = etohs(MBh->length);
+    s_last_sent_len = (uint16_t)(sizeof(_MBXh) + length);
+    if (s_last_sent_len > sizeof(s_last_sent_mbx)) {
+        s_last_sent_len = sizeof(s_last_sent_mbx);
+    }
+    memcpy(s_last_sent_mbx, MBh, s_last_sent_len);
+    s_last_sent_slot = n;
+    s_esc_writembx_calls++;
+    MBXcontrol[n].state = MBXstate_outpost;
 }
 
 /* 核心防回滚端口桩实现 */
@@ -133,7 +184,13 @@ static void reset_soes_environment(void)
     s_foe_files[1].write_function = mock_foe_write;
 
     s_foe_cfg.n_files = 2;
+    s_mock_claimbuffer_override = 0xFF;
     s_mock_claimbuffer_return = 1;
+    s_mock_claimbuffer_mode = 0;
+    s_esc_writembx_calls = 0;
+    s_last_sent_len = 0;
+    s_last_sent_slot = 0;
+    memset(s_last_sent_mbx, 0, sizeof(s_last_sent_mbx));
 
     FOE_config(&s_foe_cfg);
     FOE_init();
@@ -1100,6 +1157,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
         ecat_foe_soes_init(&adapter, &core, 128);
+        assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* Case 1A: 报文总长不足 12 字节 (例如只有 8 字节) */
         uint8_t malformed_buf[16] = {0};
@@ -1146,6 +1204,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
         ecat_foe_soes_init(&adapter, &core, 128);
+        assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* 从站针对 files[0] 配置专属密码 */
         s_foe_files[0].filepass = 0x12345678U;
@@ -1175,6 +1234,8 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(res_mbx->foeheader.errorcode == 0x800A);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
         assert(adapter.has_staged_wrq == false);
+        ESC_writembx(1);
+        MBXcontrol[1].state = MBXstate_idle;
         printf("  [PASS] 维度 2A (密码时序): 动态同步后密码错误被原生 SOES 拦截并回复 0x800A，暂存 WRQ 安全释放\n");
 
         /* Case 2B: 注入正确密码 (0x12345678) */
@@ -1189,6 +1250,8 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(res_mbx->foeheader.packetnumber == 0);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
         assert(core.req_target_id == 1);
+        ESC_writembx(1);
+        MBXcontrol[1].state = MBXstate_idle;
         printf("  [PASS] 维度 2B (密码时序): 动态同步后正确密码顺利通过原生校验并回复 ACK(0)，核心新会话正式激活\n");
     }
 
@@ -1216,6 +1279,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
         ecat_foe_soes_init(&adapter, &core, 128);
+        assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
 
@@ -1253,6 +1317,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
         ecat_foe_soes_init(&adapter, &core, 128);
+        assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
         s_foe_files[0].write_function = ecat_foe_soes_write_cb;
@@ -1276,6 +1341,8 @@ static void test_real_soes_pre_hook_validation_suite(void)
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)wrq_res, sizeof(_MBXh) + sizeof(_FOEh));
         assert(core.req_target_id == 1);
         assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
+        ESC_writembx(1);
+        MBXcontrol[1].state = MBXstate_idle;
 
         /* 构造 116 字节的第一包数据 (64 字节头部 + 52 字节有效载荷)，使传输进入中途 WAITING_FOR_DATA 态 */
         static const uint8_t s_p1[52] = {0x11, 0x22, 0x33, 0x44};
@@ -1311,6 +1378,8 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
         assert(res_mbx->foeheader.errorcode == 0x8004);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+        ESC_writembx(1);
+        MBXcontrol[1].state = MBXstate_idle;
 
         /* 原生 SOES 在 0x8004 abort 中已自动调用 FOE_init() 复位回 FOE_READY。重新发送 Target 2 WRQ */
         MBXcontrol[0].state = MBXstate_inclaim;
@@ -1325,6 +1394,8 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 0);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+        ESC_writembx(1);
+        MBXcontrol[1].state = MBXstate_idle;
 
         /* 验证 files[0] 和 files[1] 的名字隔离共存，互不覆盖 */
         assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
@@ -1343,6 +1414,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
         ecat_foe_soes_init(&adapter, &core, 128);
+        assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
         s_foe_files[0].write_function = ecat_foe_soes_write_cb;
@@ -1427,6 +1499,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "SERVO_DRV_MCU.efw";
             s_foe_files[0].filepass = 0x12345678U;
@@ -1519,6 +1592,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "firmware_mcu.bin";
 
@@ -1550,6 +1624,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 模拟条目 0 已缓存长文件名 */
             s_foe_files[0].name = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -1584,6 +1659,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 从站 SOES 只有 1 个文件配置 (MCU) */
             s_foe_cfg.n_files = 1;
@@ -1628,6 +1704,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 启动合法 Target 1 会话 */
             const char *fn1 = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -1691,6 +1768,14 @@ int main(void)
             assert(adapter.has_staged_wrq == false);
             assert(core.req_target_id == 1); /* 仍维持旧会话 */
 
+            /* Case 1F: 邮箱上下文未配置时，pre_hook 与 post_hook 严格失败关闭 */
+            ecat_foe_soes_adapter_t unreg_adapter;
+            ecat_foe_soes_init(&unreg_adapter, &core, 128);
+            assert(ecat_foe_soes_pre_process_hook(&unreg_adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2)) == -1);
+            unreg_adapter.has_staged_wrq = true;
+            assert(ecat_foe_soes_post_process_hook(&unreg_adapter, &s_foe_cfg, NULL, 0) == -1);
+            assert(unreg_adapter.has_staged_wrq == false);
+
             printf("  [PASS] 深度风险 1: 后置钩子缺失、NULL、空、短帧与非FoE报文下暂存安全释放，write_cb 严密拦截\n");
         }
 
@@ -1704,6 +1789,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 构造伪造的 ACK(1) 报文 (包号为 1 而非 WRQ 应有的 0) */
             uint8_t fake_ack1[16] = {0};
@@ -1765,6 +1851,7 @@ int main(void)
 
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 从站 SOES 声明紧凑文件表: 仅 2 个条目 */
             s_foe_cfg.n_files = 2;
@@ -1868,6 +1955,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 构造声明载荷超出传入缓冲区的畸形报文 */
             uint8_t malformed_len_buf[32] = {0};
@@ -1902,10 +1990,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_soes_init(&adapter, &core, 128);
-
-            /* 注册发送邮箱至适配层以启用新鲜度生命周期托管 */
-            uint8_t *outbox_ptr = &MBX[1 * ESC_MBXSIZE];
-            assert(ecat_foe_soes_register_outbox(&adapter, outbox_ptr, ESC_MBXSIZE) == 0);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 启动合法 Target 1 会话 */
             const char *fn1 = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -1913,15 +1998,17 @@ int main(void)
             assert(core.req_target_id == 1);
             assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
 
-            /* 模拟发送邮箱中已残留上一笔交易成功的 ACK(0) */
+            /* 模拟发送邮箱中已残留上一笔交易待发送的 ACK(0) */
+            uint8_t *outbox_ptr = &MBX[1 * ESC_MBXSIZE];
             _FOE *out_foe = (_FOE *)outbox_ptr;
             out_foe->mbxheader.length = 6;
             out_foe->mbxheader.mbxtype = MBXFOE;
             out_foe->foeheader.opcode = FOE_OP_ACK;
             out_foe->foeheader.packetnumber = 0;
+            MBXcontrol[1].state = MBXstate_outreq;
 
             /* 构造故障注入：模拟 SOES 全部输出邮箱耗尽，使 ESC_claimbuffer() 返回 0 (无可用输出邮箱) */
-            s_mock_claimbuffer_return = 0;
+            s_mock_claimbuffer_override = 0;
 
             /* 主站下发格式合法的 Target 2 WRQ，但使用错误密码 */
             const char *fn2 = "SERVO_DRV_FPGA_V1.0.0.0.efw";
@@ -1933,30 +2020,35 @@ int main(void)
             req->foeheader.password = 0x99999999U; /* 错误密码 */
             memcpy(req->filename, fn2, strlen(fn2));
 
-            /* 执行前置钩子: 预检合规，暂存 Target 2，同时因注册托管自动使发送邮箱残留失效 */
+            /* 执行前置钩子: 预检合规，暂存 Target 2，只读快照邮箱状态 (绝不篡改排队邮箱) */
             int pre_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2));
             assert(pre_rc == 0);
             assert(adapter.has_staged_wrq == true);
             assert(adapter.staged_target_id == 2);
-            /* 验证发送邮箱已被前置钩子自动清零失效 */
-            assert(out_foe->foeheader.opcode == 0);
+            /* 验证发送邮箱中的待发 ACK 报文完好保留，未被前置钩子破坏 */
+            assert(out_foe->foeheader.opcode == FOE_OP_ACK);
 
             /* 原生 SOES 处理: 密码不匹配调用 FOE_abort(0x800A)，但因无可用输出邮箱未产生任何新报文 */
             ESC_foeprocess();
-            /* 此时发送邮箱依旧保持全 0 失效状态 */
-            assert(out_foe->foeheader.opcode == 0);
+            /* 此时发送邮箱依旧保持原有 ACK 报文 */
+            assert(out_foe->foeheader.opcode == FOE_OP_ACK);
 
-            /* 执行后置钩子: 检测到发送邮箱非有效 ACK(0)，安全释放暂存 Target 2 */
+            /* 执行后置钩子: 检测到无新认领槽位，安全释放暂存 Target 2 */
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, outbox_ptr, ESC_MBXSIZE);
             assert(adapter.has_staged_wrq == false);
 
-            /* 关键断言: 核心会话与驱动完好无损，维持 Target 1，驱动 abort 调用次数为 0 */
+            /* 关键断言 1: 排队待发送的 ACK 完好保留，未在后置钩子处理时被清零破坏 */
+            assert(out_foe->foeheader.opcode == FOE_OP_ACK && "queued ACK must NOT be destroyed before SOES transmission");
+            assert(out_foe->mbxheader.length == 6);
+            assert(MBXcontrol[1].state == MBXstate_outreq);
+
+            /* 关键断言 2: 核心会话与驱动完好无损，维持 Target 1，驱动 abort 调用次数为 0 */
             assert(core.req_target_id == 1);
             assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
             assert(s_harness_drv.count_abort == 0);
-            s_mock_claimbuffer_return = 1;
+            s_mock_claimbuffer_override = 0xFF;
 
-            printf("  [PASS] 深度风险 6: 暂存WRQ在SOES密码拒绝且无输出邮箱时安全丢弃，新鲜度保障防范旧ACK残留\n");
+            printf("  [PASS] 深度风险 6: 暂存WRQ在SOES密码拒绝且无输出邮箱时安全丢弃，新鲜度保障防范旧ACK残留且绝不篡改待发报文\n");
         }
 
         /* 7. 深度风险 7: 重复目标映射拦截与取消映射流转核查 */
@@ -1977,6 +2069,154 @@ int main(void)
             assert(ecat_foe_soes_set_target_file_map(&adapter, 4, 0) == 0);
 
             printf("  [PASS] 深度风险 7: 重复目标映射安全拦截，取消映射与条目安全复用正常\n");
+        }
+
+        /* 8. 深度风险 8: 端到端 ACK、ERR 最终发给主站，忙/多槽/旧包共存与状态机完整性核查 */
+        {
+            /* 8A: 正确密码下 ACK 完整保留并由 ESC_writembx 成功发给主站 */
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            s_foe_files[0].filepass = 0x12345678U;
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x12345678U;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+
+            _FOE *res_slot1 = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            assert(res_slot1->foeheader.opcode == FOE_OP_ACK);
+            assert(res_slot1->foeheader.packetnumber == 0);
+
+            /* 调用 post_process_hook */
+            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_slot1, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            assert(core.req_target_id == 1);
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+            /* 核心断言: 发送邮箱中的 ACK 报文毫发无损 */
+            assert(res_slot1->foeheader.opcode == FOE_OP_ACK);
+            assert(res_slot1->foeheader.packetnumber == 0);
+            assert(MBXcontrol[1].state == MBXstate_outreq);
+
+            /* 模拟 SOES 协议栈发送邮箱向硬件写入 (ESC_writembx) */
+            ESC_writembx(1);
+            assert(s_esc_writembx_calls == 1);
+            assert(s_last_sent_slot == 1);
+            _FOE *sent_foe = (_FOE *)s_last_sent_mbx;
+            assert(sent_foe->mbxheader.mbxtype == MBXFOE);
+            assert(sent_foe->foeheader.opcode == FOE_OP_ACK);
+            assert(sent_foe->foeheader.packetnumber == 0);
+            MBXcontrol[1].state = MBXstate_idle; /* 模拟主站读取释放槽位 1 */
+
+            /* 主站发送 ERR 复位 SOES 状态机至 READY 态 */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->foeheader.errorcode = 0x8000;
+            req->foeheader.opcode = FOE_OP_ERR;
+            req->mbxheader.length = (uint16_t)sizeof(_FOEh);
+            ESC_foeprocess();
+            MBXcontrol[1].state = MBXstate_idle;
+
+            /* 8B: 错误密码下 ERR 完整保留并由 ESC_writembx 成功发给主站 */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x99999999U; /* 错误密码 */
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+
+            assert(res_slot1->foeheader.opcode == FOE_OP_ERR);
+            assert(res_slot1->foeheader.errorcode == 0x800A);
+
+            /* 调用 post_process_hook */
+            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_slot1, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            assert(adapter.has_staged_wrq == false);
+
+            /* 核心断言: 发送邮箱中的 ERR 报文毫发无损 */
+            assert(res_slot1->foeheader.opcode == FOE_OP_ERR);
+            assert(res_slot1->foeheader.errorcode == 0x800A);
+            assert(MBXcontrol[1].state == MBXstate_outreq);
+
+            /* 模拟 SOES 发送给主站 */
+            ESC_writembx(1);
+            assert(s_esc_writembx_calls == 2);
+            assert(sent_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(sent_foe->foeheader.errorcode == 0x800A);
+            MBXcontrol[1].state = MBXstate_idle; /* 释放槽位 1 */
+
+            /* 8C: 多槽配置 (ESC_MBXBUFFERS=4) 与旧报文共存场景 */
+            reset_soes_environment();
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].filepass = 0x12345678U;
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+            /* 槽位 1 模拟排队待发的 CoE 旧报文，槽位 2 模拟备份报文 */
+            MBXcontrol[1].state = MBXstate_outreq;
+            _FOE *slot1_foe = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            slot1_foe->mbxheader.length = 10;
+            slot1_foe->mbxheader.mbxtype = 0x03; /* CoE */
+
+            MBXcontrol[2].state = MBXstate_backup;
+
+            /* 启用真实 SOES 3..1 扫描认领模式 */
+            s_mock_claimbuffer_mode = 1;
+
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0x12345678U;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+
+            /* 原生 SOES 扫描发现槽位 3 为空闲，成功认领槽位 3 */
+            assert(adapter.mbx_ctx.pre_states[3] == MBXstate_idle);
+            assert(MBXcontrol[3].state == MBXstate_outreq);
+            _FOE *res_slot3 = (_FOE *)&MBX[3 * ESC_MBXSIZE];
+            assert(res_slot3->foeheader.opcode == FOE_OP_ACK);
+
+            /* 执行后置钩子: 准确识别并锁定槽位 3，且杜绝破坏槽位 1 与槽位 2 */
+            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_slot3, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            assert(adapter.mbx_ctx.newly_claimed_slot == 3);
+            assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+
+            /* 关键断言: 槽位 1 与 2 的状态与内容未受触碰 */
+            assert(MBXcontrol[1].state == MBXstate_outreq);
+            assert(slot1_foe->mbxheader.mbxtype == 0x03);
+            assert(MBXcontrol[2].state == MBXstate_backup);
+
+            /* 槽位 3 的 ACK 发送给主站 */
+            ESC_writembx(3);
+            assert(sent_foe->foeheader.opcode == FOE_OP_ACK);
+            assert(sent_foe->foeheader.packetnumber == 0);
+
+            /* 槽位 1 依然维持待发状态 */
+            assert(MBXcontrol[1].state == MBXstate_outreq);
+
+            printf("  [PASS] 深度风险 8: ACK/ERR 最终完整发给主站，多槽与排队/备份共存正常，不篡改 SOES 所有权\n");
         }
     }
 

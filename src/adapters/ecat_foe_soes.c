@@ -27,8 +27,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
     adapter->original_n_files = 0;
-    adapter->registered_outbox_buf = NULL;
-    adapter->registered_outbox_max_len = 0;
+    memset(&adapter->mbx_ctx, 0, sizeof(adapter->mbx_ctx));
+    adapter->mbx_ctx.newly_claimed_slot = -1;
     adapter->target_to_file_map[0] = -1;
     for (size_t i = 1; i <= ECAT_FOE_TARGET_COUNT; i++) {
         adapter->target_to_file_map[i] = (int8_t)(i - 1);
@@ -71,27 +71,32 @@ int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t
     return 0;
 }
 
-int ecat_foe_soes_register_outbox(ecat_foe_soes_adapter_t *adapter,
-                                  uint8_t *mbx_out_buf,
-                                  size_t mbx_out_max_len)
+int ecat_foe_soes_set_mbx_context(ecat_foe_soes_adapter_t *adapter,
+                                  const void *mbx_control,
+                                  const uint8_t *mbx_buffers,
+                                  uint8_t num_buffers,
+                                  uint16_t buffer_size)
 {
-    if (adapter == NULL || mbx_out_buf == NULL ||
-        mbx_out_max_len < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+    if (adapter == NULL || mbx_control == NULL || mbx_buffers == NULL ||
+        num_buffers < 2 || num_buffers > ECAT_FOE_SOES_MAX_MBX_BUFFERS ||
+        buffer_size < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
         return -1;
     }
-    adapter->registered_outbox_buf = mbx_out_buf;
-    adapter->registered_outbox_max_len = mbx_out_max_len;
-    ecat_foe_soes_invalidate_outbox(mbx_out_buf, mbx_out_max_len);
+    adapter->mbx_ctx.mbx_control_states = (const uint8_t *)mbx_control;
+    adapter->mbx_ctx.mbx_buffers = mbx_buffers;
+    adapter->mbx_ctx.num_buffers = num_buffers;
+    adapter->mbx_ctx.buffer_size = buffer_size;
+    adapter->mbx_ctx.newly_claimed_slot = -1;
+    memset(adapter->mbx_ctx.pre_states, 0, sizeof(adapter->mbx_ctx.pre_states));
     return 0;
 }
 
-void ecat_foe_soes_invalidate_outbox(uint8_t *mbx_out_buf, size_t mbx_out_len)
+int8_t ecat_foe_soes_get_newly_claimed_slot(const ecat_foe_soes_adapter_t *adapter)
 {
-    if (mbx_out_buf == NULL || mbx_out_len < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
-        return;
+    if (adapter == NULL) {
+        return -1;
     }
-    /* 将 Mailbox Header 与 FoE Header 区域清零，使历史残留响应失效 */
-    memset(mbx_out_buf, 0, ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE);
+    return adapter->mbx_ctx.newly_claimed_slot;
 }
 
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn)
@@ -210,6 +215,19 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         return -1;
     }
 
+    /* 必须配置邮箱上下文以保证新鲜度与状态关联；未配置时无法确保响应关联，严格拒绝 */
+    if (adapter->mbx_ctx.mbx_control_states == NULL ||
+        adapter->mbx_ctx.mbx_buffers == NULL ||
+        adapter->mbx_ctx.num_buffers < 2) {
+        return -1;
+    }
+
+    /* 对所有输出邮箱槽位状态进行只读快照 (不向 SOES 写入任何数据，绝不篡改 SOES 内存) */
+    adapter->mbx_ctx.newly_claimed_slot = -1;
+    for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+        adapter->mbx_ctx.pre_states[i] = adapter->mbx_ctx.mbx_control_states[i];
+    }
+
     /* 记录并维护从站初始真实条目数 */
     if (adapter->original_n_files == 0 && foe_cfg->n_files > 0) {
         adapter->original_n_files = foe_cfg->n_files;
@@ -311,11 +329,6 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     adapter->staged_target_id = tid;
     s_active_adapter = adapter;
 
-    /* 关键新鲜度保障：若注册了发送邮箱，在 SOES 处理前使发送邮箱首部失效，防范残留响应 */
-    if (adapter->registered_outbox_buf != NULL) {
-        ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
-    }
-
     return 0;
 }
 
@@ -337,50 +350,85 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         return 0;
     }
 
-    /* 核验从站发送邮箱报文是否为有效 FoE ACK(0) */
-    bool is_valid_ack = false;
-    if (mbx_out_buf != NULL && mbx_out_len >= (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
-        uint16_t mbx_len = (uint16_t)(mbx_out_buf[0] | ((uint16_t)mbx_out_buf[1] << 8));
-        /* 严格核验声明长度与实际缓冲长度：声明载荷长度必须等于 ECAT_FOE_HDR_SIZE (6 字节)
-         * 且传入的缓冲区总长度必须足以容纳 Mailbox 头与声明的有效载荷 */
-        if (mbx_len == ECAT_FOE_HDR_SIZE && mbx_out_len >= (size_t)(ECAT_MBX_HDR_SIZE + mbx_len)) {
-            uint8_t mbx_type = (uint8_t)(mbx_out_buf[5] & 0x0FU);
-            uint8_t opcode   = mbx_out_buf[ECAT_MBX_HDR_SIZE];
-            uint32_t packet_num = (uint32_t)(mbx_out_buf[ECAT_MBX_HDR_SIZE + 2] |
-                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 3] << 8) |
-                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 4] << 16) |
-                                             ((uint32_t)mbx_out_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
+    /* 若未配置邮箱上下文，无法保证新鲜度与关联，严格失败关闭 */
+    if (adapter->mbx_ctx.mbx_control_states == NULL ||
+        adapter->mbx_ctx.mbx_buffers == NULL ||
+        adapter->mbx_ctx.num_buffers < 2) {
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return -1;
+    }
 
-            if (mbx_type == ECAT_MBX_TYPE_FOE &&
-                opcode == ECAT_FOE_OP_ACK &&
-                packet_num == 0) {
-                is_valid_ack = true;
-            }
+    /* 扫描输出邮箱槽位状态迁移：寻找在本轮处理中由 MBXstate_idle 跃迁至 MBXstate_outreq 的唯一新认领槽位 */
+    int newly_claimed = -1;
+    int count_new = 0;
+    for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+        uint8_t pre = adapter->mbx_ctx.pre_states[i];
+        uint8_t cur = adapter->mbx_ctx.mbx_control_states[i];
+        if (pre == MBXstate_idle && cur == MBXstate_outreq) {
+            newly_claimed = (int)i;
+            count_new++;
         }
     }
 
-    if (is_valid_ack) {
-        /* 原生 SOES 已正式接受 WRQ 并回复 ACK(0)：此时安全激活新会话 */
+    /* 若无新槽位认领 (如输出邮箱耗尽、无可用缓冲) 或出现异常多槽认领，严格判定为未产出合法新响应，安全释放暂存 */
+    if (count_new != 1 || newly_claimed < 1) {
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return 0; /* 安全退出，核心会话与驱动未受触碰 */
+    }
+
+    adapter->mbx_ctx.newly_claimed_slot = (int8_t)newly_claimed;
+
+    /* 获取 SOES 新认领槽位中的报文数据首地址 */
+    const uint8_t *slot_buf = &adapter->mbx_ctx.mbx_buffers[newly_claimed * adapter->mbx_ctx.buffer_size];
+
+    /* 若外部调用显式传入了 mbx_out_buf，则必须与实际新认领的槽位首地址一致，杜绝错传旧槽位或无关内存 */
+    if (mbx_out_buf != NULL && mbx_out_buf != slot_buf) {
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return 0; /* 槽位不匹配，安全丢弃 */
+    }
+
+    /* 对新认领槽位中的报文进行严格的长度与格式校验 */
+    uint16_t mbx_len = (uint16_t)(slot_buf[0] | ((uint16_t)slot_buf[1] << 8));
+    uint8_t mbx_type = (uint8_t)(slot_buf[5] & 0x0FU);
+
+    if (mbx_len != ECAT_FOE_HDR_SIZE ||
+        adapter->mbx_ctx.buffer_size < (ECAT_MBX_HDR_SIZE + mbx_len) ||
+        (mbx_out_buf != NULL && mbx_out_len < (size_t)(ECAT_MBX_HDR_SIZE + mbx_len)) ||
+        mbx_type != ECAT_MBX_TYPE_FOE) {
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return 0;
+    }
+
+    uint8_t opcode = slot_buf[ECAT_MBX_HDR_SIZE];
+    uint32_t packet_num = (uint32_t)(slot_buf[ECAT_MBX_HDR_SIZE + 2] |
+                                     ((uint32_t)slot_buf[ECAT_MBX_HDR_SIZE + 3] << 8) |
+                                     ((uint32_t)slot_buf[ECAT_MBX_HDR_SIZE + 4] << 16) |
+                                     ((uint32_t)slot_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
+
+    if (opcode == ECAT_FOE_OP_ACK && packet_num == 0) {
+        /* SOES 原生校验通过且已将有效 ACK(0) 置入发送邮箱待发：正式提交核心会话 */
         int rc = ecat_foe_core_on_wrq(adapter->core,
                                       adapter->staged_filename,
                                       strlen(adapter->staged_filename));
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        /* 消费完毕：若注册了发送邮箱，立即使该响应失效，切断残留复用路径 */
-        if (adapter->registered_outbox_buf != NULL) {
-            ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
-        }
+        /* 绝不改写或清零发送邮箱缓冲区，保留 SOES 原生报文以供后续 ESC_writembx 发送给主站 */
         return rc;
     } else {
-        /* 原生 SOES 拒绝了 WRQ 或输出了非 ACK(0) 报文 (包括 ERR、NULL 缓冲区、短帧、非 FoE 等)：
-         * 一律释放暂存，绝不留存或打扰旧会话 */
+        /* SOES 拒绝了 WRQ (如 FOE_OP_ERR 0x800A 密码错误，或 0x8008 非 BOOT 态)：
+         * 安全丢弃暂存 WRQ，核心维持原有会话状态不变，且保留 FOE_OP_ERR 以供发给主站 */
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        if (adapter->registered_outbox_buf != NULL) {
-            ecat_foe_soes_invalidate_outbox(adapter->registered_outbox_buf, adapter->registered_outbox_max_len);
-        }
         return 0;
     }
 }

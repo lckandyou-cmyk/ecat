@@ -46,6 +46,30 @@ extern "C" {
  */
 typedef void (*ecat_foe_al_error_fn_t)(uint16_t errornumber);
 
+#ifndef MBXstate_idle
+#define MBXstate_idle                   0x00
+#define MBXstate_inclaim                0x01
+#define MBXstate_outclaim               0x02
+#define MBXstate_outreq                 0x03
+#define MBXstate_outpost                0x04
+#define MBXstate_backup                 0x05
+#define MBXstate_again                  0x06
+#endif
+
+#define ECAT_FOE_SOES_MAX_MBX_BUFFERS   16U
+
+/**
+ * @brief SOES 邮箱分配与状态只读观察上下文
+ */
+typedef struct {
+    const uint8_t *mbx_control_states; /**< 指向 SOES MBXcontrol[].state 数组首地址 (每个元素 1 字节) */
+    const uint8_t *mbx_buffers;        /**< 指向 SOES 全局 MBX 缓冲区首地址 */
+    uint8_t        num_buffers;        /**< 邮箱缓冲区总数 (对应 SOES ESC_MBXBUFFERS，通常为 2 或 4) */
+    uint16_t       buffer_size;        /**< 单个邮箱槽位字节容量 (对应 SOES ESC_MBXSIZE) */
+    uint8_t        pre_states[ECAT_FOE_SOES_MAX_MBX_BUFFERS]; /**< pre_process_hook 执行前各槽位状态快照 */
+    int8_t         newly_claimed_slot; /**< 本轮由 SOES 新认领并置为 outreq 的槽位索引 (-1 表示未认领) */
+} ecat_foe_soes_mbx_ctx_t;
+
 typedef struct {
     ecat_foe_core_t        *core;
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
@@ -55,8 +79,7 @@ typedef struct {
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
     uint32_t                original_n_files;   /**< 从站初始配置的真实文件条目数 */
     int8_t                  target_to_file_map[ECAT_FOE_TARGET_COUNT + 1]; /**< 目标 ID (1..4) 到 files[] 索引映射 (-1 为未映射) */
-    uint8_t                *registered_outbox_buf;     /**< 托管的发送邮箱缓冲区指针 (可选，用于新鲜度保障) */
-    size_t                  registered_outbox_max_len; /**< 托管的发送邮箱容量 */
+    ecat_foe_soes_mbx_ctx_t mbx_ctx;            /**< SOES 邮箱分配与状态观察上下文 (不篡改 SOES 内存所有权) */
 } ecat_foe_soes_adapter_t;
 
 /**
@@ -99,29 +122,35 @@ void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter);
 int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, int32_t file_idx);
 
 /**
- * @brief 注册从站发送邮箱缓冲区并由适配层托管新鲜度生命周期
+ * @brief 配置 SOES 邮箱分配与状态只读观察上下文
  *
- * 托管后：
- * 1. 每次 pre_process_hook 暂存 WRQ 时，自动将发送邮箱首部清零，切断历史残留响应；
- * 2. 若原生 SOES 因密码错误、非 BOOT、无可用输出邮箱等未能产生新响应，发送邮箱保持失效状态；
- * 3. post_process_hook 消费 ACK(0) 激活核心会话后，自动使该响应失效，杜绝重放或旧缓存误激活。
+ * 依据真实 SOES 邮箱分配机制 (ESC_claimbuffer / MBXcontrol)：
+ * 适配层严格遵循只读观察原则，不篡改 SOES 内存所有权，不向发送邮箱缓冲区或状态数组写入任何数据。
+ * 在 pre_process_hook 执行时对各槽位状态进行快照；
+ * 在 post_process_hook 执行时比对状态迁移 (仅当槽位由 MBXstate_idle 跃迁至 MBXstate_outreq 时认定为本轮新响应)；
+ * 响应报文完整保留在 SOES 缓冲区内以供后续 ESC_writembx 正常发送给主站；
+ * 若未配置邮箱上下文，或出现无新响应、多槽或非 idle 状态，适配层严格遵循失败关闭 (Fail-Closed) 原则，绝不激活会话。
  *
- * @param adapter           适配层上下文指针
- * @param mbx_out_buf       发送邮箱缓冲区首地址
- * @param mbx_out_max_len   发送邮箱缓冲区最大长度 (至少 12 字节)
+ * @param adapter       适配层上下文指针
+ * @param mbx_control   指向 SOES MBXcontrol[0].state 数组首地址
+ * @param mbx_buffers   指向 SOES MBX 全局缓冲区首地址
+ * @param num_buffers   邮箱缓冲区总数 (ESC_MBXBUFFERS，至少为 2，且不超过 ECAT_FOE_SOES_MAX_MBX_BUFFERS)
+ * @param buffer_size   单个邮箱槽位字节容量 (ESC_MBXSIZE，至少 12 字节)
  * @return 0 成功；非 0 表示参数非法
  */
-int ecat_foe_soes_register_outbox(ecat_foe_soes_adapter_t *adapter,
-                                  uint8_t *mbx_out_buf,
-                                  size_t mbx_out_max_len);
+int ecat_foe_soes_set_mbx_context(ecat_foe_soes_adapter_t *adapter,
+                                  const void *mbx_control,
+                                  const uint8_t *mbx_buffers,
+                                  uint8_t num_buffers,
+                                  uint16_t buffer_size);
 
 /**
- * @brief 手动使发送邮箱缓冲区响应失效 (供未托管缓冲区的应用在 ESC_foeprocess() 前调用)
+ * @brief 获取最近一轮由 SOES 成功认领并产出响应的邮箱槽位索引
  *
- * @param mbx_out_buf 发送邮箱缓冲区首地址
- * @param mbx_out_len 发送邮箱缓冲区长度
+ * @param adapter 适配层上下文指针
+ * @return 槽位索引 (1..num_buffers-1)；若无新槽位认领则返回 -1
  */
-void ecat_foe_soes_invalidate_outbox(uint8_t *mbx_out_buf, size_t mbx_out_len);
+int8_t ecat_foe_soes_get_newly_claimed_slot(const ecat_foe_soes_adapter_t *adapter);
 
 /**
  * @brief SOES WRQ 检查钩子 (在主站发起 WRQ 时调用)
