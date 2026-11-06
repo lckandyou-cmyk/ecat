@@ -17,6 +17,13 @@ SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-
 # 阶段 D: 宿主机参考示例与驱动模板源码
 EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
+EXAMPLES_BOOTLOADER_SRCS = \
+	examples/bootloader_soes/bootloader_flash_driver.c \
+	examples/bootloader_soes/bootloader_app.c \
+	examples/bootloader_soes/bootloader_master_flow.c
+EXAMPLES_BOOTLOADER_ALL_SRC = \
+	$(EXAMPLES_BOOTLOADER_SRCS) \
+	examples/bootloader_soes/test_bootloader_integration.c
 
 # 阶段 E: Beckhoff SSC 适配层抽象契约与 Mock 测试源码 (契约测试桩，非真实 SSC 验证)
 SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c
@@ -129,9 +136,28 @@ test-examples:
 	echo "  [PASS] host_demo 在 8MB 与 1MB 栈下运行正常" && \
 	echo "--- 运行 host_demo 外部隔离、同名哨兵保护与多实例并发验证 ---" && \
 	$(PYTHON) tests/test_host_demo_isolation.py "$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" && \
-	echo "--- 静态编译检查驱动模板 (在独立临时构建目录) ---" && \
+	echo "--- 静态编译检查驱动模板与 Bootloader 接入参考 (在独立临时构建目录) ---" && \
 	$(CC) $(CFLAGS) -c -o "$$TMP_BUILD_DIR/driver_template.o" $(EXAMPLES_DRIVER_TEMPLATE_SRC) && \
-	echo "  [PASS] driver_template 编译检查通过 (-Wall -Wextra -Werror -pedantic)"
+	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_flash_driver.o" examples/bootloader_soes/bootloader_flash_driver.c && \
+	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_app.o" examples/bootloader_soes/bootloader_app.c && \
+	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_master_flow.o" examples/bootloader_soes/bootloader_master_flow.c && \
+	echo "  [PASS] 驱动模板与 Bootloader 接入参考静态编译检查通过 (-Wall -Wextra -Werror -pedantic)"
+
+test-bootloader:
+	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ] || [ ! -f "$(SOES_DIR)/esc.c" ]; then \
+		echo "错误: SOES_DIR 缺失或未包含 esc_foe.c / esc.c: '$(SOES_DIR)'"; \
+		echo "使用方法: make test-bootloader SOES_DIR=/path/to/soes"; \
+		exit 1; \
+	fi
+	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)"
+	@TMP_SOES_DIR=$$(mktemp -d /tmp/foe_build_bootloader_XXXXXX) && \
+	trap 'rm -rf "$$TMP_SOES_DIR"' EXIT INT TERM && \
+	echo "--- 在独立隔离构建目录编译并运行最小 Bootloader 集成验证 (构建目录: $$TMP_SOES_DIR) ---" && \
+	$(CC) $(SOES_CFLAGS) -Iexamples/bootloader_soes -o "$$TMP_SOES_DIR/test_runner_bootloader_soes" $(SRC_CORE) $(EXAMPLES_BOOTLOADER_ALL_SRC) $(SOES_DIR)/esc_foe.c $(SOES_DIR)/esc.c && \
+	"$$TMP_SOES_DIR/test_runner_bootloader_soes" && \
+	(ulimit -s 8192 && "$$TMP_SOES_DIR/test_runner_bootloader_soes" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_bootloader_soes" >/dev/null) && \
+	echo "  [PASS] 最小 Bootloader 集成测试在 8MB 与 1MB 栈下运行正常"
 
 test-soes:
 	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ] || [ ! -f "$(SOES_DIR)/esc.c" ]; then \
@@ -147,7 +173,13 @@ test-soes:
 	"$$TMP_SOES_DIR/test_runner_soes_real" && \
 	(ulimit -s 8192 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
 	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
-	echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常"
+	echo "  [PASS] 真实 SOES Harness 在 8MB 与 1MB 栈下运行正常" && \
+	echo "--- 在独立隔离构建目录编译并运行最小 Bootloader 集成验证 (构建目录: $$TMP_SOES_DIR) ---" && \
+	$(CC) $(SOES_CFLAGS) -Iexamples/bootloader_soes -o "$$TMP_SOES_DIR/test_runner_bootloader_soes" $(SRC_CORE) $(EXAMPLES_BOOTLOADER_ALL_SRC) $(SOES_DIR)/esc_foe.c $(SOES_DIR)/esc.c && \
+	"$$TMP_SOES_DIR/test_runner_bootloader_soes" && \
+	(ulimit -s 8192 && "$$TMP_SOES_DIR/test_runner_bootloader_soes" >/dev/null) && \
+	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_bootloader_soes" >/dev/null) && \
+	echo "  [PASS] 最小 Bootloader 集成测试在 8MB 与 1MB 栈下运行正常"
 
 # ASan 内存与未定义行为核验目标 (完整运行示例、Python 工具与全套 C 二进制测试)
 # 历史构建与环境条件复核说明:

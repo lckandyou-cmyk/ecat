@@ -1,4 +1,4 @@
-> 状态：草案，尚不可用。仅在宿主机单元测试中验证。SOES 适配层未接通真实协议栈（不调用 on_wrq 时首块数据会被拒绝，见 test_reproduce_soes_data_callback_without_wrq_stream_rejection）。未经硬件验证，不可用于生产。文件名协议架构待定。
+> 状态：研发阶段。核心升级状态机已闭环；SOES 适配层已接通真实 SOES `esc.c` + `esc_foe.c` 宿主测试 Harness，实现了基于前后置邮箱嗅探与中和钩子的零侵入接入方案，并通过 11 组核心协议行为及 9 大深度风险（密码时序、信箱计数保持、WAIT_FOR_DATA 自愈、多槽隔离等）宿主验证；提供可编译的最小 Bootloader 接入参考与集成验证套件（`examples/bootloader_soes/`）。物理硬件板卡与现场真实主站联调待现场开展，未经真机实测前不可用于生产。
 
 # ecat (Universal EtherCAT FoE Upgrade Library)
 
@@ -11,7 +11,7 @@
 - **规范版本**：遵循 `docs/spec/efw-format-v0.1.md` 固件容器格式规范与 `docs/architecture/SAD-v0.1.md` 系统架构设计。
 - **当前阶段**：
   - **阶段 A（固件解析与核验）**：已完成。支持 64 字节 `.efw` 头部的三阶段反序列化、小端安全读写、双向元数据校验及 IEEE 802.3 CRC32 运算。
-  - **阶段 B（核心升级状态机与适配）**：核心机在宿主机桩上验证，SOES 适配层未接通真实协议栈。包含驱动生命周期互斥、水位按需擦除、双重 CRC 防线、防回滚与自愈机制。
+  - **阶段 B（核心升级状态机与适配）**：核心机在宿主机桩上验证；SOES 适配层已接通真实 SOES `esc.c` + `esc_foe.c` 宿主 Harness（支持前置嗅探与后置中和钩子），完成 11 项核心行为与 9 大深度风险（密码时序、信箱计数保持、WAIT_FOR_DATA 自愈等）宿主验证；提供最小 Bootloader 接入参考 (`examples/bootloader_soes/`)；Beckhoff SSC 抽象适配层已规划并具备 Mock 契约测试；物理硬件板卡与现场真实主站联调待现场开展。
   - **全量单元测试与内存安全**：在 Apple clang 与 GNU gcc-16（含 `-fsanitize=address,undefined`）下全量自动化测试通过（测试断言与夹具统计见 make test 输出）。
 
 ---
@@ -40,7 +40,7 @@
 ## 🔌 协议栈接入与约束说明
 
 ### 1. Simple Open EtherCAT Slave (SOES) 接入
-- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现接口转换打样与单测桩。**已有宿主测试 harness 编译链接真实 SOES `esc_foe.c` 并观察到短前缀匹配、0 长度包忽略写回调错误等真实协议栈行为（均为宿主观察，非物理硬件测试）**。在 harness 端到端测试（Test 5）中，测试代码手动调用了 `ecat_foe_soes_on_wrq`，但在原生 SOES 生产现实中并没有调用该 WRQ 钩子的调用方【仍属于宿主环境仿真，现场硬件与真实主站动态联调尚未开展】。
+- **适配层现状**：已在 `src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h` 实现生产级前后置邮箱钩子架构（`ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`）。**在宿主测试 Harness 中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路**。通过前置嗅探暂存 WRQ、后置核验响应并就地将异常中和为标准 `FOE_OP_ERR (0x8000)`、严格保持原有信箱头计数器 `mbxcnt`，并通过 `ecat_foe_soes_set_foe_reset_fn()` 注入 `FOE_init` 实现了立即复位自愈，消除了原生 SOES 无 WRQ 回调的缺陷与假 ACK 风险。提供配套最小 Bootloader 接入参考与 5 大场景集成验证（`examples/bootloader_soes/`）。【仍属于宿主环境仿真，物理硬件与现场真实主站动态联调尚未开展】。
 - **原生协议栈限制与技术约束 (宿主 harness 观察与工程约束)**：
   - *【宿主观察】文件名匹配机制与空名/短前缀风险*：原生 SOES 在 `esc_foe.c` 的 WRQ 文件名匹配逻辑中采用 `0 == strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)`。其匹配判定由接收长度 `num_chars` 决定前缀匹配，而非全名比对。宿主 harness 实测证实短前缀会误命中首个具有该前缀的表项，且空文件名（`num_chars == 0`）无条件命中 `files[0]`；
   - *【宿主观察】0 长度结束包与写回调错误忽略*：原生 SOES 在 `esc_foe.c` 的 0 长度结束包分支中直接忽略了 `FOE_fclose()` 的返回值并发送成功 ACK。宿主 harness 实测证实短包分支会严格触发 `FOE_abort(0x800B)`，但 0 长度结束包写失败无法通知主站；
@@ -57,7 +57,8 @@
 | **SOES WRQ 不调数据写回调** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 1) | 宿主观察，证实 WRQ 阶段不触发 `write_function` |
 | **SOES 短前缀匹配特性** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 2) | 宿主观察，证实短前缀匹配，非硬件总线测试 |
 | **SOES 零长度包忽略写回调错误** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 3) | 宿主观察，证实 0 长度包忽略 `FOE_fclose` 失败回复 ACK |
-| **SOES 驱动已注册回调端到端** | 宿主 Harness (真实 `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 5) | 宿主观察，Test 5 手动调用 `on_wrq`，生产中无调用方 |
+| **SOES 前后置钩子端到端闭环** | 宿主 Harness (真实 `esc.c` + `esc_foe.c`) | `tests/test_soes_real_harness.c` (Test 5 / 风险 1~9) | 宿主观察，通过前后置钩子实现零侵入端到端闭环，非硬件总线测试 |
+| **最小 Bootloader 接入参考验证** | 宿主集成测试 (真实 SOES) | `examples/bootloader_soes/test_bootloader_integration.c` | 通过，覆盖有效升级、项目/硬件不符、存储故障、中途异常与本地基地址裁决，宿主内存仿真 |
 | **SOES 真实从站硬件与主站联调** | 物理硬件 / 现场总线 | - | 【未核实/待开发与真机动态验证】 |
 
 ### 2. Beckhoff Slave Stack Code (SSC) 接入
@@ -116,6 +117,14 @@ make test-asan CC=clang
 │   │   └── ecat_foe_soes.c      # SOES 适配层实现
 │   ├── ecat_foe_core.c          # 核心升级状态机实现 (纯 C99, 零 malloc)
 │   └── ecat_foe_efw.c           # .efw 容器头反序列化与 CRC32 实现
+├── examples/
+│   └── bootloader_soes/         # 基于真实 SOES 的最小 Bootloader 接入参考
+│       ├── bootloader_config.h  # 板级分区与工程配置（本地物理基地址裁决）
+│       ├── bootloader_flash_driver.c / .h # 遵循生命周期契约的 Flash 驱动
+│       ├── bootloader_app.c / .h# 核心机与 SOES 串行驱动应用
+│       ├── bootloader_master_flow.c / .h # 主站发送端报文交互流
+│       ├── test_bootloader_integration.c # 5 大场景宿主集成测试套件
+│       └── README.md            # Bootloader 移植与接入参考文档
 ├── tools/
 │   └── efw_pack.py              # .efw 固件容器打包与对齐填充工具
 ├── tests/
