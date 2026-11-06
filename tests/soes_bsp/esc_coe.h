@@ -13,4 +13,6 @@ typedef struct {
     uint8_t subindex;
 } _SMmap;
 
+uint16_t sizeOfPDO (uint16_t objidx, int *mappings, _SMmap *map, int max_mappings);
+
 #endif /* __SOES_BSP_ESC_COE_H__ */

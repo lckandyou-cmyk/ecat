@@ -640,9 +640,9 @@ def clean_build(build_dir: str):
         # 遵循默认非破坏与升级兼容安全原则：
         # 对缺失、空或无效清单哈希指纹的旧版或非受控凭据，无法证明当前清单未被篡改，默认安全保留并终止清理以防误删！
         expected_manifest_hash = host_voucher.get("manifest_hash")
-        if (not expected_manifest_hash or 
-            not isinstance(expected_manifest_hash, str) or 
-            len(expected_manifest_hash) != 64 or 
+        if (not expected_manifest_hash or
+            not isinstance(expected_manifest_hash, str) or
+            len(expected_manifest_hash) != 64 or
             not all(c in "0123456789abcdefABCDEF" for c in expected_manifest_hash)):
             print("  [CLEAN] 宿主凭据缺少有效清单哈希指纹（旧版凭据或非受控凭据），依据默认非破坏原则跳过清理以保护存量文件。")
             return

@@ -59,11 +59,22 @@ typedef void (*ecat_foe_al_error_fn_t)(uint16_t errornumber);
 #define ECAT_FOE_SOES_MAX_MBX_BUFFERS   16U
 
 /**
- * @brief SOES 邮箱分配与状态只读观察上下文
+ * @brief SOES 邮箱分配与状态观察上下文
+ *
+ * 【并发与安全接入契约 (Safety Invariants)】:
+ * 1. 单执行流原子互斥契约: SOES 协议栈本身非多线程安全。本适配器的前置钩子 (ecat_foe_soes_pre_process_hook)、
+ *    SOES 协议处理 (ESC_foeprocess) 与后置钩子 (ecat_foe_soes_post_process_hook) 必须在同一个串行执行上下文
+ *    (如单线程事件轮询或中断屏蔽保护的临界区) 中按顺序原子执行。
+ * 2. 禁止中间状态迁移插入: 在 pre 快照记录至 post 校验完成之间，严禁有任何其他线程、任务或中断服务程序
+ *    插入对 SOES MBXcontrol 的状态修改 (如并发认领新槽位、输出 CoE/EoE 响应等)。
+ * 3. 不支持无锁多任务场景: 若宿主系统无法保障上述互斥与无插入契约，明确不支持在多任务并发非互斥环境下接入。
+ * 4. 主站可观察一致失败保障: 若后置钩子检测到槽地址不匹配、多槽异常迁移 (竞态违约)、报文畸形或核心会话激活失败，
+ *    为防止 SOES 原生排队的 ACK(0) 误发给主站造成假成功，适配层会将待发槽位中的 ACK 转换为标准 FOE_OP_ERR (0x8000)，
+ *    向主站提供明确可观察的一致失败。
  */
 typedef struct {
     const uint8_t *mbx_control_states; /**< 指向 SOES MBXcontrol[].state 数组首地址 (每个元素 1 字节) */
-    const uint8_t *mbx_buffers;        /**< 指向 SOES 全局 MBX 缓冲区首地址 */
+    uint8_t       *mbx_buffers;        /**< 指向 SOES 全局 MBX 缓冲区首地址 (用于只读核验与异常时的一致失败中和) */
     uint8_t        num_buffers;        /**< 邮箱缓冲区总数 (对应 SOES ESC_MBXBUFFERS，通常为 2 或 4) */
     uint16_t       buffer_size;        /**< 单个邮箱槽位字节容量 (对应 SOES ESC_MBXSIZE) */
     uint8_t        pre_states[ECAT_FOE_SOES_MAX_MBX_BUFFERS]; /**< pre_process_hook 执行前各槽位状态快照 */
@@ -122,14 +133,15 @@ void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter);
 int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, int32_t file_idx);
 
 /**
- * @brief 配置 SOES 邮箱分配与状态只读观察上下文
+ * @brief 配置 SOES 邮箱分配与状态观察上下文
  *
  * 依据真实 SOES 邮箱分配机制 (ESC_claimbuffer / MBXcontrol)：
- * 适配层严格遵循只读观察原则，不篡改 SOES 内存所有权，不向发送邮箱缓冲区或状态数组写入任何数据。
+ * 正常工作流程下适配层严格遵循只读观察原则，不篡改 SOES 内存所有权；
  * 在 pre_process_hook 执行时对各槽位状态进行快照；
  * 在 post_process_hook 执行时比对状态迁移 (仅当槽位由 MBXstate_idle 跃迁至 MBXstate_outreq 时认定为本轮新响应)；
  * 响应报文完整保留在 SOES 缓冲区内以供后续 ESC_writembx 正常发送给主站；
- * 若未配置邮箱上下文，或出现无新响应、多槽或非 idle 状态，适配层严格遵循失败关闭 (Fail-Closed) 原则，绝不激活会话。
+ * 若检测到异常 (槽地址不匹配、多槽竞态违约、核心会话激活失败等)，适配层将待发报文安全转为 FOE_OP_ERR (0x8000)，
+ * 确保主站获得可观察的一致失败并终止传输。
  *
  * @param adapter       适配层上下文指针
  * @param mbx_control   指向 SOES MBXcontrol[0].state 数组首地址
@@ -140,7 +152,7 @@ int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t
  */
 int ecat_foe_soes_set_mbx_context(ecat_foe_soes_adapter_t *adapter,
                                   const void *mbx_control,
-                                  const uint8_t *mbx_buffers,
+                                  uint8_t *mbx_buffers,
                                   uint8_t num_buffers,
                                   uint16_t buffer_size);
 
@@ -202,16 +214,20 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
  * 在 PDI 主循环调用 ESC_foeprocess() 之后调用本函数。
  * 1. 恢复 foe_cfg->n_files 为真实原始条目数；
  * 2. 若存在暂存的 WRQ：
- *    - 严格核验从站发送邮箱是否为有效 FoE ACK(0) 报文 (mbxtype == 0x04, length >= 6, opcode == 0x04, packetnumber == 0)；
+ *    - 严格核验从站发送邮箱是否为有效 FoE ACK(0) 报文 (mbxtype == 0x04, length == 6, opcode == 0x04, packetnumber == 0)；
  *    - 若核验通过：确认原生 SOES 已通过密码/BOOT等全部检查并正式接受 WRQ，正式调用 core_on_wrq 激活新会话；
- *    - 若核验未通过 (包括 FOE_OP_ERR、NULL 缓冲区、空帧/短帧、非 FoE 报文等)：
- *      说明原生 SOES 拒绝了该 WRQ 或报文无关，安全丢弃暂存 WRQ，绝不打断核心旧会话。
+ *      若 core_on_wrq 激活失败，则将该槽位就地改写为 FOE_OP_ERR (0x8000)，确保主站可观察到明确失败，返回非 0；
+ *    - 若核验未通过或发生异常 (包括槽地址不匹配、多槽竞态违约、非法报文等)：
+ *      若检测到待发槽位中包含未经激活的 ACK(0)，自动将其改写为 FOE_OP_ERR (0x8000)，防止主站误收假 ACK；
+ *      安全丢弃暂存 WRQ，绝不打断核心旧会话，并返回非 0；
+ *    - 若原生 SOES 返回原生 FOE_OP_ERR：
+ *      保留原生错误响应，安全丢弃暂存 WRQ，返回 0。
  *
  * @param adapter      适配层上下文指针
  * @param foe_cfg      SOES 的 foe_cfg 配置结构体指针
  * @param mbx_out_buf  从站 SM3 发送邮箱缓冲区首地址 (通常为 &MBX[1 * ESC_MBXSIZE] 或实际输出邮箱)
  * @param mbx_out_len  发送邮箱数据长度
- * @return 0 成功
+ * @return 0 成功；非 0 表示异常或失败关闭
  */
 int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                                     foe_cfg_t *foe_cfg,

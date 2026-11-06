@@ -73,7 +73,7 @@ int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t
 
 int ecat_foe_soes_set_mbx_context(ecat_foe_soes_adapter_t *adapter,
                                   const void *mbx_control,
-                                  const uint8_t *mbx_buffers,
+                                  uint8_t *mbx_buffers,
                                   uint8_t num_buffers,
                                   uint16_t buffer_size)
 {
@@ -200,6 +200,39 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
 #define ECAT_FOE_OP_ERR   0x05U
 #define ECAT_MBX_HDR_SIZE 6U
 #define ECAT_FOE_HDR_SIZE 6U
+#define ECAT_FOE_ERR_NOTDEFINED 0x8000U
+
+static void foe_convert_slot_to_error(uint8_t *slot_buf, uint16_t buffer_size, uint32_t error_code)
+{
+    if (slot_buf == NULL || buffer_size < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+        return;
+    }
+    slot_buf[0] = (uint8_t)(ECAT_FOE_HDR_SIZE & 0xFF);
+    slot_buf[1] = (uint8_t)((ECAT_FOE_HDR_SIZE >> 8) & 0xFF);
+    slot_buf[2] = 0x00;
+    slot_buf[3] = 0x00;
+    slot_buf[4] = 0x00;
+    slot_buf[5] = ECAT_MBX_TYPE_FOE;
+    slot_buf[ECAT_MBX_HDR_SIZE + 0] = ECAT_FOE_OP_ERR;
+    slot_buf[ECAT_MBX_HDR_SIZE + 1] = 0x00;
+    slot_buf[ECAT_MBX_HDR_SIZE + 2] = (uint8_t)(error_code & 0xFF);
+    slot_buf[ECAT_MBX_HDR_SIZE + 3] = (uint8_t)((error_code >> 8) & 0xFF);
+    slot_buf[ECAT_MBX_HDR_SIZE + 4] = (uint8_t)((error_code >> 16) & 0xFF);
+    slot_buf[ECAT_MBX_HDR_SIZE + 5] = (uint8_t)((error_code >> 24) & 0xFF);
+}
+
+static void foe_neutralize_slot_if_ack(uint8_t *slot_buf, uint16_t buffer_size)
+{
+    if (slot_buf == NULL || buffer_size < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
+        return;
+    }
+    uint8_t mbx_type = (uint8_t)(slot_buf[5] & 0x0FU);
+    uint8_t opcode = slot_buf[ECAT_MBX_HDR_SIZE];
+    /* 若该槽位包含待发的 FoE ACK(0)，改写为 FOE_OP_ERR (0x8000)，提供主站可观察的一致失败 */
+    if (mbx_type == ECAT_MBX_TYPE_FOE && opcode == ECAT_FOE_OP_ACK) {
+        foe_convert_slot_to_error(slot_buf, buffer_size, ECAT_FOE_ERR_NOTDEFINED);
+    }
+}
 
 #ifndef ECAT_FOE_SOES_MAX_FILES
 #define ECAT_FOE_SOES_MAX_FILES 4
@@ -360,7 +393,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         return -1;
     }
 
-    /* 扫描输出邮箱槽位状态迁移：寻找在本轮处理中由 MBXstate_idle 跃迁至 MBXstate_outreq 的唯一新认领槽位 */
+    /* 扫描输出邮箱槽位状态迁移：寻找在本轮处理中由 MBXstate_idle 跃迁至 MBXstate_outreq 的新认领槽位 */
     int newly_claimed = -1;
     int count_new = 0;
     for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
@@ -372,28 +405,45 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         }
     }
 
-    /* 若无新槽位认领 (如输出邮箱耗尽、无可用缓冲) 或出现异常多槽认领，严格判定为未产出合法新响应，安全释放暂存 */
-    if (count_new != 1 || newly_claimed < 1) {
+    /* Case A: 若无新槽位认领 (如输出邮箱耗尽、无可用缓冲) */
+    if (count_new == 0) {
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        return 0; /* 安全退出，核心会话与驱动未受触碰 */
+        return 0; /* 无待发报文产生，安全释放暂存 */
     }
 
-    adapter->mbx_ctx.newly_claimed_slot = (int8_t)newly_claimed;
+    /* Case B: 检测到多个新槽位同时跃迁为 outreq (违反单执行流无插入互斥契约) */
+    if (count_new > 1) {
+        /* 扫描所有新跃迁槽位，若包含待发的 ACK 则中和为 FOE_OP_ERR，杜绝主站收到假 ACK */
+        for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+            uint8_t pre = adapter->mbx_ctx.pre_states[i];
+            uint8_t cur = adapter->mbx_ctx.mbx_control_states[i];
+            if (pre == MBXstate_idle && cur == MBXstate_outreq) {
+                uint8_t *slot_ptr = &adapter->mbx_ctx.mbx_buffers[i * adapter->mbx_ctx.buffer_size];
+                foe_neutralize_slot_if_ack(slot_ptr, adapter->mbx_ctx.buffer_size);
+            }
+        }
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return -1; /* 契约破坏，安全中和并报错 */
+    }
 
-    /* 获取 SOES 新认领槽位中的报文数据首地址 */
-    const uint8_t *slot_buf = &adapter->mbx_ctx.mbx_buffers[newly_claimed * adapter->mbx_ctx.buffer_size];
+    /* Case C: 唯一匹配到新认领槽位 newly_claimed */
+    adapter->mbx_ctx.newly_claimed_slot = (int8_t)newly_claimed;
+    uint8_t *slot_buf = &adapter->mbx_ctx.mbx_buffers[newly_claimed * adapter->mbx_ctx.buffer_size];
 
     /* 若外部调用显式传入了 mbx_out_buf，则必须与实际新认领的槽位首地址一致，杜绝错传旧槽位或无关内存 */
     if (mbx_out_buf != NULL && mbx_out_buf != slot_buf) {
+        foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        return 0; /* 槽位不匹配，安全丢弃 */
+        return -1; /* 槽位不匹配，安全中和并报错 */
     }
 
-    /* 对新认领槽位中的报文进行严格的长度与格式校验 */
+    /* 对新认领槽位中的报文进行长度与格式校验 */
     uint16_t mbx_len = (uint16_t)(slot_buf[0] | ((uint16_t)slot_buf[1] << 8));
     uint8_t mbx_type = (uint8_t)(slot_buf[5] & 0x0FU);
 
@@ -401,10 +451,11 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->mbx_ctx.buffer_size < (ECAT_MBX_HDR_SIZE + mbx_len) ||
         (mbx_out_buf != NULL && mbx_out_len < (size_t)(ECAT_MBX_HDR_SIZE + mbx_len)) ||
         mbx_type != ECAT_MBX_TYPE_FOE) {
+        foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        return 0;
+        return -1; /* 报文格式或类型异常，安全中和并报错 */
     }
 
     uint8_t opcode = slot_buf[ECAT_MBX_HDR_SIZE];
@@ -414,21 +465,35 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                                      ((uint32_t)slot_buf[ECAT_MBX_HDR_SIZE + 5] << 24));
 
     if (opcode == ECAT_FOE_OP_ACK && packet_num == 0) {
-        /* SOES 原生校验通过且已将有效 ACK(0) 置入发送邮箱待发：正式提交核心会话 */
+        /* SOES 原生校验通过且已将有效 ACK(0) 置入发送邮箱待发：尝试正式提交核心会话 */
         int rc = ecat_foe_core_on_wrq(adapter->core,
                                       adapter->staged_filename,
                                       strlen(adapter->staged_filename));
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
-        /* 绝不改写或清零发送邮箱缓冲区，保留 SOES 原生报文以供后续 ESC_writembx 发送给主站 */
-        return rc;
-    } else {
+
+        if (rc != 0) {
+            /* 核心激活失败：必须将该槽位就地改写为 FOE_OP_ERR，杜绝主站收到假 ACK(0) */
+            foe_convert_slot_to_error(slot_buf, adapter->mbx_ctx.buffer_size, ECAT_FOE_ERR_NOTDEFINED);
+            return -1;
+        }
+
+        /* 核心激活成功：保留原 ACK(0) 供后续 ESC_writembx 发送给主站 */
+        return 0;
+    } else if (opcode == ECAT_FOE_OP_ERR) {
         /* SOES 拒绝了 WRQ (如 FOE_OP_ERR 0x800A 密码错误，或 0x8008 非 BOOT 态)：
          * 安全丢弃暂存 WRQ，核心维持原有会话状态不变，且保留 FOE_OP_ERR 以供发给主站 */
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
         return 0;
+    } else {
+        /* 既非有效 ACK(0) 亦非原生 ERR：未知异常，安全中和并报错 */
+        foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        return -1;
     }
 }

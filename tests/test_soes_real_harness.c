@@ -33,66 +33,94 @@
 #include "ecat_foe_soes.h"
 #include "mock_driver.h"
 
-/* 模拟 SOES 协议栈所需的 5 个外部符号 */
+/* 真实 SOES esc.c 内部函数的补充前向声明 (供测试 Harness 调用) */
+uint8_t ESC_outreqbuffer(void);
+void ESC_writembx(uint8_t n);
+
+/* 由应用层分配的 SOES 全局变量 (依据 esc.h:742-746 官方契约) */
 _ESCvar ESCvar;
-_MBXcontrol MBXcontrol[4];
-uint8_t MBX[128 * 4];
+_MBXcontrol MBXcontrol[MBXBUFFERS];
+uint8_t MBX[MBXBUFFERS * MBXSIZE];
 
-static uint8_t s_mock_claimbuffer_override = 0xFF; /* 0xFF: 正常执行分配; 0: 强制返回 0 (模拟邮箱耗尽) */
-static uint8_t s_mock_claimbuffer_return = 1;     /* 默认分配槽位 1 */
-static uint8_t s_mock_claimbuffer_mode = 0;       /* 0: 指定槽位分配; 1: 真实 SOES 3..1 扫描分配 */
+/* ============================================================================
+ * 真实 SOES 硬件层 (ESC Hardware Port) 桩函数与主站可观察物理报文捕获
+ * ============================================================================ */
 
-uint8_t ESC_claimbuffer(void)
+static uint8_t s_hw_sm1_buf[128];
+static uint16_t s_hw_sm1_len = 0;
+static int s_hw_esc_write_calls = 0;
+static uint16_t s_hw_last_write_addr = 0;
+
+void ESC_write(uint16_t address, void *buf, uint16_t len)
 {
-    if (s_mock_claimbuffer_override == 0) {
-        return 0;
+    s_hw_last_write_addr = address;
+    /* 当写入 SM1 发送邮箱起始地址时，捕获主站真实物理接收到的数据 */
+    if (address == ESC_MBX1_sma && buf != NULL) {
+        s_hw_sm1_len = (len > sizeof(s_hw_sm1_buf)) ? (uint16_t)sizeof(s_hw_sm1_buf) : len;
+        memcpy(s_hw_sm1_buf, buf, s_hw_sm1_len);
+        s_hw_esc_write_calls++;
     }
-    uint8_t n = 0;
-    if (s_mock_claimbuffer_mode == 1) {
-        /* 真实 SOES 多槽扫描逻辑 (从 ESC_MBXBUFFERS - 1 往下寻找首个空闲槽位) */
-        n = 4 - 1;
-        while ((n > 0) && (MBXcontrol[n].state)) {
-            n--;
-        }
-    } else {
-        n = s_mock_claimbuffer_return;
-    }
-    if (n && n < 4) {
-        MBXcontrol[n].state = MBXstate_outclaim;
-        _MBXh *MBh = (_MBXh *)&MBX[n * ESC_MBXSIZE];
-        ESCvar.mbxcnt++;
-        ESCvar.mbxcnt = (ESCvar.mbxcnt & 0x07);
-        if (ESCvar.mbxcnt == 0) {
-            ESCvar.mbxcnt = 1;
-        }
-        MBh->address = 0x0000;
-        MBh->channel = 0;
-        MBh->priority = 0;
-        MBh->mbxcnt = ESCvar.mbxcnt & 0xFU;
-        ESCvar.txcue++;
-    }
-    return n;
 }
 
-/* 模拟 SOES 发送邮箱向硬件写入函数 (ESC_writembx) */
-static uint8_t s_last_sent_mbx[128];
-static uint16_t s_last_sent_len = 0;
-static uint8_t s_last_sent_slot = 0;
-static int s_esc_writembx_calls = 0;
-
-void ESC_writembx(uint8_t n)
+void ESC_read(uint16_t address, void *buf, uint16_t len)
 {
-    if (n >= 4) return;
-    _MBXh *MBh = (_MBXh *)&MBX[n * ESC_MBXSIZE];
-    uint16_t length = etohs(MBh->length);
-    s_last_sent_len = (uint16_t)(sizeof(_MBXh) + length);
-    if (s_last_sent_len > sizeof(s_last_sent_mbx)) {
-        s_last_sent_len = sizeof(s_last_sent_mbx);
+    (void)address;
+    if (buf != NULL && len > 0) {
+        memset(buf, 0, len);
     }
-    memcpy(s_last_sent_mbx, MBh, s_last_sent_len);
-    s_last_sent_slot = n;
-    s_esc_writembx_calls++;
-    MBXcontrol[n].state = MBXstate_outpost;
+}
+
+void APP_safeoutput(void) {}
+
+uint16_t sizeOfPDO(uint16_t objidx, int *mappings, _SMmap *map, int max_mappings)
+{
+    (void)objidx;
+    (void)mappings;
+    (void)map;
+    (void)max_mappings;
+    return 0;
+}
+
+_SMmap SMmap2[1];
+_SMmap SMmap3[1];
+
+/* 获取真实 SOES 当前排队待发的 FoE 报文指针 */
+static __attribute__((unused)) _FOE *get_last_outbound_foe(void)
+{
+    uint8_t slot = ESC_outreqbuffer();
+    if (slot > 0 && slot < ESC_MBXBUFFERS) {
+        return (_FOE *)&MBX[slot * ESC_MBXSIZE];
+    }
+    for (int i = (int)ESC_MBXBUFFERS - 1; i >= 1; i--) {
+        if (MBXcontrol[i].state != MBXstate_idle) {
+            return (_FOE *)&MBX[i * ESC_MBXSIZE];
+        }
+    }
+    return (_FOE *)&MBX[1 * ESC_MBXSIZE];
+}
+
+static __attribute__((unused)) uint8_t get_last_outbound_slot(void)
+{
+    uint8_t slot = ESC_outreqbuffer();
+    if (slot > 0 && slot < ESC_MBXBUFFERS) {
+        return slot;
+    }
+    for (int i = (int)ESC_MBXBUFFERS - 1; i >= 1; i--) {
+        if (MBXcontrol[i].state != MBXstate_idle) {
+            return (uint8_t)i;
+        }
+    }
+    return 1;
+}
+
+/* 模拟主站从物理邮箱读取走当前排队的响应，并释放槽位 */
+static __attribute__((unused)) void mock_master_read_outbox(void)
+{
+    uint8_t slot = ESC_outreqbuffer();
+    if (slot > 0 && slot < ESC_MBXBUFFERS) {
+        ESC_writembx(slot);
+        MBXcontrol[slot].state = MBXstate_idle;
+    }
 }
 
 /* 核心防回滚端口桩实现 */
@@ -162,17 +190,30 @@ static foe_cfg_t s_foe_cfg = {
 
 static void reset_soes_environment(void)
 {
-    memset(&ESCvar, 0, sizeof(ESCvar));
-    memset(MBXcontrol, 0, sizeof(MBXcontrol));
-    memset(MBX, 0, sizeof(MBX));
+    static esc_cfg_t esc_cfg = {
+        .use_interrupt = 0,
+        .watchdog_cnt = 0
+    };
 
+    memset(&ESCvar, 0, sizeof(ESCvar));
+    memset(MBXcontrol, 0, ESC_MBXBUFFERS * sizeof(_MBXcontrol));
+    memset(MBX, 0, ESC_MBXBUFFERS * ESC_MBXSIZE);
+
+    ESC_config(&esc_cfg);
+    ESCvar.activemb0 = &ESCvar.mb[0];
+    ESCvar.activemb1 = &ESCvar.mb[1];
     ESCvar.MBXrun = 1;
     ESCvar.activembxsize = 128;
     ESCvar.ALstatus = ESCboot;
+    ESCvar.mbxfree = 1;
 
     g_mock_write_calls = 0;
     g_last_written_length = 0;
     g_mock_write_return_code = 0;
+
+    s_hw_sm1_len = 0;
+    s_hw_esc_write_calls = 0;
+    memset(s_hw_sm1_buf, 0, sizeof(s_hw_sm1_buf));
 
     memset(s_foe_files, 0, sizeof(s_foe_files));
     s_foe_files[0].name = "firmware_mcu.bin";
@@ -184,14 +225,6 @@ static void reset_soes_environment(void)
     s_foe_files[1].write_function = mock_foe_write;
 
     s_foe_cfg.n_files = 2;
-    s_mock_claimbuffer_override = 0xFF;
-    s_mock_claimbuffer_return = 1;
-    s_mock_claimbuffer_mode = 0;
-    s_esc_writembx_calls = 0;
-    s_last_sent_len = 0;
-    s_last_sent_slot = 0;
-    memset(s_last_sent_mbx, 0, sizeof(s_last_sent_mbx));
-
     FOE_config(&s_foe_cfg);
     FOE_init();
 }
@@ -221,7 +254,7 @@ static void test_real_soes_wrq_callback_timing(void)
     assert(g_mock_write_calls == 0);
 
     /* 验证响应为 ACK(0) */
-    _FOE *ack = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *ack = get_last_outbound_foe();
     assert(ack->foeheader.opcode == FOE_OP_ACK);
     assert(ack->foeheader.packetnumber == 0);
     printf("  [PASS] 真实 SOES 在收到 WRQ 阶段不调用 write_function，并回复 ACK(0)\n");
@@ -247,7 +280,7 @@ static void test_real_soes_filename_prefix_matching(void)
 
     ESC_foeprocess();
 
-    _FOE *ack = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *ack = get_last_outbound_foe();
     assert(ack->foeheader.opcode == FOE_OP_ACK);
     printf("  [PASS] 下发前缀 '%s' (长度 %zu) 命中配置 'firmware_mcu.bin' 并返回 ACK (证明 strncmp 前缀匹配特性)\n", prefix, pfx_len);
 
@@ -266,7 +299,7 @@ static void test_real_soes_filename_prefix_matching(void)
 
     ESC_foeprocess();
 
-    _FOE *err_ack = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *err_ack = get_last_outbound_foe();
     assert(err_ack->foeheader.opcode == FOE_OP_ERR);
     assert(err_ack->foeheader.errorcode == 0x8001);
     printf("  [PASS] 下发未配置名称 '%s' 正确返回 FOE_ERR_NOTFOUND (0x8001)\n", unknown_fn);
@@ -289,6 +322,7 @@ static void test_real_soes_zero_len_vs_short_packet(void)
     req->foeheader.opcode = FOE_OP_WRQ;
     req->foeheader.password = 0;
     ESC_foeprocess();
+    mock_master_read_outbox();
 
     /* 发送短数据包 50 字节，注入失败 */
     g_mock_write_return_code = 1; /* 模拟提交失败 */
@@ -300,7 +334,7 @@ static void test_real_soes_zero_len_vs_short_packet(void)
 
     ESC_foeprocess();
 
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     printf("  短包 (失败注入) SOES 响应: opcode=0x%04X, errorcode=0x%08X\n",
            res_mbx->foeheader.opcode, res_mbx->foeheader.errorcode);
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
@@ -319,6 +353,7 @@ static void test_real_soes_zero_len_vs_short_packet(void)
     req->foeheader.opcode = FOE_OP_WRQ;
     req->foeheader.password = 0;
     ESC_foeprocess();
+    mock_master_read_outbox();
 
     /* DATA 1: 满包 116 字节，正常接收 (不触发 flush，因 buffer_size=256) */
     g_mock_write_return_code = 0;
@@ -329,9 +364,10 @@ static void test_real_soes_zero_len_vs_short_packet(void)
     memset(req->data, 0x22, ESC_FOE_DATA_SIZE);
     ESC_foeprocess();
 
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 1);
+    mock_master_read_outbox();
 
     /* DATA 2: 0 长度包结束，注入回调失败 (1) */
     g_mock_write_return_code = 1; /* 模拟尾包写入/校验失败 */
@@ -342,7 +378,7 @@ static void test_real_soes_zero_len_vs_short_packet(void)
 
     ESC_foeprocess();
 
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     printf("  零长度包 (失败注入) SOES 响应: opcode=0x%04X, packet=%u\n",
            res_mbx->foeheader.opcode, res_mbx->foeheader.packetnumber);
     /* 关键证据: 真实 SOES 忽略了 FOE_fclose() 返回值，回复了 ACK(2) 而非 ERR(0x800B) */
@@ -540,9 +576,10 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     /* 驱动真实 SOES 接收 WRQ */
     ESC_foeprocess();
 
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
+    mock_master_read_outbox();
 
     /* 2. 应用层 WRQ 握手进入会话 */
     int wrq_ret = ecat_foe_soes_on_wrq(&adapter, fn, fn_len);
@@ -577,7 +614,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     /* 驱动真实 SOES 处理 DATA 报文 -> 真实 SOES 自动调用已注册的 write_cb -> 核心状态机写入并 finalize */
     ESC_foeprocess();
 
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 1);
     assert(s_harness_drv.count_init == 1);
@@ -607,6 +644,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     ESC_foeprocess();
     wrq_ret = ecat_foe_soes_on_wrq(&adapter, fn, fn_len);
     assert(wrq_ret == 0);
+    mock_master_read_outbox();
 
     /* 故意破坏 header CRC (第 60 字节取反) */
     s_efw_test_buf[60] ^= 0xFF;
@@ -622,7 +660,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     /* 驱动真实 SOES: 内部调用 write_cb 失败 -> 真实 SOES 触发 FOE_abort(FOE_ERR_PROGERROR) */
     ESC_foeprocess();
 
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800B);
     assert(s_harness_drv.count_finalize == 0);
@@ -680,9 +718,10 @@ static void test_real_soes_without_on_wrq_production_reality(void)
 
     ESC_foeprocess();
 
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
+    mock_master_read_outbox();
 
     /* 生产现实关键点: 原生 SOES 不调用应用层 on_wrq 钩子，核心状态机保持在 ECAT_FOE_STATE_IDLE */
     assert(core.state == ECAT_FOE_STATE_IDLE);
@@ -700,7 +739,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
 
     ESC_foeprocess();
 
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800B);
     assert(core.last_error == ECAT_FOE_CORE_ERR_INVALID_STATE);
@@ -722,7 +761,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.opcode = FOE_OP_WRQ;
     req->foeheader.password = 0;
     ESC_foeprocess();
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
     printf("  [PASS] [宿主观察] 空文件名 (长度 0): 恒成立命中首条配置 files[0]，SOES 回复 ACK(0)\n");
@@ -736,7 +775,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware", 8);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
     printf("  [PASS] [宿主观察] 短前缀 'firmware': 仅比对 8 字节，误命中 files[0]，SOES 回复 ACK(0)\n");
@@ -751,7 +790,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0;
     memcpy(req->filename, long_name, 32);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x8001); /* FOE_ERR_NOTFOUND */
     printf("  [PASS] [宿主观察] 超过 31 字符名称 (32 字节): 无法匹配返回 FOE_ERR_NOTFOUND (0x8001)\n");
@@ -768,7 +807,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu_ex", 15);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     /* 请求基准名称 "firmware_mcu" (12 字节) */
     reset_soes_environment();
@@ -781,7 +820,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu", 12);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     printf("  [PASS] [宿主观察] 互为前缀配置: 长名称精准避开短项命中长项，短名称命中首项\n");
 
@@ -796,7 +835,7 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0x99999999U; /* 错误密码 */
     memcpy(req->filename, "firmware_mcu.bin", 16);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800A); /* FOE_ERR_NORIGHTS (0x800A) */
     printf("  [PASS] [宿主观察] 密码保护: 错误密码返回 FOE_ERR_NORIGHTS (0x800A)\n");
@@ -814,15 +853,16 @@ static void test_real_soes_name_matching_suite(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu.bin", 16);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x8009); /* FOE_ERR_NOTINBOOTSTRAP (0x8009) */
+    mock_master_read_outbox();
 
     /* 恢复为 ESCboot 态 */
     ESCvar.ALstatus = ESCboot;
     MBXcontrol[0].state = MBXstate_inclaim;
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     printf("  [PASS] [宿主观察] write_only_in_boot: 非 BOOT 态返回 0x8008，BOOT 态正常回复 ACK(0)\n");
 }
@@ -881,6 +921,7 @@ static void test_real_soes_data_size_scan(void)
             req->foeheader.password = 0;
             memcpy(req->filename, "firmware_mcu.bin", 16);
             ESC_foeprocess();
+            mock_master_read_outbox();
 
             /* 2. 发送全量满包 */
             uint32_t sent = 0;
@@ -893,6 +934,7 @@ static void test_real_soes_data_size_scan(void)
                 req->foeheader.packetnumber = packet_num++;
                 memset(req->data, 0x55, N);
                 ESC_foeprocess();
+                mock_master_read_outbox();
                 sent += N;
             }
 
@@ -908,7 +950,7 @@ static void test_real_soes_data_size_scan(void)
                 req->foeheader.packetnumber = packet_num++;
                 ESC_foeprocess();
 
-                _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+                _FOE *res_mbx = get_last_outbound_foe();
                 /* 真实 SOES 观察: 零长度路径忽略 FOE_fclose 返回值，主站看到 ACK */
                 assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
             } else {
@@ -922,7 +964,7 @@ static void test_real_soes_data_size_scan(void)
                 memset(req->data, 0x66, rem);
                 ESC_foeprocess();
 
-                _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+                _FOE *res_mbx = get_last_outbound_foe();
                 /* 真实 SOES 观察: 短包路径检查 FOE_fclose 返回值，主站看到 ERR 0x800B */
                 assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
                 assert(res_mbx->foeheader.errorcode == 0x800B);
@@ -978,6 +1020,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     ESC_foeprocess();
     int wrq_ret = ecat_foe_soes_on_wrq(&adapter, fn, fn_len);
     assert(wrq_ret == 0);
+    mock_master_read_outbox();
 
     /* 2. 构造补齐后的固件 (单包载荷上限设为 64，总长 80 字节，80 % 64 = 16，末包为 16 字节短包) */
     static const uint8_t s_payload[16] = {0x01, 0x02, 0x03, 0x04};
@@ -1000,7 +1043,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
 
     ESC_foeprocess();
 
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     /* 关键观察: 补齐避开 0 长度包后，走短包路径，驱动 finalize 失败被正确捕获并映射为 0x800B */
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800B);
@@ -1039,6 +1082,7 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu.bin", 16);
     ESC_foeprocess();
+    mock_master_read_outbox();
 
     /* 发送第 1 包 */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1048,6 +1092,7 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.packetnumber = 1;
     memset(req->data, 0xAA, 64);
     ESC_foeprocess();
+    mock_master_read_outbox();
 
     /* 中途重新收到新 WRQ */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1057,9 +1102,10 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu.bin", 16);
     ESC_foeprocess();
-    _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    _FOE *res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
+    mock_master_read_outbox();
     printf("  [PASS] [宿主观察] 传输中途新 WRQ: 成功打断并重启新会话，SOES 回复 ACK(0)\n");
 
     /* 3. 两个不同配置条目交替升级: files[0] -> files[1] */
@@ -1078,8 +1124,9 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_mcu.bin", 16);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
     /* 发送短包完成 files[0] */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1089,8 +1136,9 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.packetnumber = 1;
     memset(req->data, 0x11, 32);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
     /* 会话 B: 切换为 files[1] */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1100,8 +1148,9 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.password = 0;
     memcpy(req->filename, "firmware_fpga.bin", 17);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
     /* 发送短包完成 files[1] */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1111,8 +1160,9 @@ static void test_real_soes_session_boundary_cases(void)
     req->foeheader.packetnumber = 1;
     memset(req->data, 0x22, 40);
     ESC_foeprocess();
-    res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
     printf("  [PASS] [宿主观察] 双配置条目交替: files[0] 与 files[1] 交替升级，地址与指针独立正确复位\n");
 }
@@ -1187,10 +1237,11 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + 32) != 0);
         /* 原生 SOES 随后处理超长不匹配文件名报 0x8001 */
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
         assert(res_mbx->foeheader.errorcode == 0x8001);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+        mock_master_read_outbox();
         printf("  [PASS] 维度 1 (帧边界): 畸形短帧、截断帧与超长文件名安全放行，原生 SOES 返回 0x8001\n");
     }
 
@@ -1229,13 +1280,12 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         /* 原生 SOES 执行: 动态名称已匹配，紧接着校验密码，发现密码不符立即返回 FOE_ERR_NORIGHTS (0x800A) */
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
         assert(res_mbx->foeheader.errorcode == 0x800A);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
         assert(adapter.has_staged_wrq == false);
-        ESC_writembx(1);
-        MBXcontrol[1].state = MBXstate_idle;
+        mock_master_read_outbox();
         printf("  [PASS] 维度 2A (密码时序): 动态同步后密码错误被原生 SOES 拦截并回复 0x800A，暂存 WRQ 安全释放\n");
 
         /* Case 2B: 注入正确密码 (0x12345678) */
@@ -1245,13 +1295,12 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(hook_rc == 0);
 
         ESC_foeprocess();
-        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 0);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
         assert(core.req_target_id == 1);
-        ESC_writembx(1);
-        MBXcontrol[1].state = MBXstate_idle;
+        mock_master_read_outbox();
         printf("  [PASS] 维度 2B (密码时序): 动态同步后正确密码顺利通过原生校验并回复 ACK(0)，核心新会话正式激活\n");
     }
 
@@ -1262,7 +1311,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
 
         /* 模拟后续 DATA 报文灌入并将 MBX[0] 完全用垃圾数据覆写 */
-        memset(MBX, 0xDE, sizeof(MBX));
+        memset(MBX, 0xDE, ESC_MBXBUFFERS * ESC_MBXSIZE);
 
         /* 验证 files[0].name 依然完好无损 */
         assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
@@ -1300,10 +1349,11 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         /* 放行原生 SOES: 由于未执行名称同步，SOES 比对失败自动回复 0x8001 Abort */
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
         assert(res_mbx->foeheader.errorcode == 0x8001);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+        mock_master_read_outbox();
         printf("  [PASS] 维度 4 (拒绝响应): 核心机校验失败不予同步，原生 SOES 正确发送 0x8001 Abort\n");
     }
 
@@ -1336,13 +1386,12 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(mcu_fn)) == 0);
         ESC_foeprocess();
-        _FOE *wrq_res = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *wrq_res = get_last_outbound_foe();
         assert(wrq_res->foeheader.opcode == FOE_OP_ACK);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)wrq_res, sizeof(_MBXh) + sizeof(_FOEh));
         assert(core.req_target_id == 1);
         assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
-        ESC_writembx(1);
-        MBXcontrol[1].state = MBXstate_idle;
+        mock_master_read_outbox();
 
         /* 构造 116 字节的第一包数据 (64 字节头部 + 52 字节有效载荷)，使传输进入中途 WAITING_FOR_DATA 态 */
         static const uint8_t s_p1[52] = {0x11, 0x22, 0x33, 0x44};
@@ -1359,9 +1408,10 @@ static void test_real_soes_pre_hook_validation_suite(void)
         req->foeheader.packetnumber = 1;
         memcpy(req->data, s_efw_test_buf, 116);
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 1);
+        mock_master_read_outbox();
         /* 此时满包写入成功，原生 SOES 正处于 FOE_WAIT_FOR_DATA 态 */
 
         /* 实测验证：中途处于 WAIT_FOR_DATA 时若直接收到新 WRQ，原生 SOES 返回 0x8004 (FOE_ERR_ILLEGAL) */
@@ -1374,12 +1424,11 @@ static void test_real_soes_pre_hook_validation_suite(void)
         memcpy(req->filename, fpga_fn, strlen(fpga_fn));
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fpga_fn)) == 0);
         ESC_foeprocess();
-        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
         assert(res_mbx->foeheader.errorcode == 0x8004);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
-        ESC_writembx(1);
-        MBXcontrol[1].state = MBXstate_idle;
+        mock_master_read_outbox();
 
         /* 原生 SOES 在 0x8004 abort 中已自动调用 FOE_init() 复位回 FOE_READY。重新发送 Target 2 WRQ */
         MBXcontrol[0].state = MBXstate_inclaim;
@@ -1390,12 +1439,11 @@ static void test_real_soes_pre_hook_validation_suite(void)
         memcpy(req->filename, fpga_fn, strlen(fpga_fn));
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fpga_fn)) == 0);
         ESC_foeprocess();
-        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 0);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
-        ESC_writembx(1);
-        MBXcontrol[1].state = MBXstate_idle;
+        mock_master_read_outbox();
 
         /* 验证 files[0] 和 files[1] 的名字隔离共存，互不覆盖 */
         assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
@@ -1430,12 +1478,13 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn)) == 0);
         ESC_foeprocess();
-        _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        _FOE *res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 0);
         assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
         assert(core.req_target_id == 1);
         assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
+        mock_master_read_outbox();
 
         /* 构造 80 字节固件 (64 字节头 + 16 字节 payload) */
         static const uint8_t s_payload[16] = {0xAA, 0xBB, 0xCC, 0xDD};
@@ -1454,11 +1503,12 @@ static void test_real_soes_pre_hook_validation_suite(void)
         memcpy(req->data, s_efw_test_buf, efw_len);
 
         ESC_foeprocess();
-        res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+        res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 1);
         assert(core.state == ECAT_FOE_STATE_SUCCESS);
         assert(s_harness_drv.valid_flag == true);
+        mock_master_read_outbox();
         printf("  [PASS] 维度 6 (端到端升级闭环): 动态文件名固件走短包路径升级成功，驱动有效标记成功写入\n");
     }
 }
@@ -1519,10 +1569,11 @@ int main(void)
             memcpy(req->filename, fn_mcu, strlen(fn_mcu));
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
             assert(core.req_target_id == 1);
+            mock_master_read_outbox();
 
             /* 场景 1A: 传输中途针对目标 2 (FPGA) 注入 WRQ (密码亦错误) */
             const char *fn_fpga = "SERVO_DRV_FPGA_V1.0.0.0.efw";
@@ -1535,7 +1586,7 @@ int main(void)
 
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_fpga)) == 0);
             ESC_foeprocess();
-            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             /* 原生 SOES 因中途状态非法拒绝并返回 0x8004 (FOE_ERR_ILLEGAL) */
             assert(res_mbx->foeheader.errorcode == 0x8004);
@@ -1543,6 +1594,7 @@ int main(void)
             /* 关键断言: 核心机 target_id 严格保持为 1，已有会话未受任何篡改！ */
             assert(core.req_target_id == 1);
             assert(adapter.has_staged_wrq == false);
+            mock_master_read_outbox();
 
             /* 场景 1B: 在就绪态 (READY) 下发密码错误的 WRQ */
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -1560,13 +1612,14 @@ int main(void)
 
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_fpga)) == 0);
             ESC_foeprocess();
-            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x800A); /* NORIGHTS */
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
             /* 关键断言: 核心机 target_id 依然严格保持为 1！ */
             assert(core.req_target_id == 1);
             assert(adapter.has_staged_wrq == false);
+            mock_master_read_outbox();
 
             /* 场景 1C: 在非 BOOT 态下发 WRQ */
             ESCvar.ALstatus = ESCinit; /* 切到 INIT 态 */
@@ -1574,11 +1627,12 @@ int main(void)
             req->foeheader.password = 0x87654321U; /* 正确密码 */
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_fpga)) == 0);
             ESC_foeprocess();
-            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x8009); /* NOTINBOOTSTRAP in SOES */
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
             assert(core.req_target_id == 1);
+            mock_master_read_outbox();
             printf("  [PASS] 风险 1 防御验证: 密码错误与非 BOOT 态 WRQ 被原生拦截，核心状态与已有会话完好无损\n");
         }
 
@@ -1606,11 +1660,12 @@ int main(void)
             int rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh));
             assert(rc != 0); /* 钩子安全拒绝 */
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x8001); /* 原生 SOES 正确回复 0x8001 NOTFOUND */
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
             assert(s_foe_cfg.n_files == 2); /* 恢复条目数 */
+            mock_master_read_outbox();
             printf("  [PASS] 风险 2 防御验证: 空文件名 WRQ 严格拒绝，原生 SOES 回复 0x8001 NOTFOUND\n");
         }
 
@@ -1642,10 +1697,11 @@ int main(void)
             int hook_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(prefix));
             assert(hook_rc != 0); /* 预检拒绝 */
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x8001); /* 绝不误回复 ACK */
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+            mock_master_read_outbox();
             printf("  [PASS] 风险 3 防御验证: 短前缀被核心拦截，原生 SOES 比对切断并回复 0x8001\n");
         }
 
@@ -1678,10 +1734,12 @@ int main(void)
             int rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_fpga));
             assert(rc != 0); /* 安全拒绝 */
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x8001);
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+            mock_master_read_outbox();
+            /* 关键断言: 条目 0 的文件名未被篡改！ */
             /* 关键断言: 条目 0 的文件名未被篡改！ */
             assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU.efw") == 0);
             printf("  [PASS] 风险 4 防御验证: 未配置目标越界拒绝，条目 0 名称完好保留无回退篡改\n");
@@ -1727,9 +1785,10 @@ int main(void)
             assert(adapter.staged_target_id == 2);
 
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x800A);
+            mock_master_read_outbox();
 
             /* 模拟应用层未调用 post_process_hook，此时若后续调用 write_cb */
             uint8_t dummy_data[32] = {0};
@@ -1739,7 +1798,6 @@ int main(void)
             assert(adapter.has_staged_wrq == false);
             assert(core.req_target_id == 1);
             assert(s_harness_drv.count_abort == 0);
-            s_mock_claimbuffer_return = 1;
 
             /* Case 1B: 后置钩子传入 NULL 缓冲区 */
             adapter.has_staged_wrq = true;
@@ -1880,11 +1938,12 @@ int main(void)
             assert(strcmp(s_foe_files[0].name, fn_fpga) == 0); /* 映射至 files[0] */
 
             ESC_foeprocess();
-            _FOE *res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
             assert(res_mbx->foeheader.packetnumber == 0);
             assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
             assert(core.req_target_id == 2);
+            mock_master_read_outbox();
 
             /* 测试禁用目标 Target 1 WRQ: 虽属于合法格式但核心未使能 */
             const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -1895,11 +1954,12 @@ int main(void)
             memcpy(req->filename, fn_mcu, strlen(fn_mcu));
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) != 0);
             ESC_foeprocess();
-            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             /* 此时由于 Target 2 刚被接受且处于 FOE_WAIT_FOR_DATA 态，原生 SOES 返回 0x8004 (FOE_ERR_ILLEGAL) 并复位为 FOE_READY */
             assert(res_mbx->foeheader.errorcode == 0x8004);
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+            mock_master_read_outbox();
 
             /* 再次在 FOE_READY 下发送禁用目标 Target 1 WRQ，原生 SOES 比对切断返回 0x8001 (NOTFOUND) */
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -1909,10 +1969,11 @@ int main(void)
             memcpy(req->filename, fn_mcu, strlen(fn_mcu));
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) != 0);
             ESC_foeprocess();
-            res_mbx = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            res_mbx = get_last_outbound_foe();
             assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
             assert(res_mbx->foeheader.errorcode == 0x8001);
             ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
+            mock_master_read_outbox();
 
             printf("  [PASS] 深度风险 3: 稀疏目标到紧凑文件表索引映射准确，禁用目标被安全拦截\n");
         }
@@ -2005,10 +2066,11 @@ int main(void)
             out_foe->mbxheader.mbxtype = MBXFOE;
             out_foe->foeheader.opcode = FOE_OP_ACK;
             out_foe->foeheader.packetnumber = 0;
-            MBXcontrol[1].state = MBXstate_outreq;
 
-            /* 构造故障注入：模拟 SOES 全部输出邮箱耗尽，使 ESC_claimbuffer() 返回 0 (无可用输出邮箱) */
-            s_mock_claimbuffer_override = 0;
+            /* 构造真实故障注入：将所有输出槽位全部置为占用态，真实 ESC_claimbuffer() 自然返回 0 (输出邮箱耗尽) */
+            for (uint8_t s = 1; s < ESC_MBXBUFFERS; s++) {
+                MBXcontrol[s].state = MBXstate_outreq;
+            }
 
             /* 主站下发格式合法的 Target 2 WRQ，但使用错误密码 */
             const char *fn2 = "SERVO_DRV_FPGA_V1.0.0.0.efw";
@@ -2046,7 +2108,9 @@ int main(void)
             assert(core.req_target_id == 1);
             assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
             assert(s_harness_drv.count_abort == 0);
-            s_mock_claimbuffer_override = 0xFF;
+            for (uint8_t s = 1; s < ESC_MBXBUFFERS; s++) {
+                MBXcontrol[s].state = MBXstate_idle;
+            }
 
             printf("  [PASS] 深度风险 6: 暂存WRQ在SOES密码拒绝且无输出邮箱时安全丢弃，新鲜度保障防范旧ACK残留且绝不篡改待发报文\n");
         }
@@ -2100,7 +2164,8 @@ int main(void)
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
             ESC_foeprocess();
 
-            _FOE *res_slot1 = (_FOE *)&MBX[1 * ESC_MBXSIZE];
+            _FOE *res_slot1 = get_last_outbound_foe();
+            uint8_t out_slot1 = get_last_outbound_slot();
             assert(res_slot1->foeheader.opcode == FOE_OP_ACK);
             assert(res_slot1->foeheader.packetnumber == 0);
 
@@ -2112,17 +2177,16 @@ int main(void)
             /* 核心断言: 发送邮箱中的 ACK 报文毫发无损 */
             assert(res_slot1->foeheader.opcode == FOE_OP_ACK);
             assert(res_slot1->foeheader.packetnumber == 0);
-            assert(MBXcontrol[1].state == MBXstate_outreq);
+            assert(MBXcontrol[out_slot1].state == MBXstate_outreq);
 
-            /* 模拟 SOES 协议栈发送邮箱向硬件写入 (ESC_writembx) */
-            ESC_writembx(1);
-            assert(s_esc_writembx_calls == 1);
-            assert(s_last_sent_slot == 1);
-            _FOE *sent_foe = (_FOE *)s_last_sent_mbx;
-            assert(sent_foe->mbxheader.mbxtype == MBXFOE);
-            assert(sent_foe->foeheader.opcode == FOE_OP_ACK);
-            assert(sent_foe->foeheader.packetnumber == 0);
-            MBXcontrol[1].state = MBXstate_idle; /* 模拟主站读取释放槽位 1 */
+            /* 调用真实 SOES 协议栈发送邮箱向硬件写入 (ESC_writembx) */
+            ESC_writembx(out_slot1);
+            assert(s_hw_esc_write_calls == 1);
+            _FOE *hw_sent_foe = (_FOE *)s_hw_sm1_buf;
+            assert(hw_sent_foe->mbxheader.mbxtype == MBXFOE);
+            assert(hw_sent_foe->foeheader.opcode == FOE_OP_ACK);
+            assert(hw_sent_foe->foeheader.packetnumber == 0);
+            MBXcontrol[out_slot1].state = MBXstate_idle; /* 模拟主站读取释放槽位 */
 
             /* 主站发送 ERR 复位 SOES 状态机至 READY 态 */
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -2130,7 +2194,7 @@ int main(void)
             req->foeheader.opcode = FOE_OP_ERR;
             req->mbxheader.length = (uint16_t)sizeof(_FOEh);
             ESC_foeprocess();
-            MBXcontrol[1].state = MBXstate_idle;
+            mock_master_read_outbox();
 
             /* 8B: 错误密码下 ERR 完整保留并由 ESC_writembx 成功发给主站 */
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -2142,24 +2206,26 @@ int main(void)
             assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
             ESC_foeprocess();
 
-            assert(res_slot1->foeheader.opcode == FOE_OP_ERR);
-            assert(res_slot1->foeheader.errorcode == 0x800A);
+            _FOE *res_err = get_last_outbound_foe();
+            uint8_t out_slot_err = get_last_outbound_slot();
+            assert(res_err->foeheader.opcode == FOE_OP_ERR);
+            assert(res_err->foeheader.errorcode == 0x800A);
 
             /* 调用 post_process_hook */
-            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_slot1, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_err, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
             assert(adapter.has_staged_wrq == false);
 
             /* 核心断言: 发送邮箱中的 ERR 报文毫发无损 */
-            assert(res_slot1->foeheader.opcode == FOE_OP_ERR);
-            assert(res_slot1->foeheader.errorcode == 0x800A);
-            assert(MBXcontrol[1].state == MBXstate_outreq);
+            assert(res_err->foeheader.opcode == FOE_OP_ERR);
+            assert(res_err->foeheader.errorcode == 0x800A);
+            assert(MBXcontrol[out_slot_err].state == MBXstate_outreq);
 
-            /* 模拟 SOES 发送给主站 */
-            ESC_writembx(1);
-            assert(s_esc_writembx_calls == 2);
-            assert(sent_foe->foeheader.opcode == FOE_OP_ERR);
-            assert(sent_foe->foeheader.errorcode == 0x800A);
-            MBXcontrol[1].state = MBXstate_idle; /* 释放槽位 1 */
+            /* 真实 SOES 发送给硬件端口桩 */
+            ESC_writembx(out_slot_err);
+            assert(s_hw_esc_write_calls == 2);
+            assert(hw_sent_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(hw_sent_foe->foeheader.errorcode == 0x800A);
+            MBXcontrol[out_slot_err].state = MBXstate_idle; /* 释放槽位 */
 
             /* 8C: 多槽配置 (ESC_MBXBUFFERS=4) 与旧报文共存场景 */
             reset_soes_environment();
@@ -2174,9 +2240,6 @@ int main(void)
             slot1_foe->mbxheader.mbxtype = 0x03; /* CoE */
 
             MBXcontrol[2].state = MBXstate_backup;
-
-            /* 启用真实 SOES 3..1 扫描认领模式 */
-            s_mock_claimbuffer_mode = 1;
 
             ecat_foe_soes_init(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
@@ -2210,13 +2273,147 @@ int main(void)
 
             /* 槽位 3 的 ACK 发送给主站 */
             ESC_writembx(3);
-            assert(sent_foe->foeheader.opcode == FOE_OP_ACK);
-            assert(sent_foe->foeheader.packetnumber == 0);
+            hw_sent_foe = (_FOE *)s_hw_sm1_buf;
+            assert(hw_sent_foe->foeheader.opcode == FOE_OP_ACK);
+            assert(hw_sent_foe->foeheader.packetnumber == 0);
 
             /* 槽位 1 依然维持待发状态 */
             assert(MBXcontrol[1].state == MBXstate_outreq);
 
             printf("  [PASS] 深度风险 8: ACK/ERR 最终完整发给主站，多槽与排队/备份共存正常，不篡改 SOES 所有权\n");
+        }
+
+        /* 9. 深度风险 9: 异常分支主站可观察一致失败保障与契约边界核查 */
+        {
+            /* 9A: 核心激活失败时 (core_on_wrq != 0)，post hook 将 ACK(0) 就地改写为 FOE_OP_ERR (0x8000) */
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            s_foe_files[0].filepass = 0;
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            /* 正常前置钩子暂存 */
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+
+            uint8_t out_slot = get_last_outbound_slot();
+            _FOE *res_foe = (_FOE *)&MBX[out_slot * ESC_MBXSIZE];
+            assert(res_foe->foeheader.opcode == FOE_OP_ACK);
+
+            /* 故意将核心配置标记置为 false，导致 ecat_foe_core_on_wrq 拒绝激活 */
+            core.is_configured = false;
+
+            /* 执行后置钩子: 检测到 core_on_wrq 失败，必须就地中和 ACK 为 FOE_OP_ERR (0x8000) 并返回 -1 */
+            int post_rc = ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_foe, sizeof(_MBXh) + sizeof(_FOEh));
+            assert(post_rc == -1);
+            assert(adapter.has_staged_wrq == false);
+
+            /* 核心断言: 该槽位已被转换为 0x8000 FOE_OP_ERR，杜绝主站收到假 ACK */
+            assert(res_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(res_foe->foeheader.errorcode == 0x8000);
+
+            /* 真实 SOES 发送给物理邮箱 */
+            ESC_writembx(out_slot);
+            _FOE *hw_sent = (_FOE *)s_hw_sm1_buf;
+            assert(hw_sent->foeheader.opcode == FOE_OP_ERR);
+            assert(hw_sent->foeheader.errorcode == 0x8000);
+            MBXcontrol[out_slot].state = MBXstate_idle;
+
+            /* 9B: 外部错传槽位地址时 (mbx_out_buf != slot_buf)，槽位被安全中和为 FOE_OP_ERR 并返回 -1 */
+            reset_soes_environment();
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+
+            out_slot = get_last_outbound_slot();
+            res_foe = (_FOE *)&MBX[out_slot * ESC_MBXSIZE];
+            assert(res_foe->foeheader.opcode == FOE_OP_ACK);
+
+            /* 传入错误的缓冲区指针 (例如传入槽位 1 的地址，而实际新认领的是槽位 3) */
+            uint8_t *wrong_buf = &MBX[1 * ESC_MBXSIZE];
+            post_rc = ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, wrong_buf, sizeof(_MBXh) + sizeof(_FOEh));
+            assert(post_rc == -1);
+            assert(adapter.has_staged_wrq == false);
+            assert(core.state == ECAT_FOE_STATE_IDLE); /* 核心未被激活 */
+
+            /* 核心断言: 槽位 3 已被就地中和为 FOE_OP_ERR (0x8000) */
+            assert(res_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(res_foe->foeheader.errorcode == 0x8000);
+            ESC_writembx(out_slot);
+            assert(hw_sent->foeheader.opcode == FOE_OP_ERR);
+            MBXcontrol[out_slot].state = MBXstate_idle;
+
+            /* 9C: 契约破坏测试：多槽位同时跃迁为 outreq (如多任务或中断插入)，所有 ACK 槽位被中和并返回 -1 */
+            reset_soes_environment();
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess(); /* 认领了槽位 3 */
+
+            /* 模拟恶意并发中断：在 post 执行前，另一个任务把槽位 2 也置为 outreq */
+            MBXcontrol[2].state = MBXstate_outreq;
+            _FOE *slot2_foe = (_FOE *)&MBX[2 * ESC_MBXSIZE];
+            slot2_foe->mbxheader.length = 6;
+            slot2_foe->mbxheader.mbxtype = MBXFOE;
+            slot2_foe->foeheader.opcode = FOE_OP_ACK;
+            slot2_foe->foeheader.packetnumber = 0;
+
+            post_rc = ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)&MBX[3 * ESC_MBXSIZE], sizeof(_MBXh) + sizeof(_FOEh));
+            assert(post_rc == -1); /* 契约破坏被拦截 */
+            assert(adapter.has_staged_wrq == false);
+            assert(core.state == ECAT_FOE_STATE_IDLE);
+
+            /* 关键断言: 槽位 3 与槽位 2 均被中和为 FOE_OP_ERR (0x8000) */
+            _FOE *slot3_foe = (_FOE *)&MBX[3 * ESC_MBXSIZE];
+            assert(slot3_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(slot3_foe->foeheader.errorcode == 0x8000);
+            assert(slot2_foe->foeheader.opcode == FOE_OP_ERR);
+            assert(slot2_foe->foeheader.errorcode == 0x8000);
+
+            MBXcontrol[2].state = MBXstate_idle;
+            MBXcontrol[3].state = MBXstate_idle;
+
+            printf("  [PASS] 深度风险 9: 异常分支主站可观察一致失败保障，多槽竞争与指针不匹配均转化为 0x8000 报错\n");
         }
     }
 

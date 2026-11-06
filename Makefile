@@ -134,8 +134,8 @@ test-examples:
 	echo "  [PASS] driver_template 编译检查通过 (-Wall -Wextra -Werror -pedantic)"
 
 test-soes:
-	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ]; then \
-		echo "错误: SOES_DIR 缺失或未包含 esc_foe.c: '$(SOES_DIR)'"; \
+	@if [ -z "$(SOES_DIR)" ] || [ ! -f "$(SOES_DIR)/esc_foe.c" ] || [ ! -f "$(SOES_DIR)/esc.c" ]; then \
+		echo "错误: SOES_DIR 缺失或未包含 esc_foe.c / esc.c: '$(SOES_DIR)'"; \
 		echo "使用方法: make test-soes SOES_DIR=/path/to/soes"; \
 		exit 1; \
 	fi
@@ -143,7 +143,7 @@ test-soes:
 	@TMP_SOES_DIR=$$(mktemp -d /tmp/foe_build_soes_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SOES_DIR"' EXIT INT TERM && \
 	echo "--- 在独立隔离构建目录编译并运行真实 SOES Harness (构建目录: $$TMP_SOES_DIR) ---" && \
-	$(CC) $(SOES_CFLAGS) -o "$$TMP_SOES_DIR/test_runner_soes_real" $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c $(SOES_DIR)/esc_foe.c && \
+	$(CC) $(SOES_CFLAGS) -o "$$TMP_SOES_DIR/test_runner_soes_real" $(SRC_CORE) $(TEST_SOES_HARNESS_SRC) tests/mock_driver.c $(SOES_DIR)/esc_foe.c $(SOES_DIR)/esc.c && \
 	"$$TMP_SOES_DIR/test_runner_soes_real" && \
 	(ulimit -s 8192 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \
 	(ulimit -s 1024 && "$$TMP_SOES_DIR/test_runner_soes_real" >/dev/null) && \

@@ -42,7 +42,7 @@ def main():
     print(f" SOES 源码文件哈希核验 (目录: {args.soes_dir})")
     print("------------------------------------------------------------")
 
-    checked_files = ["esc_foe.c", "esc.h", "esc_foe.h"]
+    checked_files = ["esc.c", "esc_foe.c", "esc.h", "esc_foe.h"]
     all_matched = True
 
     for fname in checked_files:

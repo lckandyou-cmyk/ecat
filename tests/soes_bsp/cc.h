@@ -18,6 +18,10 @@
 #define CC_PACKED_END
 #define CC_ALIGNED(n) __attribute__((aligned(n)))
 
+#ifndef CC_STATIC_ASSERT
+#define CC_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 #define htoes(x) ((uint16_t)(x))
 #define etohs(x) ((uint16_t)(x))
 #define htoel(x) ((uint32_t)(x))
