@@ -37,11 +37,12 @@
    - 若配置表中为基准名（长度 17），主站按规范下发带动态版本号的文件名（如 `"SERVO_DRV_MCU_V1.0.0.0.efw"`，长度 26）；
    - 由于 `num_chars == 26`，`strncmp` 将比较 26 字节，导致比对越界或不相等，原生 SOES 直接返回 `FOE_ERR_NOTFOUND (0x8001)`。
 
-### 1.3 候选方案对比 (待决)
+### 1.3 候选方案对比与现行实现
 | 方案 | 具体做法 | 预期优势 | 局限与待核实事项 | 状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| **方案 A<br>(固定目标文件名)** | 协议约定主站升级时下发固定文件名（如 `SERVO_DRV_MCU.efw`）。硬件 ID、工程 ID、目标 ID 及版本号完全由 64 字节二进制 `.efw` 文件头承载并校验。 | 利用原生 SOES 静态表项机制，从站无需打补丁。 | - 主站无法从文件名直观获知版本；<br>- **【未核实】** 是否与所有主站工具和外部协议栈完全兼容尚无充分实测证据。 | **待裁定** |
-| **方案 B<br>(SOES 栈打补丁)** | 修改 SOES `esc_foe.c`，在 WRQ 入口增加用户动态路由钩子：<br>`int (*foe_wrq_hook)(const char *name, size_t len)`。 | 支持从文件名动态提取版本与目标，与现有规范严格一致。 | 侵入第三方协议栈源码，增加维护与版本升级负担。 | **待裁定** |
+| **方案 A<br>(固定目标文件名)** | 协议约定主站升级时下发固定文件名（如 `SERVO_DRV_MCU.efw`）。硬件 ID、工程 ID、目标 ID 及版本号完全由 64 字节二进制 `.efw` 文件头承载并校验。 | 利用原生 SOES 静态表项机制，从站无需打补丁。 | - 主站无法从文件名直观获知版本；<br>- **【未核实】** 是否与所有主站工具和外部协议栈完全兼容尚无充分实测证据。 | 备选方案 |
+| **方案 B<br>(SOES 栈打补丁)** | 修改 SOES `esc_foe.c`，在 WRQ 入口增加用户动态路由钩子：<br>`int (*foe_wrq_hook)(const char *name, size_t len)`。 | 支持从文件名动态提取版本与目标，与现有规范严格一致。 | 侵入第三方协议栈源码，增加维护与版本升级负担。 | 备选方案 |
+| **方案 C<br>(前后置邮箱钩子，现行实现)** | 前置钩子嗅探 WRQ 并做只读预检；原生 SOES 处理后，由后置钩子核验输出槽位并就地将异常中和为标准 0x8000 ERR、保持信箱计数并注入复位自愈。 | 零侵入第三方协议栈源码，支持动态文件名解析，保障主站可观察一致失败。 | 严格要求单执行流串行调用，禁止并发与插入状态迁移；已在宿主完成全套验证，真实板卡待验。 | **已在宿主环境实现并跑通验证 (当前主线)** |
 
 ---
 
@@ -214,9 +215,13 @@ void ESC_ALerror (uint16_t errornumber);
    - **时序与机理分析**：`ESC_state()` 首先检查 `ESCvar.ALevent & ESCREG_ALEVENT_CONTROL`（0220h 寄存器 Bit 0）。若该事件位未置位，函数直接 `return;` 退出，不会主动读取 `ESCREG_ALCONTROL` (0120h)。
    - **与硬件行为联动**：依据 LAN9252 手册 [pdf:PDF_Q6_AL_EVENT_CLEAR_PDI]，PDI 读取 0120h 会自动清除 0220h Bit 0。若先前 APP 读取了 0120h，新启动的协议栈如果仅依赖 `ESCvar.ALevent` 轮询，将直接命中 `else return;` 无法进入状态迁移逻辑。
 
-### 4.2 现有实现状态界定 (区分设计与实现)
-- **【单测桩仿真与局限性】现有适配桩状态**：目前适配层 `src/adapters/ecat_foe_soes.c` 实现了双参数 `ecat_foe_soes_post_state_hook(adapter, as, an)` 的单测桩，能够在 `*as == 0x13U` 且核心机未正常完成 finalize（或处于未闭环活跃会话/错误态）时改写 `*an = 0x13U` (BOOT|Error) 并通过注入的 `al_error_fn` 回调上报 `0x0014U` (ALERR_NOVALIDFIRMWARE)；
-- **局限性与待验证项**：虽然真实 SOES `esc_foe.c` 已在独立宿主测试 Harness（`tests/test_soes_real_harness.c`）中完成编译与联动验证，但生产环境目前仍未正式接入，**未在真实硬件上集成编译，未进行真实主站动态联调【属于宿主环境仿真，非生产接入】**。真实硬件环境下由于邮箱已在 switch 内部通过 `ESC_stopmbx()` 停止，主站无法在该状态下通过 FoE 邮箱继续交互，必须先按 EtherCAT 规范走状态机复位恢复流程。
+### 4.2 现有实现状态界定 (区分宿主验证与物理硬件)
+- **适配层实现状态**：适配层 `src/adapters/ecat_foe_soes.c` 已完整实现两组机制：
+  1. **状态机钩子**：实现了 `ecat_foe_soes_post_state_hook`，在 `*as == 0x13U` 且核心机未正常完成 finalize（或处于未闭环活跃会话/错误态）时改写 `*an = 0x13U` (BOOT|Error) 并通过注入的 `al_error_fn` 回调上报 `0x0014U` (ALERR_NOVALIDFIRMWARE)；
+  2. **前后置邮箱钩子架构 (方案 C)**：实现了 `ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`，支持前置嗅探暂存 WRQ、后置核验响应并将异常就地中和为标准 0x8000 ERR、保持原有信箱头计数器并注入 `FOE_init` 复位自愈；
+- **宿主验证与真机边界**：
+  - **宿主环境已验证**：适配层已在宿主测试 Harness（`tests/test_soes_real_harness.c`）中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，完成 11 项核心协议行为测试与 9 大深度风险验证，并在 `examples/bootloader_soes/` 中跑通 5 大场景最小 Bootloader 集成测试；
+  - **物理硬件待验证**：生产环境真实 MCU/ESC 物理芯片与现场真实主站动态联调尚未开展，明确处于【属于宿主环境仿真，物理硬件待真机验证】状态。真实硬件环境下由于邮箱已在 switch 内部通过 `ESC_stopmbx()` 停止，主站无法在该状态下通过 FoE 邮箱继续交互，必须先按 EtherCAT 规范走状态机复位恢复流程。
 
 ---
 
@@ -369,19 +374,29 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 7.3 宿主测试 Harness 设计与运行验证 (Host Harness)
 
-为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了轻量宿主测试套件，**严格区分“孤立直接 API 调用防御”与“真实协议机驱动联动”两类不同维度的证据**：
+为在无实体从站硬件的环境下实证上述 SOES 行为及其与核心状态机、前后置钩子的交互，本项目在 `tests/test_soes_real_harness.c` 中构建了宿主测试套件，直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，覆盖真实总线发送与多槽轮转链路：
 
 - **测试设计范围**：
-  1. `test_real_soes_wrq_callback_timing`：验证 WRQ 仅匹配文件名并回送 ACK，不触发 `write_function` 数据回调；
-  2. `test_real_soes_filename_prefix_matching`：验证前缀匹配旁路现象，证实短前缀匹配被放行，未知文件名被正确中止；
-  3. `test_real_soes_zero_len_vs_short_packet`：验证短包写入失败被严格中止，而 0 长度包结束时写入失败被协议栈忽略并回送 ACK；
-  4. `test_direct_api_calls_defense_without_wrq`【证据 1 - 孤立直接调用防御】：独立单元级测试，不经过真实协议机调度，分别直接调用 `ecat_foe_core_on_data` 与 `ecat_foe_soes_write_cb`，验证在未经 WRQ 建立会话时，核心状态机与适配层能够在接口级直接拒绝非法调用（返回 -1 与非零）；
-  5. `test_real_soes_driven_adapter_e2e_flow`【证据 2 - 真实协议机端到端联动】：将真实适配层写入回调 `ecat_foe_soes_write_cb` 注册给真实 SOES 的文件表项，在宿主邮箱中由真实 `ESC_foeprocess()` 接收 WRQ 与 DATA 报文，由真实协议栈内部自动驱动已注册的适配器回调：
-     - **成功流**：合法固件包经协议栈自动调用回调进入核心机流式校验并执行 `finalize`，底层驱动正常生效，SOES 回复成功 ACK(1)；
-     - **失败流**：损坏固件包经协议栈调用回调被核心机拒绝，真实 SOES 捕获写入失败并在短包分支触发 `FOE_abort(FOE_ERR_PROGERROR)`，向主站回送错误码 0x800B。
+  1. **11 组核心协议行为测试**：
+     - WRQ 仅匹配文件名并回送 ACK，不触发写数据回调；
+     - 前缀匹配旁路现象（短前缀误放行，未知文件名中止）；
+     - 零长度包与短包分支返回值处理不对称性；
+     - 孤立直接 API 调用防御；
+     - 真实协议机驱动端到端成功与失败流联动；
+  2. **9 大深度风险实证与消除 (风险 1~9)**：
+     - 风险 1: 密码拒绝与后置核验隔离；
+     - 风险 2: 无可用输出邮箱时的安全失败；
+     - 风险 3: 延迟响应与旧 ACK(0) 误激活防御；
+     - 风险 4: 稀疏配置下的目标 ID 与文件表映射；
+     - 风险 5: 真实发送链路端到端与信箱所有权保持；
+     - 风险 6: 输出邮箱新鲜度与槽位上下文隔离；
+     - 风险 7: 信箱计数器高 4 位保持（`mbxcnt` 不被篡改清零）；
+     - 风险 8: `FOE_WAIT_FOR_DATA` 态自愈恢复与重试；
+     - 风险 9: 多槽轮转隔离与真实硬件端口桩收发。
 - **运行验证结果**：
-  - 测试二进制 `test_runner_soes_real` 已集成入 `Makefile` 的 `test` 与 `test-asan` 目标；
-  - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下均构建并通过全部 5 项测试，退出码均为 `rc=0`。
+  - 测试二进制 `test_runner_soes_real` 已集成入 `Makefile` 的 `test-soes` 与 `test-asan` 目标；
+  - 配套最小 Bootloader 接入参考集成测试 `test_bootloader_integration` 已集成入 `test-bootloader` 目标（覆盖 5 大场景）；
+  - 在宿主机正常栈限制（`ulimit -s 8192`）与受限栈深度（`ulimit -s 1024`）下全量测试通过，退出码均为 `rc=0`。
 
 ### 7.4 明确未执行内容与工程边界声明 (Limitations)
 

@@ -9,7 +9,7 @@
     {
       "id": "PDF_Q1_RESET_TABLE_6_1",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 285,
+      "doc_line": 290,
       "line_text_hash": "9d47082f7ab2a73eb4d729998e5d4d821805dcd741cdc496647b6960a92ef7fa",
       "pdf_page": 38,
       "printed_page": 38,
@@ -27,7 +27,7 @@
     {
       "id": "PDF_Q2_RST_PIN_RESET",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 286,
+      "doc_line": 291,
       "line_text_hash": "318fdae79ecfc5bf637c90903056be5a280c53be79ad412fd349863aa9c8237c",
       "pdf_page": 39,
       "printed_page": 39,
@@ -45,7 +45,7 @@
     {
       "id": "PDF_Q3_AL_CONTROL_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 287,
+      "doc_line": 292,
       "line_text_hash": "46355a4788ffcd9b15a74bdca8467f62aa69e84d446a79d913ece442d0c72cc6",
       "pdf_page": 239,
       "printed_page": 239,
@@ -63,7 +63,7 @@
     {
       "id": "PDF_Q4_AL_STATUS_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 288,
+      "doc_line": 293,
       "line_text_hash": "6924a55fb5d253ebe40e10dab168366898ab41ae389a3c144b7dac2ccf38ed1f",
       "pdf_page": 240,
       "printed_page": 240,
@@ -81,7 +81,7 @@
     {
       "id": "PDF_Q5_AL_STATUS_CODE_REG",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 289,
+      "doc_line": 294,
       "line_text_hash": "0a92e34614bf48ce294a6ad032cdd2473acf52c14be5d720e141f30a2c0ad6a2",
       "pdf_page": 240,
       "printed_page": 240,
@@ -99,7 +99,7 @@
     {
       "id": "PDF_Q6_AL_EVENT_CLEAR_PDI",
       "doc_path": "docs/architecture/soes-integration-options.md",
-      "doc_line": 290,
+      "doc_line": 295,
       "line_text_hash": "a1dccec0efa4b356ffac400bddf96033b7fb316581bf5100c9b1a6f98b5a0447",
       "pdf_page": 253,
       "printed_page": 253,
