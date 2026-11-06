@@ -52,8 +52,9 @@ int bootloader_app_init(bootloader_app_t *app,
         return -1;
     }
 
-    /* 4. 初始化 SOES 适配层并绑定信箱上下文 */
-    ecat_foe_soes_init(&app->adapter, &app->core, slot_size);
+    /* 4. 初始化 SOES 适配层并绑定信箱上下文 (传入 SOES 文件写缓冲容量 foe_cfg->buffer_size) */
+    uint32_t foe_buf_size = (foe_cfg != NULL) ? foe_cfg->buffer_size : 0;
+    ecat_foe_soes_init(&app->adapter, &app->core, foe_buf_size);
     if (ecat_foe_soes_set_mbx_context(&app->adapter, mbxcontrol, mbx, num_slots, slot_size) != 0) {
         return -1;
     }

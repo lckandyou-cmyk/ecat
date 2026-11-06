@@ -309,11 +309,27 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     }
 
     /* FoE Header:
-     * 字节 6: opcode (0x02 为 WRQ)
+     * 字节 6: opcode (0x02 为 WRQ, 0x05 为 ERR)
      */
     uint8_t opcode = mbx_buf[ECAT_MBX_HDR_SIZE];
+    if (opcode == ECAT_FOE_OP_ERR) {
+        /* 主站下发 FoE ERR 中止报文：
+         * 1. 安全丢弃暂存 WRQ (若存在)；
+         * 2. 若核心处于活跃会话中，通知核心状态机执行 abort，
+         *    保证驱动 abort 被且仅被调用一次，保持介质无效标记，重置核心会话回 IDLE；
+         * 3. 放行给原生 SOES 协议栈完成 FOE_error() -> FOE_init() 自愈复位。
+         */
+        adapter->has_staged_wrq = false;
+        adapter->staged_filename[0] = '\0';
+        adapter->staged_target_id = 0;
+        if (adapter->core != NULL) {
+            ecat_foe_core_on_abort(adapter->core);
+        }
+        return 0;
+    }
+
     if (opcode != ECAT_FOE_OP_WRQ) {
-        return 0; /* 非 WRQ 请求直接放行 */
+        return 0; /* 非 WRQ 且非 ERR 请求直接放行 */
     }
 
     /* 提取动态文件名 */

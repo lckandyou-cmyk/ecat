@@ -45,6 +45,10 @@ static int drv_cb_init(void *user_ctx)
     if (drv == NULL || drv->inject_init_err) {
         return -1;
     }
+    /* 严格介质检查：模拟介质缓冲区必须有效且容量不小于最大应用分区配额 */
+    if (drv->storage_buf == NULL || drv->max_size == 0 || drv->storage_buf_size < drv->max_size) {
+        return -1;
+    }
     drv->is_initialized = true;
     drv->erased_watermark = 0;
     drv->written_bytes = 0;
@@ -56,6 +60,9 @@ static int drv_cb_invalidate(void *user_ctx)
 {
     bootloader_flash_driver_t *drv = (bootloader_flash_driver_t *)user_ctx;
     if (drv == NULL || !drv->is_initialized || drv->inject_invalidate_err) {
+        return -1;
+    }
+    if (drv->storage_buf == NULL || drv->storage_buf_size < drv->max_size) {
         return -1;
     }
     /* 在擦除任何有效固件前，先将有效标记持久化置为非法 */
@@ -74,21 +81,28 @@ static int drv_cb_erase_to(uint32_t need_end, uint32_t *erased_end, void *user_c
     if (drv->inject_erase_err) {
         return -1;
     }
-    if (need_end > drv->max_size) {
+    if (drv->sector_size == 0 || drv->max_size == 0 || need_end > drv->max_size) {
+        return -1;
+    }
+    if (drv->storage_buf == NULL || drv->storage_buf_size < drv->max_size) {
         return -1;
     }
 
-    /* 向上对齐到物理扇区边界 */
+    /* 向上对齐到物理扇区边界 (严格防范加法整数溢出) */
+    if (need_end > UINT32_MAX - drv->sector_size) {
+        return -1;
+    }
     uint32_t aligned_end = ((need_end + drv->sector_size - 1U) / drv->sector_size) * drv->sector_size;
     if (aligned_end > drv->max_size) {
         aligned_end = drv->max_size;
     }
 
     if (aligned_end > drv->erased_watermark) {
-        if (drv->storage_buf != NULL && aligned_end <= drv->storage_buf_size) {
-            uint32_t erase_len = aligned_end - drv->erased_watermark;
-            memset(&drv->storage_buf[drv->erased_watermark], 0xFF, erase_len);
+        if (aligned_end > drv->storage_buf_size) {
+            return -1;
         }
+        uint32_t erase_len = aligned_end - drv->erased_watermark;
+        memset(&drv->storage_buf[drv->erased_watermark], 0xFF, erase_len);
         drv->erased_watermark = aligned_end;
     }
 
@@ -110,8 +124,18 @@ static int drv_cb_write(uint32_t offset, const uint8_t *data, uint32_t len, void
     if (drv->write_unit > 0 && (len % drv->write_unit) != 0) {
         return -1;
     }
+    /* 严格防范加法整数溢出 */
+    if (len > UINT32_MAX - offset) {
+        return -1;
+    }
+    uint32_t write_end = offset + len;
+
     /* 容量与擦除水位检查 */
-    if (offset + len > drv->max_size || offset + len > drv->erased_watermark) {
+    if (write_end > drv->max_size || write_end > drv->erased_watermark) {
+        return -1;
+    }
+    /* 实际介质容量与越界检查 */
+    if (drv->storage_buf == NULL || write_end > drv->storage_buf_size) {
         return -1;
     }
 
@@ -122,11 +146,9 @@ static int drv_cb_write(uint32_t offset, const uint8_t *data, uint32_t len, void
     uint32_t physical_dest_addr = drv->base_address + offset;
     (void)physical_dest_addr; /* 实机驱动写入该物理地址 */
 
-    if (drv->storage_buf != NULL && (offset + len) <= drv->storage_buf_size) {
-        memcpy(&drv->storage_buf[offset], data, len);
-    }
-    if (offset + len > drv->written_bytes) {
-        drv->written_bytes = offset + len;
+    memcpy(&drv->storage_buf[offset], data, len);
+    if (write_end > drv->written_bytes) {
+        drv->written_bytes = write_end;
     }
     return 0;
 }
@@ -141,15 +163,20 @@ static int drv_cb_read(uint32_t offset, uint8_t *buf, uint32_t len, void *user_c
     if (drv->inject_read_err) {
         return -1;
     }
-    if (offset + len > drv->max_size) {
+    /* 严格防范加法整数溢出 */
+    if (len > UINT32_MAX - offset) {
+        return -1;
+    }
+    uint32_t read_end = offset + len;
+    if (read_end > drv->max_size) {
+        return -1;
+    }
+    /* 实际介质检查：若介质为空或越界，严格返回失败，绝不返回伪造 0xFF 掩盖错误 */
+    if (drv->storage_buf == NULL || read_end > drv->storage_buf_size) {
         return -1;
     }
 
-    if (drv->storage_buf != NULL && (offset + len) <= drv->storage_buf_size) {
-        memcpy(buf, &drv->storage_buf[offset], len);
-    } else {
-        memset(buf, 0xFF, len);
-    }
+    memcpy(buf, &drv->storage_buf[offset], len);
     return 0;
 }
 
@@ -161,6 +188,10 @@ static int drv_cb_finalize(void *user_ctx)
         return -1;
     }
     if (drv->inject_finalize_err) {
+        return -1;
+    }
+    /* 介质必须有效且容量足够 */
+    if (drv->storage_buf == NULL || drv->storage_buf_size < drv->max_size) {
         return -1;
     }
     drv->is_finalized = true;

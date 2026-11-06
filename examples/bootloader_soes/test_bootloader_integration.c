@@ -92,7 +92,7 @@ static uint8_t s_bootloader_sentinel[1024];
 /* SOES FoE 文件配置 */
 static foe_file_cfg_t s_foe_files[1];
 static foe_cfg_t s_foe_cfg;
-static uint8_t s_foe_fbuffer[128];
+static uint8_t s_foe_fbuffer[512];
 
 /* 测试固件缓冲 */
 static uint8_t s_test_efw_buf[512];
@@ -136,7 +136,7 @@ static void reset_test_env(void)
     s_foe_files[0].write_function = ecat_foe_soes_write_cb;
 
     s_foe_cfg.fbuffer = s_foe_fbuffer;
-    s_foe_cfg.buffer_size = sizeof(s_foe_fbuffer);
+    s_foe_cfg.buffer_size = 128;
     s_foe_cfg.n_files = 1;
     s_foe_cfg.files = s_foe_files;
 
@@ -234,6 +234,54 @@ int main(void)
         }
 
         printf("  [PASS] 场景 1 验证通过: WRQ->DATA 分块流式接收完成，介质有效标记置位，载荷逐字节完全匹配\n");
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 场景 1B: 覆盖不同合法 SOES fbuffer 缓冲容量 (64 字节与 256 字节) 验证  */
+    /* ---------------------------------------------------------------------- */
+    {
+        printf("--- [场景 1B] 覆盖不同合法 fbuffer 尺寸 (64 字节与 256 字节) 流式传输验证 ---\n");
+
+        const uint32_t test_fbuf_sizes[] = {64, 256};
+        for (size_t fbi = 0; fbi < sizeof(test_fbuf_sizes) / sizeof(test_fbuf_sizes[0]); fbi++) {
+            uint32_t cur_fbuf_sz = test_fbuf_sizes[fbi];
+            reset_test_env();
+            s_foe_cfg.buffer_size = cur_fbuf_sz;
+            FOE_config(&s_foe_cfg);
+            FOE_init();
+
+            int init_rc = bootloader_app_init(&app,
+                                              &s_foe_cfg,
+                                              MBXcontrol,
+                                              MBX,
+                                              MBXBUFFERS,
+                                              ESC_MBXSIZE,
+                                              s_sim_flash,
+                                              sizeof(s_sim_flash),
+                                              FOE_init,
+                                              NULL);
+            assert(init_rc == 0);
+            assert(app.adapter.buffer_size == cur_fbuf_sz);
+
+            master_foe_response_t resp;
+            assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
+
+            /* 分块 1: 116 字节满包 (验证在 fbuffer=64 时不发生误报短包提前结束) */
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 1);
+
+            /* 分块 2: 76 字节短包 (收尾触发 FOE_fclose 与最终校验提交) */
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 76, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 2);
+
+            assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
+            assert(app.flash_drv.is_finalized == true);
+            assert(app.flash_drv.valid_flag == APP_FLASH_VALID_MAGIC);
+            assert(memcmp(s_sim_flash, s_test_payload, 128) == 0);
+        }
+
+        printf("  [PASS] 场景 1B 验证通过: 真实 SOES 在 64 字节与 256 字节 fbuffer 下流式接收与最终提交正常闭环\n");
     }
 
     /* ---------------------------------------------------------------------- */
@@ -353,31 +401,117 @@ int main(void)
     }
 
     /* ---------------------------------------------------------------------- */
-    /* 场景 4: 中途异常中止与自愈恢复重试                                     */
+    /* 场景 3B: Flash 存储驱动安全失败与边界防御 (NULL/容量不足/溢出/越界)     */
     /* ---------------------------------------------------------------------- */
     {
-        printf("--- [场景 4] 中途异常中止与自愈恢复重试 ---\n");
+        printf("--- [场景 3B] Flash 存储驱动安全失败与边界防御 (NULL/容量不足/溢出/越界) ---\n");
+        const ecat_foe_target_driver_t *flash_ops = bootloader_flash_driver_get_ops();
+
+        /* 1. storage_buf 为 NULL 测试：所有读写与提交均安全拒绝并保持无效魔数 */
+        bootloader_flash_driver_t null_drv;
+        bootloader_flash_driver_init_ctx(&null_drv, NULL, 0);
+        assert(flash_ops->init(&null_drv) != 0);
+        assert(flash_ops->invalidate(&null_drv) != 0);
+        uint32_t erased = 0;
+        assert(flash_ops->erase_to(4096, &erased, &null_drv) != 0);
+        uint8_t dummy_d[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        assert(flash_ops->write(0, dummy_d, sizeof(dummy_d), &null_drv) != 0);
+        uint8_t read_d[8] = {0};
+        assert(flash_ops->read(0, read_d, sizeof(read_d), &null_drv) != 0);
+        assert(flash_ops->finalize(&null_drv) != 0);
+        assert(null_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+
+        /* 2. storage_buf 容量不足测试 (缓冲尺寸小于 APP_FLASH_MAX_SIZE 配额) */
+        uint8_t small_buf[1024];
+        bootloader_flash_driver_t small_drv;
+        bootloader_flash_driver_init_ctx(&small_drv, small_buf, sizeof(small_buf));
+        assert(flash_ops->init(&small_drv) != 0);
+
+        /* 3. 越界与整数溢出防御测试 */
+        bootloader_flash_driver_t bound_drv;
+        bootloader_flash_driver_init_ctx(&bound_drv, s_sim_flash, sizeof(s_sim_flash));
+        assert(flash_ops->init(&bound_drv) == 0);
+        assert(flash_ops->invalidate(&bound_drv) == 0);
+        assert(flash_ops->erase_to(4096, &erased, &bound_drv) == 0);
+
+        /* 3A: 写入整数溢出防御 (offset + len 溢出绕回) */
+        assert(flash_ops->write(UINT32_MAX - 3, dummy_d, 8, &bound_drv) != 0);
+        /* 3B: 写入越界 (超出 max_size 或超出当前 erased_watermark 水位) */
+        assert(flash_ops->write(4096, dummy_d, 8, &bound_drv) != 0);
+        /* 3C: 读取整数溢出防御 (offset + len 溢出绕回) */
+        assert(flash_ops->read(UINT32_MAX - 3, read_d, 8, &bound_drv) != 0);
+        /* 3D: 读取越界 (超出 max_size，绝不伪造 0xFF 掩盖错误) */
+        assert(flash_ops->read(APP_FLASH_MAX_SIZE, read_d, 8, &bound_drv) != 0);
+        /* 3E: 擦除超出 max_size 与加法整数溢出防御 */
+        assert(flash_ops->erase_to(APP_FLASH_MAX_SIZE + 4096, &erased, &bound_drv) != 0);
+        assert(flash_ops->erase_to(UINT32_MAX - 100, &erased, &bound_drv) != 0);
+
+        printf("  [PASS] 场景 3B 验证通过: Flash 存储驱动在 NULL/容量不足/溢出/越界下严格安全失败\n");
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 场景 4: 中途异常中止 (主站 ERR) 与一次且仅一次驱动中止、自愈重试验证    */
+    /* ---------------------------------------------------------------------- */
+    {
+        printf("--- [场景 4] 中途异常中止 (主站 ERR) 与一次且仅一次驱动中止、自愈重试验证 ---\n");
         reset_test_env();
         assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
                                    s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
 
-        size_t efw_len = bootloader_master_build_efw(
-            s_test_efw_buf, sizeof(s_test_efw_buf),
+        /* 构造 200 字节载荷的固件镜像 (64 字节头 + 200 字节载荷 = 264 字节) */
+        uint8_t payload_200[200];
+        for (size_t i = 0; i < sizeof(payload_200); i++) {
+            payload_200[i] = (uint8_t)(0x30 + (i & 0x3F));
+        }
+        uint8_t efw_200[512];
+        size_t efw_200_len = bootloader_master_build_efw(
+            efw_200, sizeof(efw_200),
             BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
             BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
-            0x01000000U, s_test_payload, sizeof(s_test_payload));
-        assert(efw_len > 0);
+            0x01000000U, payload_200, sizeof(payload_200));
+        assert(efw_200_len == 264);
 
         master_foe_response_t resp;
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
+
+        /* 发送分块 1 (116 字节满包) */
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &efw_200[0], 116, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 1);
 
-        /* 主站中途由于本地异常主动发送 ERR 报文中断当前升级 */
+        /* 发送分块 2 (116 字节满包，累计接收 232 字节，跨过 64 字节头，核心进入 DATA 态且驱动进入活跃期) */
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &efw_200[116], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 2);
+
+        /* 确证核心已进入活跃会话且驱动已完成初始化与 invalidate */
+        assert(app.core.session_active == true);
+        assert(app.core.state == ECAT_FOE_STATE_DATA);
+        assert(app.flash_drv.is_initialized == true);
+        assert(app.flash_drv.is_invalidated == true);
+
+        /* 主站此时下发 ERR 报文主动中断当前升级 */
         assert(bootloader_master_send_err(&app, &s_foe_cfg, 0x8000) == 0);
 
+        /* 确证：驱动 abort 被恰好执行一次，核心 session_active 置 false，状态复位回 IDLE，有效标记保持为无效 */
+        assert(app.core.session_active == false);
+        assert(app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(app.flash_drv.is_initialized == false);
+        assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+
+        /* 再次重复触发 abort (幂等性核查): 驱动 abort 不会重复破坏状态 */
+        bootloader_app_abort(&app);
+        assert(app.core.session_active == false);
+        assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+
         /* 此时 SOES 经过 FOE_error() -> FOE_abort() -> FOE_init() 自愈复位回 FOE_READY */
-        /* 主站重新发起全新的固件升级全流程 */
+        /* 主站重新发起全新的固件升级全流程 (重新生成 192 字节基准固件) */
+        size_t retry_len = bootloader_master_build_efw(
+            s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, s_test_payload, 128);
+        assert(retry_len == 192);
+
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
 
@@ -391,13 +525,9 @@ int main(void)
         assert(app.flash_drv.is_finalized == true);
         assert(app.flash_drv.valid_flag == APP_FLASH_VALID_MAGIC);
         assert(app.flash_drv.written_bytes == 128);
-        assert(memcmp(s_sim_flash, s_test_payload, sizeof(s_test_payload)) == 0);
+        assert(memcmp(s_sim_flash, s_test_payload, 128) == 0);
 
-        assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
-        assert(app.flash_drv.is_finalized == true);
-        assert(app.flash_drv.valid_flag == APP_FLASH_VALID_MAGIC);
-
-        printf("  [PASS] 场景 4 验证通过: 中途异常中止后 SOES 与核心干净复位，重试升级直接闭环成功\n");
+        printf("  [PASS] 场景 4 验证通过: 主站 ERR 即时触发一次且仅一次驱动中止、保留介质无效并支持后续自愈重试闭环\n");
     }
 
     /* ---------------------------------------------------------------------- */
