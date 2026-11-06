@@ -46,6 +46,11 @@ extern "C" {
  */
 typedef void (*ecat_foe_al_error_fn_t)(uint16_t errornumber);
 
+/**
+ * @brief 协议栈状态机复位函数原型 (在真实 SOES 中对应 FOE_init(void))
+ */
+typedef void (*ecat_foe_reset_fn_t)(void);
+
 #ifndef MBXstate_idle
 #define MBXstate_idle                   0x00
 #define MBXstate_inclaim                0x01
@@ -85,6 +90,7 @@ typedef struct {
     ecat_foe_core_t        *core;
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
+    ecat_foe_reset_fn_t     foe_reset_fn;       /**< 协议栈状态机复位回调 (如真实环境接入 FOE_init，可为 NULL) */
     bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
     char                    staged_filename[FOE_FN_MAX + 1]; /**< 暂存的 WRQ 文件名 */
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
@@ -107,6 +113,21 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
  * @param al_error_fn 错误上报函数指针
  */
 void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al_error_fn_t al_error_fn);
+
+/**
+ * @brief 设置协议栈状态机复位回调函数 (真实 SOES 中传入 FOE_init，单测传入桩函数)
+ *
+ * 当后置钩子因核心激活失败、多槽竞态或指针不匹配将已排队的 ACK(0) 就地改写为 FOE_OP_ERR (0x8000) 时：
+ * - 若已注册此回调，适配层在改写槽位后调用该函数，主动将 SOES 从 FOE_WAIT_FOR_DATA 态复位为 FOE_READY；
+ * - 若未注册 (NULL，默认值)，SOES 将保持在原生 FOE_WAIT_FOR_DATA 态，其后续安全自愈边界如下：
+ *   1. 主站下发后续 DATA 时：write_cb 拒绝，SOES 触发 0x800B Abort 并自动复位回 FOE_READY；
+ *   2. 主站直接重发 WRQ 时：SOES 原生校验状态非 READY 返回 0x8004 (FOE_ERR_ILLEGAL) Abort 并自动复位回 FOE_READY；
+ *   3. 主站发送 FOE_OP_ERR 报文时：SOES 响应并复位回 FOE_READY。
+ *
+ * @param adapter      适配层上下文
+ * @param foe_reset_fn 协议栈状态机复位函数指针
+ */
+void ecat_foe_soes_set_foe_reset_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_reset_fn_t foe_reset_fn);
 
 /**
  * @brief 重置目标 ID 到 SOES 文件表索引的映射为全部未映射 (-1)

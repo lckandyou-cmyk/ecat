@@ -23,6 +23,7 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->core = core;
     adapter->buffer_size = buffer_size;
     adapter->al_error_fn = NULL;
+    adapter->foe_reset_fn = NULL;
     adapter->has_staged_wrq = false;
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
@@ -103,6 +104,13 @@ void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al
 {
     if (adapter != NULL) {
         adapter->al_error_fn = al_error_fn;
+    }
+}
+
+void ecat_foe_soes_set_foe_reset_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_reset_fn_t foe_reset_fn)
+{
+    if (adapter != NULL) {
+        adapter->foe_reset_fn = foe_reset_fn;
     }
 }
 
@@ -207,12 +215,17 @@ static void foe_convert_slot_to_error(uint8_t *slot_buf, uint16_t buffer_size, u
     if (slot_buf == NULL || buffer_size < (ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE)) {
         return;
     }
+    /* 仅更新报文载荷长度为 FoE 错误响应头部大小 (6 字节) */
     slot_buf[0] = (uint8_t)(ECAT_FOE_HDR_SIZE & 0xFF);
     slot_buf[1] = (uint8_t)((ECAT_FOE_HDR_SIZE >> 8) & 0xFF);
-    slot_buf[2] = 0x00;
-    slot_buf[3] = 0x00;
-    slot_buf[4] = 0x00;
-    slot_buf[5] = ECAT_MBX_TYPE_FOE;
+
+    /* 严格保持原有 mailbox header 关键属性不变：
+     * - slot_buf[2..3]: address (保持目标主站地址 0x0000 不变)
+     * - slot_buf[4]: priority 与 channel 保持不变
+     * - slot_buf[5]: 高 4 位 mbxcnt 严格保持不变 (防范协议计数丢失)，低 4 位保持/设置为 ECAT_MBX_TYPE_FOE (0x04)
+     */
+    slot_buf[5] = (uint8_t)((slot_buf[5] & 0xF0U) | (ECAT_MBX_TYPE_FOE & 0x0FU));
+
     slot_buf[ECAT_MBX_HDR_SIZE + 0] = ECAT_FOE_OP_ERR;
     slot_buf[ECAT_MBX_HDR_SIZE + 1] = 0x00;
     slot_buf[ECAT_MBX_HDR_SIZE + 2] = (uint8_t)(error_code & 0xFF);
@@ -424,6 +437,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                 foe_neutralize_slot_if_ack(slot_ptr, adapter->mbx_ctx.buffer_size);
             }
         }
+        if (adapter->foe_reset_fn != NULL) {
+            adapter->foe_reset_fn();
+        }
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
@@ -437,6 +453,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
     /* 若外部调用显式传入了 mbx_out_buf，则必须与实际新认领的槽位首地址一致，杜绝错传旧槽位或无关内存 */
     if (mbx_out_buf != NULL && mbx_out_buf != slot_buf) {
         foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
+        if (adapter->foe_reset_fn != NULL) {
+            adapter->foe_reset_fn();
+        }
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
@@ -452,6 +471,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         (mbx_out_buf != NULL && mbx_out_len < (size_t)(ECAT_MBX_HDR_SIZE + mbx_len)) ||
         mbx_type != ECAT_MBX_TYPE_FOE) {
         foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
+        if (adapter->foe_reset_fn != NULL) {
+            adapter->foe_reset_fn();
+        }
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
@@ -476,6 +498,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         if (rc != 0) {
             /* 核心激活失败：必须将该槽位就地改写为 FOE_OP_ERR，杜绝主站收到假 ACK(0) */
             foe_convert_slot_to_error(slot_buf, adapter->mbx_ctx.buffer_size, ECAT_FOE_ERR_NOTDEFINED);
+            if (adapter->foe_reset_fn != NULL) {
+                adapter->foe_reset_fn();
+            }
             return -1;
         }
 
@@ -491,6 +516,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
     } else {
         /* 既非有效 ACK(0) 亦非原生 ERR：未知异常，安全中和并报错 */
         foe_neutralize_slot_if_ack(slot_buf, adapter->mbx_ctx.buffer_size);
+        if (adapter->foe_reset_fn != NULL) {
+            adapter->foe_reset_fn();
+        }
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
