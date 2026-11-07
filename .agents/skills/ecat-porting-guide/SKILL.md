@@ -90,7 +90,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
    - 调用 `__disable_irq()` 关闭全局中断；
    - 关闭 Bootloader 期间启用的所有硬件外设（SPI、PDI 控制器、定时器、DMA、串口调试口等），将相关 GPIO 恢复为默认输入态；
    - ESC 是否需要保持供电、复位或重新初始化取决于电路连接及期望的 EtherCAT 重启行为；必须按板级设计验证，不能通用规定“绝不触碰复位脚”；
-   - 清除 NVIC 的所有挂起中断标志 (`NVIC->ICPR`) 与使能位 (`NVIC->ISER`)；
+   - 按目标 MCU 实现的 IRQ 数量，使用 NVIC `ICER` 禁用外部中断、使用 `ICPR` 清除挂起状态；`ISER` 是置使能寄存器，不能用来清除使能位；
    - 关闭并清零 SysTick 滴答定时器；
    - 在跳转前按具体 MCU 要求配置向量表基址；需要时还应再次校验镜像或签名；升级请求标志的清除时机按 3.1 节和产品启动设计处理；
    - **不得**在普通 C 函数中调用 `__set_MSP(app_msp)` 后再执行 `app_entry()`。切换 MSP 后，编译器生成的函数调用、栈帧和返回路径可能使用新栈或尝试返回 Bootloader；应由目标专用、不可返回的汇编启动桩原子完成 MSP 设置和分支（例如在寄存器中准备 MSP/Reset_Handler 后执行 `MSR MSP, ...` 与 `BX ...`），并按具体内核设置 CONTROL、栈限制寄存器等状态。
@@ -130,7 +130,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
                drv->write()       [写入数据至本地基地址偏移处]
                    |
                    v
-    [传输结束] -> drv->read()        [从介质物理回读计算 CRC32]
+    [传输结束] -> core 调用 drv->read()，由核心计算回读 CRC32
                    |
                    +---> (CRC32 比对一致) -> drv->finalize() [写入有效标志]
                    |
@@ -157,7 +157,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 ### 5.1 Simple Open EtherCAT Slave (SOES) 接入规范
 - **适配层源码**：`src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h`；
 - **接入架构**：**前后置邮箱嗅探与中和钩子架构**：
-  1. `ecat_foe_soes_pre_process_hook`：在 SOES 协议栈处理前执行，嗅探接收邮箱中的 WRQ，执行只读文件名与元数据预检；
+  1. `ecat_foe_soes_pre_process_hook`：在 SOES 协议栈处理前嗅探接收邮箱中的 WRQ，并对核心状态与驱动无副作用地预检文件名和元数据；钩子会暂存 WRQ，并临时调整 SOES 文件表条目/计数以路由请求，随后由后置流程恢复文件计数；
   2. `ESC_foeprocess()`：SOES 原生进程处理，校验密码与 BOOT 态并排队响应；
   3. `ecat_foe_soes_post_process_hook`：检查输出槽位，若核心机激活失败或检测到槽位异常，就地改写为标准 0x8000 错误码并注入复位函数（`FOE_init`）自愈，规避原生 SOES 无 WRQ 回调的缺陷。
 - **调度要求**：SOES 协议栈及其前后置钩子非多线程安全，**必须在同一执行流或关中断临界区中串行原子执行**，严禁多任务并发调用。

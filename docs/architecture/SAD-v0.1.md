@@ -188,11 +188,9 @@ Bootloader 启动后，必须按以下严格优先级判定执行流向：
      - 关闭全局中断：`__disable_irq()`；
      - 完全停止并关闭所有已使能外设（DMA 通道、定时器、PDI/SPI 控制器）；
      - 停止并清零 SysTick 计数器；
-     - 清除 NVIC 所有挂起中断位 (`NVIC->ICPR`)；
-  3. 执行向量表切换与堆栈重置：
-     - 将主堆栈指针指向 Bootloader 向量表的栈顶：`__set_MSP(*(uint32_t *)BOOTLOADER_ADDR)`；
-     - 重设中断向量偏移寄存器：`SCB->VTOR = BOOTLOADER_ADDR`；
-  4. 获取 Bootloader 复位入口地址并执行直接跳转：`void (*boot_entry)(void) = (void *)((*(uint32_t *)(BOOTLOADER_ADDR + 4))); boot_entry();`；
+     - 按目标 MCU 实现的 IRQ 数量，使用 NVIC `ICER` 禁用外部中断，并使用 `ICPR` 清除挂起状态；`ISER` 是置使能寄存器，不可用于清除使能位；
+  3. 按具体 Cortex-M 器件及启动实现设置 Bootloader 向量表基址，并读取、检查向量表中的初始 MSP 与 Reset_Handler；若应用可重定位向量表，应在任何可能启用中断之前配置；
+  4. 由目标专用、不可返回的汇编跳转桩完成交接：在切换 MSP 前先准备好 MSP 与 Reset_Handler，随后设置 MSP 并直接分支到 Reset_Handler。不得在普通 C 函数中调用 `__set_MSP()` 后继续执行函数调用或函数指针跳转；还需按具体内核处理 CONTROL、栈限制寄存器等状态；
   5. Bootloader 启动，执行硬件重初始化（时钟树重置、GPIO 模式重设、SPI/PDI 控制器全新初始化、ESC 中断事件清零），**禁止触碰 ESC 复位 GPIO**，启动协议栈，由协议栈接管待决 BOOT 请求。
 * **潜在风险**：
   1. 外设残留风险：未完全停止的 DMA、定时器若在跳转后触发非法中断，将引发 HardFault；
