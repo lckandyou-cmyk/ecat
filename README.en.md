@@ -13,7 +13,7 @@ ECAT is a portable C99 library for firmware upgrades on EtherCAT slave devices. 
 - An SOES adapter and [bootloader integration example](examples/bootloader_soes/README.md), host-tested using externally obtained SOES source files and hardware stubs.
 - A [firmware packing tool](tools/efw_pack.py), host tests, a [container format specification](docs/spec/efw-format-v0.1.md), and an [architecture document](docs/architecture/SAD-v0.1.md).
 
-SOES and Beckhoff SSC source code are not included; obtain them separately. SSC currently has only an abstract interface and mock contract tests, with no integration against the real SSC stack.
+SOES and Beckhoff SSC source code are not included; obtain them separately. SSC has an existing synchronous adapter with mock contract tests. A single-packet asynchronous BUSY/retry gate is available as a staged component; it is not yet an asynchronous core or storage-driver integration.
 
 ## Verification status
 
@@ -21,7 +21,7 @@ SOES and Beckhoff SSC source code are not included; obtain them separately. SSC 
 | --- | --- |
 | Upgrade core and firmware container | Host unit tests with a simulated storage driver |
 | SOES adapter and bootloader example | Host tests using real SOES source files and hardware-port stubs |
-| SSC | Abstract interface and mock tests only; real stack not verified |
+| SSC | Existing synchronous adapter has mock tests; asynchronous BUSY/retry gate is a staged component; real stack not verified |
 | MCU, Flash, and EtherCAT master | Physical hardware integration not yet tested |
 
 Host tests do not establish timing, storage reliability, or master compatibility on a particular MCU. See the [SOES integration analysis](docs/architecture/soes-integration-options.md) for the source baseline, file hashes, and limitations. Four key files match an identified upstream SOES commit.
@@ -90,6 +90,7 @@ See the [bootloader porting example](examples/bootloader_soes/README.md) for int
 - Native SOES filename matching has short-prefix and empty-name pitfalls. Review the adapter and configuration as described in the [SOES integration analysis](docs/architecture/soes-integration-options.md). If read support is not needed, leave `FOE_READ_SUPPORTED` undefined rather than defining it as zero.
 - CRC32 detects accidental corruption; it does not authenticate the firmware or protect against malicious modification. Project and hardware IDs are not authentication credentials. Products needing security must implement their own signature verification and trust chain.
 - Power-loss recovery depends on the storage driver, persistent validity marker, and bootloader startup logic. Validate Flash erase/write timing, watchdog behavior, and master timeouts on the target device.
+- The SSC asynchronous BUSY/retry gate currently only provides a single-packet buffer and callback contract. It is not yet connected to the upgrade core or a nonblocking Flash driver and must not be treated as a complete asynchronous upgrade path; see the [stage note](docs/architecture/ssc-async-stage1.md).
 
 ## Repository layout
 

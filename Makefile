@@ -35,7 +35,7 @@ SOES_DIR ?= /tmp/soes_src/soes
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all build clean test test-asan test-soes test-examples test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all build clean test test-asan test-soes test-examples test-ssc-async test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -80,7 +80,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples
+test: test-examples test-ssc-async
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -107,6 +107,13 @@ test: test-examples
 	echo "  [PASS] 普通 test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
 	$(PYTHON) tests/test_verify_quotes.py && \
 	$(PYTHON) tests/test_verify_pdf_quotes.py
+
+test-ssc-async:
+	@TMP_ASYNC_DIR=$$(mktemp -d /tmp/foe_ssc_async_XXXXXX) && \
+	trap 'rm -rf "$$TMP_ASYNC_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_ssc_async_gate" \
+		src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
+	"$$TMP_ASYNC_DIR/test_ssc_async_gate"
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
@@ -204,11 +211,13 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_efw" $(SRC_EFW) $(TEST_EFW_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_ssc_mock" $(SRC_SSC_ADAPTER) $(TEST_SSC_SRC) && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
 	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (ASan/UBSan Mock 环境) ---" && \
 	"$$TMP_ASAN_DIR/test_runner_ssc_mock" && \
+	"$$TMP_ASAN_DIR/test_ssc_async_gate" && \
 	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \
