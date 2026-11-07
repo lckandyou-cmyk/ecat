@@ -57,13 +57,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: ecat-efw-windows-x64
           path: release
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          {
+            echo '## 本次更新'
+            echo
+            if [ -n "$previous" ]; then
+              git log --no-merges --format='- %s' "$previous..HEAD"
+            else
+              git log --no-merges -10 --format='- %s' HEAD
+            fi
+            echo
+            echo '## 使用与验证'
+            echo
+            echo '- 下载 Windows x64 ZIP，解压后在 PowerShell 运行 `./ecat-efw.exe --help`。'
+            echo '- 附带 SHA-256 校验文件；Windows CLI 构建及自动测试通过。'
+            echo '- 这是测试版，程序未签名；真实 MCU 板卡与主站升级尚未验证。'
+          } > release-notes.md
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" release/* --verify-tag --title "$TAG" --generate-notes --prerelease
+        run: gh release create "$TAG" release/* --verify-tag --title "$TAG" --notes-file release-notes.md --prerelease
