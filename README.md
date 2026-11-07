@@ -1,5 +1,7 @@
 # ECAT — EtherCAT FoE 固件升级库
 
+中文 | [English](README.en.md)
+
 ECAT 是一个用于 EtherCAT 从站固件升级的可移植 C99 库，面向 32 位 MCU 上的独立 Bootloader。它提供 FoE 升级核心、固件容器解析和存储驱动接口，方便集成者接入自己的协议栈、硬件和分区配置。
 
 > **项目状态：研发阶段。** 核心逻辑、SOES 适配和 Bootloader 示例已进行宿主测试；尚未在真实板卡和主站上完成联调。请在实际硬件上验证后再考虑生产使用。
