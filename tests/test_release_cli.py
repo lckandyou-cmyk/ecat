@@ -1,5 +1,7 @@
 """Exercise the built CLI using disposable files, including binary edge bytes."""
 import os
+import binascii
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -33,4 +35,24 @@ with tempfile.TemporaryDirectory(prefix="ecat-release-test-") as directory:
     corrupt[-1] ^= 1
     (root / "corrupt.efw").write_bytes(corrupt)
     run("inspect", "corrupt.efw", ok=False)
+    # Reject self-contradictory metadata at pack and inspect, before touching files.
+    base = ("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "MCU", "-v", "1.0.0.0")
+    run(*base, "--hw-ver-min", "9", "--hw-ver-max", "1", "-o", "bad-range.efw", ok=False)
+    run(*base, "--min-allow-version", "2.0.0.0", "-o", "bad-version.efw", ok=False)
+    run("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "99",
+        "-v", "1.0.0.0", "-o", "bad-target.efw", ok=False)
+    run(*base, "-n", "../escape", ok=False)
+    run(*base, "-o", "input.bin", "--overwrite", ok=False)
+    assert (root / "input.bin").read_bytes() == payload
+    run("inspect", "output.efw", "--extract-bin", "output.efw", "--overwrite", ok=False)
+    assert (root / "output.efw").read_bytes() == before
+    invalid = bytearray(before)
+    struct.pack_into("<HH", invalid, 16, 9, 1)
+    struct.pack_into("<I", invalid, 60, binascii.crc32(invalid[:60]) & 0xffffffff)
+    (root / "invalid-range.efw").write_bytes(invalid)
+    run("inspect", "invalid-range.efw", ok=False)
+    if os.name != 'nt':
+        os.link(root / "input.bin", root / "hardlink.bin")
+        run(*base, "-o", "hardlink.bin", "--overwrite", ok=False)
+        assert (root / "input.bin").read_bytes() == payload
 print("Pack, inspect, round trip, corruption and no-overwrite checks passed")

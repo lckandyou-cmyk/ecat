@@ -15,35 +15,42 @@ import argparse
 import struct
 import binascii
 import errno
+import stat
 
 
-def safe_open_for_write(path: str, overwrite: bool = False):
-    """
-    使用 POSIX 原子标志打开文件以供写入：
-    1. O_NOFOLLOW: 在内核级直接拒绝符号链接，杜绝检查与打开之间的 TOCTOU 竞态；
-    2. 未指定 overwrite 时启用 O_EXCL: 若文件已存在直接拒绝，杜绝覆写普通文件；
-    3. 指定 overwrite 时启用 O_TRUNC: 允许截断并覆写已有普通文件，但仍受 O_NOFOLLOW 保护符号链接。
-    """
-    # Windows CRT defaults may translate newlines unless the descriptor is binary.
-    # Fail closed for explicit overwrites when atomic no-follow is unavailable.
+def safe_open_for_write(path: str, overwrite: bool = False, protected_paths=()):
+    """Open a regular output without truncating protected or linked files."""
     if overwrite and not hasattr(os, 'O_NOFOLLOW'):
         raise ValueError('当前平台不支持安全覆盖；请选择不存在的输出路径')
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    flags = (os.O_WRONLY | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
+             | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0))
     if not overwrite:
         flags |= os.O_EXCL
-    else:
-        flags |= os.O_TRUNC
-
     try:
         fd = os.open(path, flags, 0o644)
     except OSError as e:
         if e.errno == errno.EEXIST:
             raise FileExistsError(f"安全拒绝：目标文件已存在且未指定覆盖: {path}") from e
-        if e.errno == errno.ELOOP or (hasattr(errno, 'EMLINK') and e.errno == errno.EMLINK) or os.path.islink(path):
+        if e.errno == errno.ELOOP or (hasattr(errno, 'EMLINK') and e.errno == errno.EMLINK):
             raise ValueError(f"安全拒绝：目标路径为符号链接: {path}") from e
         raise
+    try:
+        output = os.fstat(fd)
+        if not stat.S_ISREG(output.st_mode):
+            raise ValueError('安全拒绝：输出不是普通文件')
+        if overwrite:
+            if output.st_nlink > 1:
+                raise ValueError('安全拒绝：输出有多个硬链接')
+            for protected in protected_paths:
+                source = os.stat(protected)
+                if os.path.samestat(output, source):
+                    raise ValueError('安全拒绝：输出与输入是同一文件')
+            os.ftruncate(fd, 0)
+        return os.fdopen(fd, 'wb')
+    except BaseException:
+        os.close(fd)
+        raise
 
-    return os.fdopen(fd, 'wb')
 
 # 格式规范常量
 EFW_MAGIC = 0x57464345  # 'ECFW' little-endian
@@ -125,11 +132,20 @@ def pack_efw(
     project_name: str = "PROJECT",
     foe_packet_size: int = 0,
     out_path: str = None,
-    overwrite: bool = False
+    overwrite: bool = False,
+    protected_paths=()
 ) -> str:
     """
     打包 .efw 文件
     """
+    if hw_ver_min > hw_ver_max:
+        raise ValueError('最低硬件版本不能大于最高硬件版本')
+    if min_allow_version > fw_version:
+        raise ValueError('最低允许版本不能大于固件版本')
+    if target_id not in TARGET_ID_TO_NAME:
+        raise ValueError('不支持的升级目标 ID')
+    if foe_packet_size < 0:
+        raise ValueError('FoE 单包大小不能为负数')
     header_length = EFW_HEADER_MIN_LEN  # 64
     payload = bytearray(bin_data)
 
@@ -173,11 +189,15 @@ def pack_efw(
     efw_data = header_bytes + payload_bytes
 
     if not out_path:
-        target_name = TARGET_ID_TO_NAME.get(target_id, f"T{target_id}")
+        if not project_name or project_name in ('.', '..') or any(c in project_name for c in ('/', '\\', '\0')):
+            raise ValueError('项目名不能包含路径分隔符或为空')
+        target_name = TARGET_ID_TO_NAME[target_id]
         ver_str = format_version_int(fw_version)
         out_path = f"{project_name}_{target_name}_V{ver_str}.efw"
+        if len(os.fsencode(out_path)) > 31:
+            raise ValueError('生成的 FoE 文件名超过 31 字节；请缩短项目名')
 
-    with safe_open_for_write(out_path, overwrite=overwrite) as f:
+    with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=protected_paths) as f:
         f.write(efw_data)
 
     return out_path
@@ -242,6 +262,13 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
         print(f"错误: flags 标志位非零: 0x{flags:04X}", file=sys.stderr)
         return False
 
+    if hw_ver_min > hw_ver_max or min_allow_version > fw_version:
+        print('错误: 硬件或固件版本范围无效', file=sys.stderr)
+        return False
+    if target_id not in TARGET_ID_TO_NAME:
+        print(f'错误: 不支持的升级目标 ID: {target_id}', file=sys.stderr)
+        return False
+
     # 校验流总长度
     expected_total = header_length + payload_length
     if file_size != expected_total:
@@ -256,7 +283,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
 
     target_name = TARGET_ID_TO_NAME.get(target_id, "未知")
 
-    print(f"=== .efw 容器合法性验证通过 ===")
+    print(f"=== .efw 结构、通用字段及 CRC 校验通过（设备兼容性未验证） ===")
     print(f"  文件路径:          {efw_path}")
     print(f"  文件总大小:        {file_size} 字节")
     print(f"  头部长度:          {header_length} 字节")
@@ -271,7 +298,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
     print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
 
     if extract_bin:
-        with safe_open_for_write(extract_bin, overwrite=overwrite) as f:
+        with safe_open_for_write(extract_bin, overwrite=overwrite, protected_paths=(efw_path,)) as f:
             f.write(payload)
         print(f"  提取有效负载至:    {extract_bin}")
 
@@ -338,7 +365,8 @@ def main():
             project_name=args.project_name,
             foe_packet_size=args.foe_packet_size,
             out_path=args.out,
-            overwrite=args.overwrite
+            overwrite=args.overwrite,
+            protected_paths=(args.bin,)
         )
         print(f"成功打包 .efw 文件: {out_file}")
 
@@ -351,4 +379,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError, struct.error) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        sys.exit(1)
