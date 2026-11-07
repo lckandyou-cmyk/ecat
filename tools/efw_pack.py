@@ -279,6 +279,12 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
 
 
 def main():
+    # Frozen Windows executables can inherit a non-Chinese ANSI code page.
+    # Keep console output usable even when redirection chooses another encoding.
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="EtherCAT .efw 固件容器工具")
     subparsers = parser.add_subparsers(dest="command")
 
