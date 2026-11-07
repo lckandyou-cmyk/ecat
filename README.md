@@ -68,7 +68,7 @@ SOES 版本会影响结果；请按[示例文档中的固定提交和源码哈�
 
 ### Windows 可执行文件
 
-GitHub Actions 在 Windows x64 上构建并测试独立的 `ecat-efw.exe`，无需在目标 Windows 电脑安装 Python。工作流在主分支推送、拉取请求或手动运行时生成构建产物；推送 `v` 开头的 Git 标签后，测试通过才会创建 GitHub Release 并上传 ZIP 和 SHA-256 校验文件。首次可用版本请以实际工作流和 Release 结果为准。
+GitHub Actions 在 Windows x64 上构建并测试独立的 `ecat-efw.exe`，无需在目标 Windows 电脑安装 Python。工作流在主分支推送、拉取请求或手动运行时生成构建产物；推送测试版 Git 标签（例如 `v0.1.0-alpha.1`）后，测试通过才会创建标记为预发布的 GitHub Release 并上传 ZIP 和 SHA-256 校验文件。首次可用版本请以实际工作流和 Release 结果为准。
 
 下载 ZIP、校验并解压后，在 PowerShell 中运行 `.\ecat-efw.exe --help`，其 `pack`、`inspect` 和 `unpack` 参数与上面的命令相同。可执行文件目前未签名。Windows 上为避免在缺少原子防符号链接支持时误覆盖文件，`--overwrite` 不可用；请选择不存在的输出路径。
 
