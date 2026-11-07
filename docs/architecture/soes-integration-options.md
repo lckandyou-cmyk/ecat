@@ -253,7 +253,7 @@ void ESC_ALerror (uint16_t errornumber);
 
 **本地源文件基线与 SHA-256 (防版本漂移与基线锚定)**：
 - 来源路径: 本地散文件目录 `/tmp/soes_src/soes/`
-- 版本元数据: 目录无 `.git` 版本仓库，上游确切 Git Commit ID 未知 (UNKNOWN)。
+- 版本元数据: 原目录无 `.git`；上游提交 `6ef7b9415e936c061ad30626ca00004bdde2ac62` 的以下四个文件哈希与本地基线一致，不能由此推断原始目录的完整来源。
 - 散文件基线 SHA-256：
   - `esc.c`: `1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c`
   - `esc.h`: `9c76c2d4a20b4f827539a4416383354cb45e95a9d086f444a26a0bbb5ff9a579`
@@ -342,7 +342,7 @@ void ESC_ALerror (uint16_t errornumber);
 - **源码路径与版本**：
   - 本地源文件：`/tmp/soes_src/soes/esc_foe.c`
   - 源文件 SHA-256：`cd1709f103e5c4b786fb0be2857760f0e180c9123a553a2efa410accbf17a2b7`
-  - 版本元数据：上游 Git Commit ID 未知 (UNKNOWN)，本地为散文件环境。
+  - 版本元数据：原本地散文件无 Git 元数据；上游提交 `6ef7b9415e936c061ad30626ca00004bdde2ac62` 的四个关键文件哈希匹配，不代表原目录其余内容来源已知。
 - **裸编译核验 (无 BSP 桩)**：
   - 编译命令：`clang -c /tmp/soes_src/soes/esc_foe.c -o /tmp/esc_foe.o`
   - 执行结果：退出码 `rc=1`，报错为缺失平台头文件 `fatal error: 'cc.h' file not found`。证实 SOES 源码依赖外部 BSP 平台定义（如大小端、数据类型对齐宏）。

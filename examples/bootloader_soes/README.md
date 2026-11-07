@@ -151,10 +151,17 @@ SOES 协议栈本身非多线程安全，接入必须遵循单执行流原子互
 ### 7.2 SOES 获取方式与版本哈希基线
 - **获取方式**：用户请直接从官方开源仓库获取 SOES 源码：
   ```bash
-  git clone https://github.com/openEtherCATsociety/SOES.git /path/to/soes
+  git clone https://github.com/OpenEtherCATsociety/SOES.git /path/to/SOES
+  git -C /path/to/SOES checkout --detach 6ef7b9415e936c061ad30626ca00004bdde2ac62
+  soes_test_dir=$(mktemp -d)
+  cp /path/to/SOES/soes/esc.c /path/to/SOES/soes/esc.h \
+  /path/to/SOES/soes/esc_foe.c /path/to/SOES/soes/esc_foe.h "$soes_test_dir/"
+  make test-soes SOES_DIR="$soes_test_dir"
+  make test-bootloader SOES_DIR="$soes_test_dir"
   ```
+- 测试使用四个上游文件及本仓库 `tests/soes_bsp` 的宿主配置和桩。完整 SOES 源码目录含有优先级更高的其他头文件，直接指定该目录会导致构建失败；测试结束后可自行删除临时目录。这不构成完整协议栈或真实硬件验证。
 - **测试源码版本说明与哈希基线**：
-  - 宿主测试套件使用的 SOES 文件提取自本地散文件目录，无上游 git 元数据，无法确定具体的上游 commit 或发行版标签；
+  - 原始测试文件来自无 Git 元数据的本地散文件；上游提交 `6ef7b9415e936c061ad30626ca00004bdde2ac62` 的下列四个文件与原基线 SHA-256 一致。此比对不能证明原始散文件的完整来源或其他文件一致；
   - 严禁将持续滚动的 master 主干假设为固定版本。为确保测试结果的可复现性，测试套件仅针对以下 4 个关键文件的 SHA-256 哈希基线负责：
     - `esc.c`: `1ef43fde2f2cf3306d16e8f8e3e86a1be20a013b0bffd833711749575f60c42c`
     - `esc.h`: `9c76c2d4a20b4f827539a4416383354cb45e95a9d086f444a26a0bbb5ff9a579`

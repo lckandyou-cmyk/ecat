@@ -22,7 +22,7 @@ ECAT 是一个用于 EtherCAT 从站固件升级的可移植 C99 库，面向 32
 | SSC | 仅有抽象接口及模拟测试，真实协议栈未验证 |
 | MCU 板卡、Flash 和 EtherCAT 主站 | 尚未进行真实硬件联调 |
 
-宿主测试不能证明特定 MCU 的时序、存储可靠性或主站兼容性。SOES 测试使用的源码来源、文件哈希和具体限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)；其上游提交版本目前无法确定。
+宿主测试不能证明特定 MCU 的时序、存储可靠性或主站兼容性。SOES 测试使用的源码来源、文件哈希和具体限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)；已找到四个关键文件与测试基线匹配的上游提交。
 
 ## 快速开始
 
@@ -38,14 +38,19 @@ make test CC=clang
 make test-asan CC=clang
 ```
 
-要运行 SOES 宿主集成测试，请自行获取 [SOES](https://github.com/OpenEtherCATsociety/SOES)，并将 `SOES_DIR` 指向其中包含 `esc.c` 等文件的 `soes` 目录：
+要运行 SOES 宿主集成测试，请自行获取 [SOES](https://github.com/OpenEtherCATsociety/SOES)，检出固定版本，并将四个测试文件复制到独立目录：
 
 ```sh
-make test-soes SOES_DIR=/path/to/SOES/soes
-make test-bootloader SOES_DIR=/path/to/SOES/soes
+git clone https://github.com/OpenEtherCATsociety/SOES.git /path/to/SOES
+git -C /path/to/SOES checkout --detach 6ef7b9415e936c061ad30626ca00004bdde2ac62
+soes_test_dir=$(mktemp -d)
+cp /path/to/SOES/soes/esc.c /path/to/SOES/soes/esc.h \
+  /path/to/SOES/soes/esc_foe.c /path/to/SOES/soes/esc_foe.h "$soes_test_dir/"
+make test-soes SOES_DIR="$soes_test_dir"
+make test-bootloader SOES_DIR="$soes_test_dir"
 ```
 
-SOES 版本会影响结果；请先对照[示例文档中的源码哈希](examples/bootloader_soes/README.md)。这些命令运行的是宿主测试，不会替代上板验证。
+SOES 版本会影响结果；请按[示例文档中的固定提交和源码哈希](examples/bootloader_soes/README.md)检出并校验。测试使用这四个上游文件及本仓库的宿主配置和端口桩；完整 SOES 目录的其他头文件会覆盖测试桩，不能直接用于此测试。测试结束后可自行删除临时目录。这不是完整协议栈集成或上板验证。
 
 ## 移植到 MCU
 
