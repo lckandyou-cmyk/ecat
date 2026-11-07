@@ -52,6 +52,20 @@ make test-bootloader SOES_DIR="$soes_test_dir"
 
 SOES 版本会影响结果；请按[示例文档中的固定提交和源码哈希](examples/bootloader_soes/README.md)检出并校验。测试使用这四个上游文件及本仓库的宿主配置和端口桩；完整 SOES 目录的其他头文件会覆盖测试桩，不能直接用于此测试。测试结束后可自行删除临时目录。这不是完整协议栈集成或上板验证。
 
+## 固件打包 CLI
+
+仓库自带 `ecat-efw` 命令行入口，需要 Python 3；在仓库根目录执行：
+
+```sh
+./ecat-efw pack --bin app.bin --project-id 0x10010001 \
+  --project-name MY_PROJECT --hardware-id 0x00000001 \
+  --target MCU --fw-version 1.0.0.0 --out firmware.efw
+./ecat-efw inspect firmware.efw
+./ecat-efw --help
+```
+
+项目 ID、硬件 ID 和目标须与设备配置匹配。工具将已有的 `.bin` 打包为 `.efw`，不编译固件；默认不覆盖已有输出文件。也可使用 `unpack --extract-bin` 提取载荷。
+
 ## 移植到 MCU
 
 1. **准备设备工程**：将库加入独立 Bootloader，接入 EtherCAT 从站协议栈，并为目标 MCU 配置编译与链接。
