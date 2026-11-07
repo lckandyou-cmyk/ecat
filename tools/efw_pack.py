@@ -24,7 +24,11 @@ def safe_open_for_write(path: str, overwrite: bool = False):
     2. 未指定 overwrite 时启用 O_EXCL: 若文件已存在直接拒绝，杜绝覆写普通文件；
     3. 指定 overwrite 时启用 O_TRUNC: 允许截断并覆写已有普通文件，但仍受 O_NOFOLLOW 保护符号链接。
     """
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
+    # Windows CRT defaults may translate newlines unless the descriptor is binary.
+    # Fail closed for explicit overwrites when atomic no-follow is unavailable.
+    if overwrite and not hasattr(os, 'O_NOFOLLOW'):
+        raise ValueError('当前平台不支持安全覆盖；请选择不存在的输出路径')
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
     if not overwrite:
         flags |= os.O_EXCL
     else:
