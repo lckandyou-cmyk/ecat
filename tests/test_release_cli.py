@@ -22,6 +22,9 @@ with tempfile.TemporaryDirectory(prefix="ecat-release-test-") as directory:
                  "--out", "output.efw")
     run(*pack_args)
     before = (root / "output.efw").read_bytes()
+    run("pack", "-i", "input.bin", "-p", "0x10010001", "-d", "1",
+        "-t", "MCU", "-v", "1.0.0.0", "-o", "short.efw")
+    assert (root / "short.efw").read_bytes() == before
     run(*pack_args, ok=False)
     assert (root / "output.efw").read_bytes() == before
     run("inspect", "output.efw", "--extract-bin", "unpacked.bin")

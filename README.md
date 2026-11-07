@@ -57,14 +57,12 @@ SOES 版本会影响结果；请按[示例文档中的固定提交和源码哈�
 仓库自带 `ecat-efw` 命令行入口，需要 Python 3；在仓库根目录执行：
 
 ```sh
-./ecat-efw pack --bin app.bin --project-id 0x10010001 \
-  --project-name MY_PROJECT --hardware-id 0x00000001 \
-  --target MCU --fw-version 1.0.0.0 --out firmware.efw
+./ecat-efw pack -i app.bin -p 0x10010001 -d 1 -t MCU -v 1.0.0.0 -o firmware.efw
 ./ecat-efw inspect firmware.efw
 ./ecat-efw --help
 ```
 
-项目 ID、硬件 ID 和目标须与设备配置匹配。工具将已有的 `.bin` 打包为 `.efw`，不编译固件；默认不覆盖已有输出文件。也可使用 `unpack --extract-bin` 提取载荷。
+`-i` 是输入文件，`-p` 是项目 ID，`-d` 是硬件 ID，`-t` 是目标，`-v` 是固件版本，`-o` 是输出文件。也可使用 `--bin`、`--project-id`、`--hardware-id`、`--target`、`--fw-version`、`--out` 等长参数。项目 ID、硬件 ID 和目标须与设备配置匹配。工具将已有的 `.bin` 打包为 `.efw`，不编译固件；默认不覆盖已有输出文件。也可使用 `unpack --extract-bin` 提取载荷。
 
 ### Windows 可执行文件
 
