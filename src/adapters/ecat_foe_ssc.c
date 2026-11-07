@@ -18,8 +18,24 @@ void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, u
         return;
     }
     adapter->core = core;
+    adapter->async_gate = NULL;
     adapter->max_packet_size = max_packet_size;
     adapter->session_active = false;
+    adapter->async_final_acked = false;
+}
+
+void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
+                             ecat_foe_core_t *core,
+                             ecat_foe_ssc_async_t *async_gate)
+{
+    if (adapter == NULL) {
+        return;
+    }
+    adapter->core = core;
+    adapter->async_gate = async_gate;
+    adapter->max_packet_size = 0U;
+    adapter->session_active = false;
+    adapter->async_final_acked = false;
 }
 
 uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pName, uint16_t nameSize, uint32_t password)
@@ -28,7 +44,12 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
     if (adapter == NULL || adapter->core == NULL || pName == NULL) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
+    adapter->async_final_acked = false;
 
+    if (adapter->async_gate != NULL &&
+        (adapter->async_gate->pending || adapter->async_gate->completed)) {
+        ecat_foe_ssc_async_abort(adapter->async_gate);
+    }
     /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
     int rc = ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
     if (rc != 0) {
@@ -104,6 +125,55 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
     return 0U;
 }
 
+uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
+                                        const uint8_t *pData,
+                                        uint16_t length,
+                                        bool data_following,
+                                        uint32_t now_ticks)
+{
+    if (adapter == NULL || adapter->core == NULL || adapter->async_gate == NULL) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+    if (!adapter->session_active) {
+        if (adapter->async_final_acked && length == 0U && !data_following) {
+            return 0U;
+        }
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+
+    uint16_t result = ecat_foe_ssc_async_on_data(adapter->async_gate,
+                                                 pData,
+                                                 (size_t)length,
+                                                 data_following,
+                                                 now_ticks);
+    if (adapter->async_gate->pending) {
+        return result;
+    }
+    if (result != 0U) {
+        adapter->session_active = false;
+        adapter->async_final_acked = false;
+        ecat_foe_ssc_async_abort(adapter->async_gate);
+        if (adapter->core != NULL) {
+            ecat_foe_core_on_abort(adapter->core);
+        }
+        return result;
+    }
+    if (!data_following) {
+        adapter->session_active = false;
+        adapter->async_final_acked = true;
+    }
+    return 0U;
+}
+
+uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
+                                   uint32_t now_ticks)
+{
+    if (adapter == NULL || adapter->async_gate == NULL) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+    return ecat_foe_ssc_async_poll(adapter->async_gate, now_ticks);
+}
+
 uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 {
     if (adapter == NULL || adapter->core == NULL) {
@@ -132,10 +202,15 @@ void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
     }
 
     /* 若固件升级已顺利成功落盘 (SUCCESS)，保留终态标记，不予重置为 IDLE */
-    if (!adapter->session_active && adapter->core->state == ECAT_FOE_STATE_SUCCESS) {
+    if (!adapter->session_active &&
+        (adapter->core->state == ECAT_FOE_STATE_SUCCESS || adapter->async_final_acked)) {
         return;
     }
 
+    if (adapter->async_gate != NULL) {
+        ecat_foe_ssc_async_abort(adapter->async_gate);
+    }
     ecat_foe_core_on_abort(adapter->core);
     adapter->session_active = false;
+    adapter->async_final_acked = false;
 }

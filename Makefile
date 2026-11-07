@@ -26,7 +26,7 @@ EXAMPLES_BOOTLOADER_ALL_SRC = \
 	examples/bootloader_soes/test_bootloader_integration.c
 
 # 阶段 E: Beckhoff SSC 适配层抽象契约与 Mock 测试源码 (契约测试桩，非真实 SSC 验证)
-SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c
+SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c
 TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 
 BUILD_DIR ?= build
@@ -113,7 +113,10 @@ test-ssc-async:
 	trap 'rm -rf "$$TMP_ASYNC_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_ssc_async_gate" \
 		src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
-	"$$TMP_ASYNC_DIR/test_ssc_async_gate"
+	"$$TMP_ASYNC_DIR/test_ssc_async_gate" && \
+	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_ssc_async_adapter" \
+		$(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
+	"$$TMP_ASYNC_DIR/test_ssc_async_adapter"
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
@@ -212,12 +215,14 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_core" $(SRC_CORE) $(TEST_CORE_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_runner_ssc_mock" $(SRC_SSC_ADAPTER) $(TEST_SSC_SRC) && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_adapter" $(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
 	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (ASan/UBSan Mock 环境) ---" && \
 	"$$TMP_ASAN_DIR/test_runner_ssc_mock" && \
 	"$$TMP_ASAN_DIR/test_ssc_async_gate" && \
+	"$$TMP_ASAN_DIR/test_ssc_async_adapter" && \
 	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \

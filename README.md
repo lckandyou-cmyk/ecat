@@ -21,7 +21,7 @@ ECAT 是一个用于 EtherCAT 从站固件升级的可移植 C99 库，面向 32
 | --- | --- |
 | 升级核心和固件容器 | 已进行宿主单元测试，存储使用模拟驱动 |
 | SOES 适配和 Bootloader 示例 | 已使用真实 SOES 源码及硬件端口桩进行宿主测试 |
-| SSC | 现有同步适配有抽象契约测试；异步 BUSY/重试门控为阶段性组件，真实协议栈和异步核心尚未验证 |
+| SSC | 新增 `bDataFollowing` 回调包装和 BUSY/重试门控，宿主契约测试通过；真实协议栈与异步核心尚未验证 |
 | MCU 板卡、Flash 和 EtherCAT 主站 | 尚未进行真实硬件联调 |
 
 宿主测试不能证明特定 MCU 的时序、存储可靠性或主站兼容性。SOES 测试使用的源码来源、文件哈希和具体限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)；已找到四个关键文件与测试基线匹配的上游提交。
@@ -88,7 +88,7 @@ GitHub Actions 在 Windows x64 上构建并测试独立的 `ecat-efw.exe`，无�
 - SOES 原生文件名匹配存在短前缀和空文件名问题；集成时应检查适配方案和配置，详见 [SOES 接入分析](docs/architecture/soes-integration-options.md)。无需读取功能时，`FOE_READ_SUPPORTED` 必须保持未定义，而非定义为 0。
 - CRC32 只能检测偶发损坏，不能验证固件来源或防止恶意篡改。项目标识和硬件标识也不是身份认证；有安全需求的产品需自行设计签名校验和信任链。
 - 断电后能否安全恢复取决于存储驱动、有效标记及 Bootloader 启动逻辑；Flash 擦写耗时、看门狗和主站超时需要在目标设备上验证。
-- SSC 异步 BUSY/重试门控目前只是单包静态缓冲和回调契约组件，尚未接入核心升级状态机及非阻塞 Flash 驱动，不可视为可用的完整异步升级路径；范围见[阶段说明](docs/architecture/ssc-async-stage1.md)。
+- SSC 异步回调目前已接入 `bDataFollowing` 和 BUSY/重试门控，但 DATA 后端仍由应用回调提供，尚未接入核心升级状态机及非阻塞 Flash 驱动，不可视为完整异步升级路径；范围见[阶段说明](docs/architecture/ssc-async-stage1.md)。
 
 ## 目录
 

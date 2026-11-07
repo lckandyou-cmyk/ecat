@@ -1,18 +1,22 @@
 # SSC FoE asynchronous adapter: stage 1
 
-This stage adds a single-flight packet gate for an SSC FoE DATA callback. It
-copies one packet into caller-owned fixed storage, starts an application-owned
-operation once, returns the configured BUSY code while that operation is
-pending, and only returns success/error when SSC retries the same packet.
+This stage adds a single-flight packet gate and an SSC callback wrapper. The
+wrapper accepts `bDataFollowing` explicitly and exposes a main-loop poll call.
+The gate copies one packet into caller-owned fixed storage, starts an
+application-owned operation once, returns the configured BUSY code while that
+operation is pending, and only returns success/error when SSC retries the same
+packet.
 
 ## Current boundary
 
-`ecat_foe_ssc_async` is a protocol adapter primitive, not an asynchronous
-firmware-upgrade implementation. It does not call `ecat_foe_core`, does not
-provide asynchronous Flash operations, and must not yet be used as a complete
-production upgrade path. The core and its target driver remain synchronous.
-The next implementation step is an incremental core/driver API that can be
-connected to this gate without blocking the SSC main loop.
+`ecat_foe_ssc_async` and `ecat_foe_ssc_on_data_following()` provide the packet
+retry boundary, not an asynchronous firmware-upgrade implementation. The
+wrapper still uses the synchronous core for WRQ validation, while DATA work is
+delegated to application-provided callbacks; it does not yet call
+`ecat_foe_core_on_data()` asynchronously or provide asynchronous Flash
+operations. Do not use this as a complete production upgrade path. The next
+implementation step is an incremental core/driver API connected to this
+wrapper without blocking the SSC main loop.
 
 ## Callback contract
 
@@ -49,3 +53,8 @@ unexpected packet rejection, `data_following`, zero-length termination,
 timeout, and single-call abort behavior with a host mock. It does not verify the
 SSC binary, the async core (not implemented in this stage), a real Flash driver,
 a board, or a master.
+
+`tests/test_ssc_async_adapter.c` verifies the public SSC adapter wrapper routes
+`bDataFollowing`, returns BUSY while pending, advances from the application
+main loop, and acknowledges only after the matching retry. It also uses mocks
+and is not a real SSC or hardware test.

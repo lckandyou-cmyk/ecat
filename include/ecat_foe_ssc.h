@@ -13,6 +13,7 @@
 #define ECAT_FOE_SSC_H
 
 #include "ecat_foe_core.h"
+#include "ecat_foe_ssc_async.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -41,8 +42,10 @@ extern "C" {
  */
 typedef struct {
     ecat_foe_core_t *core;                /**< 关联的核心机上下文 */
+    ecat_foe_ssc_async_t *async_gate;      /**< 可选：异步 DATA/BUSY 门控 */
     uint32_t         max_packet_size;     /**< SSC 邮箱配置的单包最大容量 (若已知) */
     bool             session_active;      /**< 当前会话是否处于激活状态 */
+    bool             async_final_acked;   /**< 异步末包已完成并向 SSC 确认 */
 } ecat_foe_ssc_adapter_t;
 
 /**
@@ -52,6 +55,11 @@ typedef struct {
  * @param max_packet_size SSC 邮箱单包大小 (通常为邮箱数据载荷容量)
  */
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size);
+
+/** Bind an initialized asynchronous DATA gate while keeping WRQ validation in the core. */
+void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
+                             ecat_foe_core_t *core,
+                             ecat_foe_ssc_async_t *async_gate);
 
 /**
  * @brief SSC FOE_Write 回调适配转接函数
@@ -73,6 +81,21 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
  * @return 0 成功；非 0 返回 FoE 协议错误码 (如 0x800B)
  */
 uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pData, uint16_t length);
+
+/**
+ * SSC callback variant for `pAPPL_FoeWriteData(pData, Size, bDataFollowing)`.
+ * The application supplies monotonic 32-bit ticks; BUSY/retry codes come from
+ * the initialized async gate. This is serialized with async_poll by contract.
+ */
+uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
+                                        const uint8_t *pData,
+                                        uint16_t length,
+                                        bool data_following,
+                                        uint32_t now_ticks);
+
+/** Advance one asynchronous operation step from the SSC application main loop. */
+uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
+                                   uint32_t now_ticks);
 
 /**
  * @brief SSC 显式结束通知适配转接函数 (若具体 SSC 配置启用显式通知)

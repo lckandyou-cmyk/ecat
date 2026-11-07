@@ -21,7 +21,7 @@ SOES and Beckhoff SSC source code are not included; obtain them separately. SSC 
 | --- | --- |
 | Upgrade core and firmware container | Host unit tests with a simulated storage driver |
 | SOES adapter and bootloader example | Host tests using real SOES source files and hardware-port stubs |
-| SSC | Existing synchronous adapter has mock tests; asynchronous BUSY/retry gate is a staged component; real stack not verified |
+| SSC | `bDataFollowing` callback wrapper and BUSY/retry gate pass host contract tests; real stack and async core are not verified |
 | MCU, Flash, and EtherCAT master | Physical hardware integration not yet tested |
 
 Host tests do not establish timing, storage reliability, or master compatibility on a particular MCU. See the [SOES integration analysis](docs/architecture/soes-integration-options.md) for the source baseline, file hashes, and limitations. Four key files match an identified upstream SOES commit.
@@ -90,7 +90,7 @@ See the [bootloader porting example](examples/bootloader_soes/README.md) for int
 - Native SOES filename matching has short-prefix and empty-name pitfalls. Review the adapter and configuration as described in the [SOES integration analysis](docs/architecture/soes-integration-options.md). If read support is not needed, leave `FOE_READ_SUPPORTED` undefined rather than defining it as zero.
 - CRC32 detects accidental corruption; it does not authenticate the firmware or protect against malicious modification. Project and hardware IDs are not authentication credentials. Products needing security must implement their own signature verification and trust chain.
 - Power-loss recovery depends on the storage driver, persistent validity marker, and bootloader startup logic. Validate Flash erase/write timing, watchdog behavior, and master timeouts on the target device.
-- The SSC asynchronous BUSY/retry gate currently only provides a single-packet buffer and callback contract. It is not yet connected to the upgrade core or a nonblocking Flash driver and must not be treated as a complete asynchronous upgrade path; see the [stage note](docs/architecture/ssc-async-stage1.md).
+- The SSC asynchronous callback now routes `bDataFollowing` through the BUSY/retry gate, but DATA processing still comes from application callbacks. It is not yet connected to the upgrade core or a nonblocking Flash driver and is not a complete asynchronous upgrade path; see the [stage note](docs/architecture/ssc-async-stage1.md).
 
 ## Repository layout
 
