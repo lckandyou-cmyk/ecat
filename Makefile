@@ -80,7 +80,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async
+test: test-examples test-ssc-async test-target-async
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -117,6 +117,13 @@ test-ssc-async:
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_ssc_async_adapter" \
 		$(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	"$$TMP_ASYNC_DIR/test_ssc_async_adapter"
+
+test-target-async:
+	@TMP_ASYNC_DIR=$$(mktemp -d /tmp/foe_target_async_XXXXXX) && \
+	trap 'rm -rf "$$TMP_ASYNC_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_target_async" \
+		src/ecat_foe_target_async.c tests/test_target_async.c && \
+	"$$TMP_ASYNC_DIR/test_target_async"
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
