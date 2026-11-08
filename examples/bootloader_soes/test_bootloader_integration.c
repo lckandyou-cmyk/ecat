@@ -690,6 +690,45 @@ int main(void)
         assert(ecat_foe_core_upgrade_incomplete(&app.core));
     }
 
+    /* BOOT exit stops mailboxes; model the subsequent mailbox restart and
+     * verify the first WRQ against the actual SOES FoE state machine. */
+    for (unsigned active = 0; active <= 1U; active++) {
+        for (unsigned has_reset = 0; has_reset <= 1U; has_reset++) {
+            reset_test_env();
+            s_foe_cfg.buffer_size = 64U;
+            assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                s_sim_flash, sizeof(s_sim_flash), has_reset ? FOE_init : NULL, NULL) == 0);
+            assert(bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+                BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+                BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+                0x01000000U, s_test_payload, sizeof(s_test_payload)) > 232U);
+            master_foe_response_t resp;
+            assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+            if (active) {
+                assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U, s_test_efw_buf, 116U, &resp) == 0);
+                assert(bootloader_master_send_data(&app, &s_foe_cfg, 2U, s_test_efw_buf + 116U, 116U, &resp) == 0);
+                assert(app.core.session_active && ecat_foe_core_upgrade_incomplete(&app.core));
+            }
+            /* Model the stopped mailbox without executing hardware SM polling. */
+            ESCvar.MBXrun = 0;
+            memset(MBXcontrol, 0, sizeof(MBXcontrol));
+            uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
+            ecat_foe_soes_post_state_hook(&app.adapter, &as, &an);
+            assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+            assert(ecat_foe_core_upgrade_incomplete(&app.core) == (active != 0U));
+            assert(an == (active ? ECAT_AL_STATUS_BOOT_ERROR : ECAT_STATE_INIT));
+            /* This only simulates mailbox availability, not the AL recovery sequence. */
+            ESCvar.MBXrun = 1;
+            assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+            if (!has_reset) {
+                assert(resp.opcode == BOOTLOADER_FOE_OP_ERR && resp.error_code == 0x8004U);
+                assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+            }
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0U);
+        }
+    }
+    printf("  [PASS] BOOT 中止后 SOES 复位与无复位回调恢复验证通过\n");
+
     /* SOES counts the full EFW file; Flash capacity applies to payload only. */
     for (unsigned oversized = 0; oversized <= 1U; oversized++) {
         static uint8_t capacity_payload[APP_FLASH_MAX_SIZE + 1U];

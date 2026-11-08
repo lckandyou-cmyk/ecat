@@ -122,8 +122,8 @@ void ecat_foe_soes_set_al_error_fn(ecat_foe_soes_adapter_t *adapter, ecat_foe_al
 /**
  * @brief 设置协议栈状态机复位回调函数 (真实 SOES 中传入 FOE_init，单测传入桩函数)
  *
- * 当后置钩子因核心激活失败、多槽竞态或指针不匹配将已排队的 ACK(0) 就地改写为 FOE_OP_ERR (0x8000) 时：
- * - 若已注册此回调，适配层在改写槽位后调用该函数，主动将 SOES 从 FOE_WAIT_FOR_DATA 态复位为 FOE_READY；
+ * 当邮箱后置钩子中和异常 ACK，或 BOOT→INIT 状态钩子中止活跃会话时：
+ * - 若已注册此回调，适配层调用该函数，将 SOES 从 FOE_WAIT_FOR_DATA 态复位为 FOE_READY；
  * - 若未注册 (NULL，默认值)，SOES 将保持在原生 FOE_WAIT_FOR_DATA 态，其后续安全自愈边界如下：
  *   1. 主站下发后续 DATA 时：write_cb 拒绝，SOES 触发 0x800B Abort 并自动复位回 FOE_READY；
  *   2. 主站直接重发 WRQ 时：SOES 原生校验状态非 READY 返回 0x8004 (FOE_ERR_ILLEGAL) Abort 并自动复位回 FOE_READY；
