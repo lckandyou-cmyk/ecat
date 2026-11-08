@@ -249,6 +249,15 @@ def test_foe_packet_size_padding():
             data_sii = f.read()
         assert len(data_sii) == 148 + 366, f"SII 填充后总长应为 514，实际 {len(data_sii)}"
         assert data_sii[-2:] == b'\xFF\xFF', "SII 末尾必须补 2 字节 0xFF"
+        for target, size in [('MCU', 1), ('SII', 2)]:
+            output = os.path.join(tmpdir, f'invalid-{target}.efw')
+            cmd = [sys.executable, PACK_TOOL, 'pack', '--bin', bin_364,
+                   '--project-id', '0x10010001', '--hardware-id', '1',
+                   '--target', target, '--fw-version', '1.0.0.0',
+                   '--foe-packet-size', str(size), '--out', output]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            assert result.returncode != 0 and not os.path.exists(output)
+            assert '无法通过允许的填充' in result.stderr
     print("  [PASS] --foe-packet-size 512 规避填充 (MCU 补 1B / SII 偶数补 2B)")
 
 

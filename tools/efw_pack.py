@@ -275,6 +275,8 @@ def pack_efw(
         if total_len % foe_packet_size == 0:
             # 恰好为整数倍，执行规避填充
             pad_len = 2 if target_id == 0x0003 else 1
+            if pad_len % foe_packet_size == 0:
+                raise ValueError('该 FoE 包大小无法通过允许的填充避开整包长度')
             payload.extend(b'\xFF' * pad_len)
 
     payload_bytes = bytes(payload)
