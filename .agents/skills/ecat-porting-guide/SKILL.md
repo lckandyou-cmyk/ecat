@@ -118,7 +118,10 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 用户对接同步目标存储驱动时，应以当前 `ecat_foe_target_driver_t` 接口为准实现所需回调（参考 `examples/bootloader_soes/bootloader_flash_driver.c`），并遵守以下生命周期契约。启用防回滚时还必须实现联合提交回调；不要把示例驱动当成已经验证的真实板级实现。
 
 ```text
-  [WRQ 通过] -> drv->init()
+  [WRQ 通过] -> 接收并校验完整固件头（包括启用时的防回滚检查）
+                   |
+                   v
+               drv->init()
                    | (成功)
                    v
                drv->invalidate()  [清除原有有效标记]

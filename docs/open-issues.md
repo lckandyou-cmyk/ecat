@@ -109,7 +109,7 @@
    - 状态：v1 架构确定不引入，保留在本文档作为后续针对特定非阻塞硬件（如支持 WIP 轮询的外部 SPI Flash）的可选增强方案评审。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 5.1 节第 14 条。
 
-3. **BOOT→INIT 拦截后主站二次请求处理策略【待决策，不实现】**：
+3. **BOOT→INIT 拦截后的二次请求【当前策略已实现，真机待验证】**：
    - 现状事实：当固件升级中途断开、校验失败或未完成闭环时（`ecat_foe_core_upgrade_incomplete()` 为真），适配层后置钩子会拦截主站发起的 `BOOT -> INIT` 状态迁移。
      - **复合迁移码与状态值语义区分**：
        - `*as` 匹配复合迁移码 `ECAT_TRANSITION_BOOT_TO_INIT`（`(ESCinit << 4) | ESCboot = 0x13U`，由 SOES 第 1128 行合成，高 4 位为目标状态 `0x1`，低 4 位为当前状态 `0x3`）；
@@ -166,35 +166,17 @@
      3. SOES 行为：SOES 在第 1115 行因 `ac == ESCinit` 成立，执行 `an &= ESCREG_AL_ERRACKMASK` 清除错误位；在第 1123 行跳过检查；因从站当前实际状态仍为 `ESCboot`，再次判断为 `BOOT_TO_INIT` 迁移；再次执行 `ESC_stopmbx()` 并设 `an = ESCinit`。
      4. 钩子是否再拦：执行到第 1305 行 `post_state_change_hook` 时，由于核心机未完成状态由单一真值源 `target_incomplete_mask` 保持，`ecat_foe_core_upgrade_incomplete()` 仍为真，且状态迁移仍为从 BOOT 到 INIT，钩子拦截条件再次满足，再次改写为 `*an = ESCboot | ESCerror` 并设置 `ALERR_NOVALIDFIRMWARE`（`0x0014`）。从站将持续被拦截在 BOOT+Error 态，不会误进入 INIT。
      5. 真实协议栈与主站行为边界说明：上述时序完全属于对 SOES 单一文件源码的静态逻辑推演（【推断，未验证】），尚未在集成真实 SOES 协议栈和物理主站环境下验证过。现场主站（如 TwinCAT）在面对 `0x0014` 错误后的重试逻辑、超时处理以及状态机恢复步骤可能因实现而异，真实硬件行为需以现场动态测试为准。
-   - 待决策问题：在主站确认错误（Error Acknowledge）后，若主站未重新发起 FoE 固件写入，而是再次发送 `BOOT -> INIT` 状态切换命令，从站协议栈是否应继续拦截。
-   - 候选方案（保留供后续决策，本版本不替用户做选择）：
-     - 候选 1：持续拦截。只要固件未成功闭环，后续每次 `BOOT -> INIT` 均拒绝并保持在 BOOT 错误态。优点是避免残缺固件引导；制约是主站若仅需执行只读诊断或网络拓扑复位时可能受阻。
-     - 候选 2：仅单次拦截。首次拦截报警后，若主站明确复位错误并二次强制请求迁移，则允许进入 INIT。依赖 Bootloader 本地自检逻辑拦截并阻止运行残缺固件。
-     - 候选 3：提供应用层策略决策回调。由上层应用结合是否存在 Golden 双备份镜像等硬件实际情况，动态决定是否放行。
-   - 状态：【待决策，不实现】。
+   - 当前策略：只要未完成状态仍存在，后置钩子对每次匹配的 `BOOT -> INIT` 迁移持续拦截；这不是可选策略回调。主站错误确认本身不会清除核心的未完成状态。
+   - 待验证：真实设备和 TwinCAT 的重复请求、错误确认与恢复流程；单次拦截或应用层策略回调仅为未来可评估的替代方案。
 
-4. **FoE 文件名架构待决策【待决策，不实现】**：
+4. **SOES FoE 文件名路由【已实现，真机待验证】**：
    - 现状事实：
      1. SOES 源码事实：SOES 协议栈源码 `esc_foe.c` 第 70 到 73 行（已登记为三方引文 Q1）原生采用 `strncmp(foe_cfg->name, filename, strlen(foe_cfg->name))` 进行静态配置前缀比对，仅支持单个静态配置名。
      2. 缺少 WRQ 钩子：SOES 原生未向外部暴露 WRQ 文件名解析或动态拦截回调。
      3. 宿主机 C3 复现事实：测试 `test_reproduce_soes_data_callback_without_wrq_stream_rejection` 证实，若未经历 WRQ 文件名解析与会话建立，直接由 SOES 驱动 `write_cb` 灌入首块数据，核心机因未建立有效目标与版本上下文直接拒绝数据流（返回 -1，错误码 `ECAT_FOE_CORE_ERR_INVALID_STATE`，适配层返回非零触发 FoE abort）。
-   - 候选方案（不替用户做选择，仅做技术分析）：
-     - 候选 A：目标独立固定文件名方案。
-       - 机制：每个目标分配单一固定文件名（如 MCU 固定为 `firmware.efw`，SII 固定为 `eeprom.efw`），版本号与硬件兼容性完全下沉至 `.efw` 容器内部头结构解析与校验。
-       - 依赖与改动范围：无需修改 SOES 源码；需在适配层按目标维护配置。
-       - 需要验证的点：是否满足现场运维对文件名直观可见版本的要求。
-     - 候选 B：SOES 协议栈新增 WRQ 回调补丁方案。
-       - 机制：向 SOES `esc_foe.c` 提交补丁，在 WRQ 阶段增加应用层回调钩子（如 `on_wrq`），动态调用核心机逆向切分解析文件名。
-       - 依赖与改动范围：需维护三方开源库源码补丁分支。
-       - 需要验证的点：长期跟随上游更新的维护成本与工程合规性。
-     - 候选 C：邮箱层 / PDI 派发前置拦截方案。
-       - 机制：在硬件邮箱读取或协议栈主循环分发之前，前置嗅探 FoE WRQ 邮箱帧，提取文件名触发核心机建立会话后再交由 SOES 处理后续数据。
-       - 依赖与改动范围：改动集中在硬件适配/邮箱分发层，不修改 SOES 内部实现。
-       - 需要验证的点：增加邮箱包前置解析耗时与时序同步复杂度。
-   - 参考依据：
-     - Beckhoff TwinCAT 体系中，`FB_EcFoeWriteFile` 功能块的 `sFoEPathName` 参数专门表示从站侧文件名，独立于 PC 侧本地文件名。
-     - 官方参考链接：https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/16248044683.html
-   - 状态：【待决策，不实现】。
+   - 当前实现：前置邮箱钩子只读预检文件名和目标，暂存合法请求并配置文件表；原生 SOES 继续检查密码和 BOOT 状态。后置钩子仅在 SOES 产生 ACK(0) 后激活核心会话；核心激活失败时改写待发送响应并复位 SOES 状态。原生拒绝时不激活核心会话。
+   - 验证状态：已通过真实 SOES 源码的宿主测试；实际设备、协议栈配置和 TwinCAT 交互仍需联调。具体限制与测试范围见 [SOES 接入分析](architecture/soes-integration-options.md)。
+   - TwinCAT 的 `sFoEPathName` 表示从站侧文件名，独立于 PC 本地路径：[Beckhoff 文档](https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/16248044683.html)。
 
 5. **升级未闭环状态在 deinit/reinit 与断电重启后的已知局限【已知局限】**：
    - 机制实现：核心机内部通过位掩码（`target_incomplete_mask`）按目标记录固件未完成状态，保证在单次 core 内存生命周期内，只有相同目标成功 finalize 才能解除其未完成状态，防止多目标交叉升级时误放行残缺固件。

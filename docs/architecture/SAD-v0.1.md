@@ -229,11 +229,13 @@ sequenceDiagram
 
     Note over Master,Drv: 阶段二：WRQ 握手与流式头装配 (擦除前必须全过)
     Master->>Stack: FoE WRQ (下发文件名: PROJ_TARGET_VER.efw)
+    Note over Stack,BL: SOES: 前置钩子只读预检并暂存；SOES 校验密码和 BOOT 状态
+    Note over Stack,BL: SOES 排队 ACK(0) 后，后置钩子才激活核心会话
     Stack->>BL: on_wrq(filename)
     BL->>BL: 每次 on_wrq 入口自愈检查: 若上次会话未闭环，先调 drv->abort() 再重置会话
     BL->>BL: 逆向切分解析文件名: 校验 Project/Target/Version，检查使能
     alt 文件名不合法或目标未开启
-        BL-->>Stack: 返回非零 (透传错误码 0x8001/0x8002)
+        BL-->>Stack: 返回非零 (响应取决于适配层和协议栈)
         Stack-->>Master: FoE ERR (拒绝传输)
     else 文件名校验通过
         BL-->>Stack: 返回成功 (0)
@@ -388,8 +390,8 @@ sequenceDiagram
 > **SOES 协议栈限制依据【已核实】**：
 > 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
 >
-> **SOES WRQ 阶段拒绝不可见限制【宿主 harness 观察】**：
-> 查阅 SOES 源码 `esc_foe.c` 并经宿主测试 harness 验证，SOES 在 `FOE_write()` 收到 WRQ 报文时，仅比对 `foe_cfg` 文件名列表，匹配成功即直接回复 ACK(0)，期间不调用任何用户回调或 `on_wrq`。因此若文件名校验在核心机应用层判定不通过，由于 ACK(0) 已提前发出，WRQ 阶段的拒绝在原生 SOES 下发不出去，只会在首块数据到达触发 `write_function` 时返回非零，由 SOES 发送 `0x800B (FOE_ERR_PROGERROR)` 中止。
+> **原生 SOES WRQ 限制及本项目处理【宿主 harness 已验证，真机待验证】**：
+> 原生 SOES 的 `FOE_write()` 没有应用层 WRQ 回调：仅使用原生文件回调时，应用层拒绝可能延迟到数据阶段。本项目通过前置邮箱钩子只读预检并暂存 WRQ，再由 SOES 检查密码和 BOOT 状态；后置钩子在 ACK(0) 排队后激活核心会话，必要时改写待发送响应。该方案已在真实 SOES 源码的宿主测试中验证，真实设备和主站仍需联调；具体行为见 [SOES 接入分析](soes-integration-options.md)。
 >
 > **0 长度包分支返回值忽略限制与拦截策略【已确定】**：
 > 查阅 SOES 源码 `esc_foe.c` 0 长度包分支，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），从站无法通过 FoE 回调向主站回复 `0x800B`。v1 架构确定接受此限制，依靠 `invalidate()` 保证不引导破损固件，并通过打包端末尾填充避开空包，以及在适配层通过 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`（详见第 1.2 节）。
