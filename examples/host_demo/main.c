@@ -357,10 +357,10 @@ static size_t build_efw_buffer(
     const uint8_t *payload,
     uint32_t payload_len)
 {
-    memset(out_buf, 0, 64);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
     out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57; /* "ECFW" */
-    out_buf[4] = 0x01; out_buf[5] = 0x00; /* format_version = 1 */
-    out_buf[6] = 0x40; out_buf[7] = 0x00; /* header_length = 64 */
+    out_buf[4] = 0x02; out_buf[5] = 0x00; /* format_version = 2 */
+    out_buf[6] = 0x94; out_buf[7] = 0x00; /* header_length = 148 */
 
     out_buf[8] = (uint8_t)(project_id & 0xFF);
     out_buf[9] = (uint8_t)((project_id >> 8) & 0xFF);
@@ -403,16 +403,18 @@ static size_t build_efw_buffer(
     out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
     out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
 
-    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
-    out_buf[60] = (uint8_t)(h_crc & 0xFF);
-    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
-    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
-    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U;
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 144U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
 
     if (payload != NULL && payload_len > 0) {
-        memcpy(out_buf + 64, payload, payload_len);
+        memcpy(out_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, payload_len);
     }
-    return 64U + payload_len;
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
 }
 
 static void setup_core_config(ecat_foe_core_cfg_t *cfg, host_flash_driver_t *drv)
@@ -423,7 +425,8 @@ static void setup_core_config(ecat_foe_core_cfg_t *cfg, host_flash_driver_t *drv
     cfg->hardware_id = 0x00000001U;
     cfg->local_hw_ver = 1U;
     cfg->anti_rollback_enable = false;
-    cfg->max_header_size = 128U;
+    cfg->signature_verify_enable = (ECAT_FOE_SIGNATURE_VERIFY_ENABLE != 0);
+    cfg->max_header_size = ECAT_FOE_HEADER_BUF_MAX;
 
     /* Target 1: 板载主 MCU Flash (使能) */
     cfg->targets[0].target_id = 1;
@@ -616,8 +619,8 @@ static void run_scenario_stream_under_receive(void)
     size_t efw_len = build_efw_buffer(s_efw_buf, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 32);
     (void)efw_len;
 
-    /* 仅喂入 64 字节头 + 8 字节数据 (预期应有 32 字节数据) */
-    assert(ecat_foe_core_on_data(&core, s_efw_buf, 72) == 0);
+    /* 仅喂入完整 148 字节头 + 8 字节数据 (预期应有 32 字节数据) */
+    assert(ecat_foe_core_on_data(&core, s_efw_buf, ECAT_FOE_EFW_HEADER_MIN_LEN + 8U) == 0);
     int end_st = ecat_foe_core_on_end(&core);
     assert(end_st != 0);
     assert(core.state == ECAT_FOE_STATE_ERROR);
@@ -678,7 +681,7 @@ static void run_scenario_abort_retry_same_core(void)
 
     static const uint8_t payload[16] = {0x11, 0x22};
     size_t efw_len = build_efw_buffer(s_efw_buf, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    assert(ecat_foe_core_on_data(&core, s_efw_buf, 64) == 0);
+    assert(ecat_foe_core_on_data(&core, s_efw_buf, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
 
     printf("[CORE] Simulated stream break -> calling on_abort\n");
     ecat_foe_core_on_abort(&core);

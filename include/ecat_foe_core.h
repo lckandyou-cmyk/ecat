@@ -27,6 +27,21 @@ extern "C" {
 /*                               常量与宏定义                                 */
 /* -------------------------------------------------------------------------- */
 #define ECAT_FOE_MAX_FILENAME_LEN           31U  /**< FoE 请求文件名最大长度 (字节) */
+#define ECAT_FOE_SIGNATURE_DOMAIN            "ECAT-EFW-SIG-V2\0"
+#define ECAT_FOE_SIGNATURE_DOMAIN_LEN         16U
+
+/** Ed25519ph adapter supplied by the platform using a maintained crypto library.
+ * abort must be idempotent and safe after a partially started begin/update
+ * operation. The core calls abort if begin reports failure.
+ */
+typedef struct {
+    int (*begin)(const uint8_t key_id[ECAT_FOE_EFW_KEY_ID_LEN],
+                 const uint8_t signature[ECAT_FOE_EFW_SIGNATURE_LEN], void *user_ctx);
+    int (*update)(const uint8_t *data, size_t len, void *user_ctx);
+    int (*finish)(void *user_ctx);
+    void (*abort)(void *user_ctx);
+    void *user_ctx;
+} ecat_foe_signature_verifier_t;
 
 /* -------------------------------------------------------------------------- */
 /*                               FoE 标准错误码                               */
@@ -50,7 +65,7 @@ typedef enum {
     /* 0. 核心配置与初始化错误 */
     ECAT_FOE_CORE_ERR_CFG_INVALID,              /**< 配置参数指针为空或配置非法 */
     ECAT_FOE_CORE_ERR_CFG_PROJECT_NAME,         /**< project_name 为空或长度超出限制 */
-    ECAT_FOE_CORE_ERR_CFG_HEADER_BUF,           /**< 头部缓冲配置非法 (<64 或非 4 字节对齐) */
+    ECAT_FOE_CORE_ERR_CFG_HEADER_BUF,           /**< 头部缓冲配置非法 (小于所需格式头长或非 4 字节对齐) */
     ECAT_FOE_CORE_ERR_CFG_TARGET,               /**< 启用目标驱动或其回调为空，或容量/对齐非法 */
 
     /* 1. WRQ 阶段错误 */
@@ -78,6 +93,9 @@ typedef enum {
     ECAT_FOE_CORE_ERR_DRV_WRITE,               /**< drv->write() 失败 */
     ECAT_FOE_CORE_ERR_DRV_READ,                /**< drv->read() 失败 */
     ECAT_FOE_CORE_ERR_DRV_FINALIZE,            /**< drv->finalize() 失败 */
+    ECAT_FOE_CORE_ERR_SIGNATURE_REQUIRED,      /**< 强制验签但包未签名 */
+    ECAT_FOE_CORE_ERR_SIGNATURE_UNAVAILABLE,   /**< 算法/密钥/验签器不可用 */
+    ECAT_FOE_CORE_ERR_SIGNATURE_INVALID,       /**< 签名无效或验签回调失败 */
 
     /* 4. 流接收与校验错误 */
     ECAT_FOE_CORE_ERR_OVER_RECEIVE,            /**< 累计偏移超过期望总长，即时熔断 */
@@ -135,7 +153,9 @@ typedef struct {
     uint32_t hardware_id;                      /**< 本地硬件 ID (0x00000001) */
     uint16_t local_hw_ver;                     /**< 本地硬件版本号 (uint16) */
     bool     anti_rollback_enable;             /**< 是否启用防回滚 */
-    uint16_t max_header_size;                  /**< 允许的头部缓冲上限 (至少 64 字节且 4 字节对齐) */
+    bool     signature_verify_enable;          /**< 本地强制验签，默认关闭 */
+    ecat_foe_signature_verifier_t signature_verifier; /**< 用户提供的 Ed25519ph 后端 */
+    uint16_t max_header_size;                  /**< 允许的头部缓冲上限 (至少 148 字节且 4 字节对齐) */
     ecat_foe_target_desc_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 */
 } ecat_foe_core_cfg_t;
 
@@ -164,6 +184,7 @@ typedef struct {
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
     bool                driver_invalidated;    /**< 底层驱动 invalidate() 是否已成功执行 (固件有效标记已失效) */
+    bool                signature_active;      /**< 验签会话已 begin，尚未 finish/abort */
 
     /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
     char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];
@@ -175,7 +196,7 @@ typedef struct {
     /* 头部装配缓存 */
     uint8_t             header_buf[ECAT_FOE_HEADER_BUF_MAX];
     uint16_t            header_rx_len;         /**< 已接收头部字节数 */
-    uint16_t            header_total_len;      /**< 头部标称总长度 (>=64) */
+    uint16_t            header_total_len;      /**< 当前格式固定 148 字节 */
     bool                header_complete;       /**< 头部装配校验是否已闭环 */
     ecat_foe_efw_header_t hdr;                 /**< 解析装配后的头部元数据 */
 

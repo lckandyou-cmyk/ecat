@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tools/efw_pack.py: EtherCAT .efw 固件容器打包与检查工具 (v0.1)
+tools/efw_pack.py: EtherCAT .efw 固件容器打包与检查工具 (format v2)
 
-严格遵循 docs/spec/efw-format-v0.1.md 规范：
+严格遵循 docs/spec/efw-format-v0.2.md 规范：
 - 打包模式 (pack): 根据参数与二进制文件生成规范的 .efw 固件容器
 - 检查模式 (inspect/unpack): 解析 .efw 容器头，校验 Header CRC32、Payload CRC32 及各字段合法性
 - 支持 --foe-packet-size N 尾部 0xFF 填充 (第 2.2 节)
@@ -61,8 +61,8 @@ def safe_open_for_write(path: str, overwrite: bool = False, protected_paths=()):
 
 # 格式规范常量
 EFW_MAGIC = 0x57464345  # 'ECFW' little-endian
-EFW_FORMAT_VERSION = 1
-EFW_HEADER_MIN_LEN = 64
+EFW_FORMAT_VERSION = 2
+EFW_HEADER_MIN_LEN = 148
 EFW_RESERVED_LEN = 20
 
 TARGET_MAP = {
@@ -127,6 +127,49 @@ def crc32_ieee(data: bytes) -> int:
     return binascii.crc32(data) & 0xFFFFFFFF
 
 
+def _read_key(path: str, expected_len: int, kind: str) -> bytes:
+    """Read a raw key or its ASCII hex form without ever printing key material."""
+    with open(path, 'rb') as f:
+        raw = f.read()
+    if len(raw) == expected_len:
+        return bytes(raw)
+    raw = raw.strip()
+    try:
+        decoded = bytes.fromhex(raw.decode('ascii'))
+    except (UnicodeDecodeError, ValueError):
+        decoded = b''
+    if len(decoded) != expected_len:
+        raise ValueError(f'{kind}必须是 {expected_len} 字节原始数据或 {expected_len * 2} 位十六进制文本')
+    return decoded
+
+
+def _sodium():
+    try:
+        from nacl import bindings
+    except ImportError as exc:
+        raise ValueError('签名功能需要可选依赖 PyNaCl（底层使用 libsodium）；无签名功能不需要安装') from exc
+    required = ('crypto_sign_seed_keypair', 'crypto_sign_ed25519ph_state',
+                'crypto_sign_ed25519ph_update', 'crypto_sign_ed25519ph_final_create',
+                'crypto_sign_ed25519ph_final_verify')
+    if not all(hasattr(bindings, name) for name in required):
+        raise ValueError('当前 PyNaCl/libsodium 不提供 Ed25519ph streaming API')
+    return bindings
+
+
+def _key_id(public_key: bytes) -> bytes:
+    return __import__('hashlib').sha256(b'ECAT-EFW-KEY-ID-v1\0' + public_key).digest()[:8]
+
+
+def _sign_ed25519ph(seed: bytes, message_parts) -> tuple:
+    sodium = _sodium()
+    public_key, secret_key = sodium.crypto_sign_seed_keypair(seed)
+    state = sodium.crypto_sign_ed25519ph_state()
+    for part in message_parts:
+        sodium.crypto_sign_ed25519ph_update(state, part)
+    signature = sodium.crypto_sign_ed25519ph_final_create(state, secret_key)
+    return public_key, signature
+
+
 def pack_efw(
     project_id: int,
     hardware_id: int,
@@ -140,7 +183,9 @@ def pack_efw(
     foe_packet_size: int = 0,
     out_path: str = None,
     overwrite: bool = False,
-    protected_paths=()
+    protected_paths=(),
+    signing_key: str = None,
+    public_key_out: str = None
 ) -> str:
     """
     打包 .efw 文件
@@ -155,7 +200,9 @@ def pack_efw(
         raise ValueError('固件有效负载不能为空')
     if foe_packet_size < 0:
         raise ValueError('FoE 单包大小不能为负数')
-    header_length = EFW_HEADER_MIN_LEN  # 64
+    if public_key_out and not signing_key:
+        raise ValueError('--public-key-out 只能与 --signing-key 一起使用')
+    header_length = EFW_HEADER_MIN_LEN
     payload = bytearray(bin_data)
 
     # 尾部填充处理 (第 2.2 节)
@@ -191,9 +238,25 @@ def pack_efw(
         payload_crc
     ) + reserved
 
-    # 计算 Header CRC32 并追加到末尾
-    header_crc = crc32_ieee(header_prefix)
-    header_bytes = header_prefix + struct.pack('<I', header_crc)
+    public_key_bytes = None
+    if signing_key:
+        seed = bytearray(_read_key(signing_key, 32, 'Ed25519 私钥种子'))
+        try:
+            sodium = _sodium()
+            public_key_bytes, secret_key = sodium.crypto_sign_seed_keypair(bytes(seed))
+            ext = struct.pack('<4sHHHH8s', b'SIG2', 1, 1, 64, 8, _key_id(public_key_bytes))
+            signed_prefix = header_prefix + ext
+            domain = b'ECAT-EFW-SIG-V2\0'
+            _, signature = _sign_ed25519ph(bytes(seed), (domain, signed_prefix, payload_bytes))
+            signed_header = signed_prefix + signature
+            header_bytes = signed_header + struct.pack('<I', crc32_ieee(signed_header))
+        finally:
+            for i in range(len(seed)):
+                seed[i] = 0
+    else:
+        ext = struct.pack('<4sHHHH8s', b'SIG2', 1, 0, 0, 0, bytes(8))
+        unsigned_header = header_prefix + ext + bytes(64)
+        header_bytes = unsigned_header + struct.pack('<I', crc32_ieee(unsigned_header))
 
     efw_data = header_bytes + payload_bytes
 
@@ -206,14 +269,33 @@ def pack_efw(
         if len(os.fsencode(out_path)) > 31:
             raise ValueError('生成的 FoE 文件名超过 31 字节；请缩短项目名')
 
-    with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=protected_paths) as f:
+    if public_key_out and os.path.normcase(os.path.realpath(os.path.abspath(public_key_out))) == \
+            os.path.normcase(os.path.realpath(os.path.abspath(out_path))):
+        raise ValueError('--public-key-out 与固件包输出路径不能指向同一文件')
+    if public_key_out:
+        if os.path.lexists(public_key_out):
+            raise FileExistsError(f'安全拒绝：公钥输出路径已存在: {public_key_out}')
+
+    package_protected = tuple(
+        p for p in protected_paths
+        if not public_key_out or os.path.normcase(os.path.abspath(p)) !=
+        os.path.normcase(os.path.abspath(public_key_out))
+    )
+    with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=package_protected) as f:
         f.write(efw_data)
+
+    if public_key_out:
+        key_protected = tuple(p for p in (protected_paths) if p and
+                              os.path.normcase(os.path.abspath(p)) !=
+                              os.path.normcase(os.path.abspath(public_key_out)))
+        with safe_open_for_write(public_key_out, protected_paths=key_protected) as key_file:
+            key_file.write(public_key_bytes)
 
     return out_path
 
 
 def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
-                summary: bool = False) -> bool:
+                summary: bool = False, public_key_path: str = None) -> bool:
     """
     解析并验证 .efw 文件
     """
@@ -225,8 +307,8 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         data = f.read()
 
     file_size = len(data)
-    if file_size < EFW_HEADER_MIN_LEN:
-        print(f"错误: 文件尺寸小于最小头部长度 64 字节 (实际 {file_size} 字节)", file=sys.stderr)
+    if file_size < 8:
+        print(f"错误: 文件尺寸过小: {file_size} 字节", file=sys.stderr)
         return False
 
     magic, format_version, header_length = struct.unpack_from('<IHH', data, 0)
@@ -234,10 +316,14 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print(f"错误: 魔数不匹配: 期望 0x{EFW_MAGIC:08X}, 实际 0x{magic:08X}", file=sys.stderr)
         return False
     if format_version != EFW_FORMAT_VERSION:
-        print(f"错误: 规范版本不支持: 期望 {EFW_FORMAT_VERSION}, 实际 {format_version}", file=sys.stderr)
+        print(f"错误: 规范版本不支持: {format_version}", file=sys.stderr)
         return False
-    if header_length < EFW_HEADER_MIN_LEN or (header_length % 4) != 0:
-        print(f"错误: 头部长度非法: {header_length} (必须 >= 64 且为 4 的倍数)", file=sys.stderr)
+    expected_header_len = EFW_HEADER_MIN_LEN
+    if header_length != expected_header_len:
+        print(f'错误: EFW v{format_version} 头长度必须为 {expected_header_len} 字节', file=sys.stderr)
+        return False
+    if (header_length % 4) != 0:
+        print(f"错误: 头部长度非法: {header_length}", file=sys.stderr)
         return False
     if file_size < header_length:
         print(f"错误: 文件尺寸小于头部声明长度 {header_length} 字节", file=sys.stderr)
@@ -272,6 +358,25 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print(f"错误: flags 标志位非零: 0x{flags:04X}", file=sys.stderr)
         return False
 
+    ext_magic, ext_version, algorithm, sig_len, key_id_len = struct.unpack_from('<4sHHHH', data, 60)
+    if ext_magic != b'SIG2' or ext_version != 1 or algorithm not in (0, 1):
+        print('错误: 签名扩展格式或算法不受支持', file=sys.stderr)
+        return False
+    if ((algorithm == 0 and (sig_len != 0 or key_id_len != 0 or any(data[72:144]))) or
+            (algorithm == 1 and (sig_len != 64 or key_id_len != 8))):
+        print('错误: 签名扩展长度或未签名保留字段非法', file=sys.stderr)
+        return False
+    is_signed = algorithm == 1
+    public_key = None
+    signature_valid = False
+    if is_signed:
+        if public_key_path:
+            public_key = _read_key(public_key_path, 32, 'Ed25519 公钥')
+            key_id = data[72:80]
+            if _key_id(public_key) != key_id:
+                print('错误: 公钥 Key ID 与固件不匹配', file=sys.stderr)
+                return False
+
     if hw_ver_min > hw_ver_max or min_allow_version > fw_version:
         print('错误: 硬件或固件版本范围无效', file=sys.stderr)
         return False
@@ -294,11 +399,28 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print(f"错误: Payload CRC32 不匹配: 期望 0x{payload_crc:08X}, 计算 0x{calc_payload_crc:08X}", file=sys.stderr)
         return False
 
+    if is_signed and public_key is not None:
+        sodium = _sodium()
+        state = sodium.crypto_sign_ed25519ph_state()
+        for part in (b'ECAT-EFW-SIG-V2\0', data[:80], payload):
+            sodium.crypto_sign_ed25519ph_update(state, part)
+        try:
+            sodium.crypto_sign_ed25519ph_final_verify(state, data[80:144], public_key)
+        except Exception:
+            print('错误: Ed25519ph 签名验证失败', file=sys.stderr)
+            return False
+        signature_valid = True
+    elif public_key_path and not is_signed:
+        print('错误: 指定了公钥，但固件未签名', file=sys.stderr)
+        return False
+
     target_name = TARGET_ID_TO_NAME.get(target_id, "未知")
 
     if summary:
         print("EFW 包有效（结构和 CRC 校验通过；设备兼容性未验证）")
         print(f"  EFW 格式版本:     {format_version}")
+        print(f"  签名状态:         {'Ed25519ph 已验证' if signature_valid else ('存在，未验证' if is_signed else '未签名')}")
+        print(f"  签名 Key ID:      {data[72:80].hex() if is_signed else '无'}")
         print(f"  固件版本:         V{format_version_int(fw_version)}")
         print(f"  项目 ID:          0x{project_id:08X}")
         print(f"  硬件 ID:          0x{hardware_id:08X}")
@@ -314,6 +436,8 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print(f"  文件路径:          {efw_path}")
         print(f"  文件总大小:        {file_size} 字节")
         print(f"  头部长度:          {header_length} 字节")
+        print(f"  签名状态:          {'Ed25519ph 已验证' if signature_valid else ('存在，未验证' if is_signed else '未签名')}")
+        print(f"  签名 Key ID:       {data[72:80].hex() if is_signed else '无'}")
         print(f"  Header CRC32:      0x{expected_header_crc:08X} (校验通过)")
         print(f"  Project ID:        0x{project_id:08X}")
         print(f"  Hardware ID:       0x{hardware_id:08X}")
@@ -361,6 +485,10 @@ def main():
     pack_p.add_argument("--foe-packet-size", type=int, default=0, help="FoE 单包大小 (如 512)，用于空包规避填充")
     pack_p.add_argument("--out", "-o", default=None, help="输出 .efw 文件路径 (默认按规范自动命名)")
     pack_p.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已有普通文件")
+    pack_p.add_argument("--signing-key", default=None,
+                        help="可选 Ed25519 32 字节私钥种子文件（原始或 64 位 hex；仅在可信打包环境使用）")
+    pack_p.add_argument("--public-key-out", default=None,
+                        help="签名时可选输出对应的 32 字节原始公钥（供设备端可信密钥配置使用）")
 
     # inspect / unpack 子命令
     inspect_p = subparsers.add_parser("inspect", help="检验并打印 .efw 容器元数据")
@@ -375,10 +503,18 @@ def main():
 
     info_p = subparsers.add_parser("info", help="简洁显示并校验 .efw 固件包信息")
     info_p.add_argument("efw_file", help="待检查的固件包（按内容识别，不依赖扩展名）")
+    info_p.add_argument("--public-key", default=None, help="可选 Ed25519 32 字节公钥文件，用于验证签名")
+    inspect_p.add_argument("--public-key", default=None, help="可选 Ed25519 32 字节公钥文件，用于验证签名")
+    unpack_p.add_argument("--public-key", default=None, help="可选 Ed25519 32 字节公钥文件，用于验证签名")
 
     args = parser.parse_args()
 
     if args.command == "pack":
+        if args.public_key_out and not args.signing_key:
+            raise ValueError('--public-key-out 只能与 --signing-key 一起使用')
+        if args.public_key_out and args.out and os.path.normcase(os.path.abspath(args.public_key_out)) == \
+                os.path.normcase(os.path.abspath(args.out)):
+            raise ValueError('--public-key-out 与固件包输出路径不能相同')
         with open(args.bin, 'rb') as f:
             bin_data = f.read()
 
@@ -401,15 +537,18 @@ def main():
             foe_packet_size=args.foe_packet_size,
             out_path=args.out,
             overwrite=args.overwrite,
-            protected_paths=(args.bin,)
+            protected_paths=tuple(p for p in (args.bin, args.signing_key) if p),
+            signing_key=args.signing_key,
+            public_key_out=args.public_key_out
         )
         print(f"成功打包 .efw 文件: {out_file}")
 
     elif args.command in ("inspect", "unpack"):
-        ok = inspect_efw(args.efw_file, extract_bin=args.extract_bin, overwrite=args.overwrite)
+        ok = inspect_efw(args.efw_file, extract_bin=args.extract_bin, overwrite=args.overwrite,
+                         public_key_path=args.public_key)
         sys.exit(0 if ok else 1)
     elif args.command == "info":
-        sys.exit(0 if inspect_efw(args.efw_file, summary=True) else 1)
+        sys.exit(0 if inspect_efw(args.efw_file, summary=True, public_key_path=args.public_key) else 1)
     else:
         parser.print_help()
         sys.exit(1)

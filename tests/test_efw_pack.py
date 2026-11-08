@@ -38,19 +38,18 @@ def test_positive_cross_check():
         res = subprocess.run(cmd, capture_output=True, text=True)
         assert res.returncode == 0, f"打包失败: {res.stderr}"
 
-        # 比对 64 字节头部十六进制
         with open(out_path, 'rb') as f:
             data = f.read()
-
-        expected_header_hex = (
-            '45434657010040000100011001000000'
-            '01000100010000000403020100000001'
-            '1000000088E2CECE0000000000000000'
-            '000000000000000000000000E352C261'
-        )
-        actual_header_hex = data[:64].hex().upper()
-        assert actual_header_hex == expected_header_hex, "打包头部十六进制与规范不一致"
-        assert data[64:] == payload, "有效负载数据不一致"
+        assert len(data) == 148 + len(payload)
+        assert data[:4] == b'ECFW'
+        assert int.from_bytes(data[4:6], 'little') == 2
+        assert int.from_bytes(data[6:8], 'little') == 148
+        assert data[60:64] == b'SIG2'
+        assert data[64:68] == bytes((1, 0, 0, 0))
+        assert data[68:80] == bytes(12)
+        assert data[80:144] == bytes(64)
+        assert int.from_bytes(data[144:148], 'little') == binascii.crc32(data[:144])
+        assert data[148:] == payload, "有效负载数据不一致"
 
         # 运行 inspect 验证
         res_insp = subprocess.run([sys.executable, PACK_TOOL, 'inspect', out_path], capture_output=True, text=True)
@@ -65,6 +64,21 @@ def test_positive_cross_check():
         assert 'Header CRC32' in res_info.stdout and 'Payload CRC32' in res_info.stdout
         assert '包内打包日期:     未提供' in res_info.stdout
         assert '文件路径:' not in res_info.stdout, "info 应保持简洁，不应混入 inspect 详细报告"
+
+        # Historical headers are rejected: only the current format is supported.
+        legacy = bytearray(64 + len(payload))
+        legacy[:40] = data[:40]
+        legacy[4:6] = (1).to_bytes(2, 'little')
+        legacy[6:8] = (64).to_bytes(2, 'little')
+        legacy[64:] = payload
+        legacy[60:64] = (binascii.crc32(legacy[:60]) & 0xffffffff).to_bytes(4, 'little')
+        legacy_path = os.path.join(tmpdir, 'legacy-v1.efw')
+        with open(legacy_path, 'wb') as f:
+            f.write(legacy)
+        legacy_info = subprocess.run([sys.executable, PACK_TOOL, 'info', legacy_path],
+                                     capture_output=True, text=True)
+        assert legacy_info.returncode != 0, "旧格式必须拒绝"
+
         corrupted_path = os.path.join(tmpdir, 'corrupt.anything')
         with open(renamed_path, 'rb') as f:
             corrupt_data = bytearray(f.read())
@@ -130,15 +144,15 @@ def test_empty_payload_rejected_without_output():
         # Also reject a hand-crafted, CRC-correct empty container at inspect time;
         # otherwise users could bypass pack's validation and extract it as valid.
         empty_efw = os.path.join(tmpdir, 'crafted-empty.efw')
-        header = bytearray.fromhex(
-            '45434657010040000100011001000000'
-            '01000100010000000403020100000001'
-            '1000000088E2CECE0000000000000000'
-            '000000000000000000000000E352C261'
-        )
-        assert len(header) == 64
+        header = bytearray(148)
+        header[:4] = b'ECFW'
+        header[4:8] = (2).to_bytes(2, 'little') + (148).to_bytes(2, 'little')
+        header[8:16] = bytes.fromhex('0100011001000000')
+        header[16:24] = bytes.fromhex('0100010001000000')
+        header[24:32] = bytes.fromhex('0000000000000000')
+        header[60:68] = b'SIG2' + bytes((1, 0, 0, 0))
         header[32:40] = bytes(8)  # payload length and CRC of the empty payload
-        header[60:64] = binascii.crc32(header[:60]).to_bytes(4, 'little')
+        header[144:148] = binascii.crc32(header[:144]).to_bytes(4, 'little')
         with open(empty_efw, 'wb') as f:
             f.write(header)
         extracted = os.path.join(tmpdir, 'should-not-extract.bin')
@@ -155,17 +169,16 @@ def test_foe_packet_size_padding():
     """验证 --foe-packet-size N 尾部填充规避空包 (第 2.2 节)"""
     with tempfile.TemporaryDirectory() as tmpdir:
         # N = 512
-        # header_length = 64
-        # 若 payload = 512 - 64 = 448 字节，则 total = 512，为 512 整数倍
-        bin_448 = os.path.join(tmpdir, 'p448.bin')
-        with open(bin_448, 'wb') as f:
-            f.write(b'\xAA' * 448)
+        # header_length = 148；若 payload = 512 - 148 = 364 字节，总长恰为 512。
+        bin_364 = os.path.join(tmpdir, 'p364.bin')
+        with open(bin_364, 'wb') as f:
+            f.write(b'\xAA' * 364)
 
         # 1. MCU 目标 (非 SII) -> 补 1 字节 0xFF，总长变为 513
         out_mcu = os.path.join(tmpdir, 'mcu.efw')
         cmd1 = [
             sys.executable, PACK_TOOL, 'pack',
-            '--bin', bin_448,
+            '--bin', bin_364,
             '--project-id', '0x10010001',
             '--hardware-id', '0x00000001',
             '--target', 'MCU',
@@ -177,14 +190,14 @@ def test_foe_packet_size_padding():
         assert res1.returncode == 0
         with open(out_mcu, 'rb') as f:
             data_mcu = f.read()
-        assert len(data_mcu) == 64 + 449, f"MCU 填充后总长应为 513 (64+449)，实际 {len(data_mcu)}"
+        assert len(data_mcu) == 148 + 365, f"MCU 填充后总长应为 513，实际 {len(data_mcu)}"
         assert data_mcu[-1] == 0xFF, "末尾填充字节应当为 0xFF"
 
         # 2. SII 目标 -> 必须补 2 的整数倍 (2 字节 0xFF)，总长变为 514
         out_sii = os.path.join(tmpdir, 'sii.efw')
         cmd2 = [
             sys.executable, PACK_TOOL, 'pack',
-            '--bin', bin_448,
+            '--bin', bin_364,
             '--project-id', '0x10010001',
             '--hardware-id', '0x00000001',
             '--target', 'SII',
@@ -196,9 +209,107 @@ def test_foe_packet_size_padding():
         assert res2.returncode == 0
         with open(out_sii, 'rb') as f:
             data_sii = f.read()
-        assert len(data_sii) == 64 + 450, f"SII 填充后总长应为 514 (64+450)，实际 {len(data_sii)}"
+        assert len(data_sii) == 148 + 366, f"SII 填充后总长应为 514，实际 {len(data_sii)}"
         assert data_sii[-2:] == b'\xFF\xFF', "SII 末尾必须补 2 字节 0xFF"
     print("  [PASS] --foe-packet-size 512 规避填充 (MCU 补 1B / SII 偶数补 2B)")
+
+
+def test_signed_package_round_trip():
+    """确定性 Ed25519ph 向量：生成、检查、错误密钥和篡改拒绝。"""
+    try:
+        from nacl import bindings
+        required = ('crypto_sign_seed_keypair', 'crypto_sign_ed25519ph_state',
+                    'crypto_sign_ed25519ph_update', 'crypto_sign_ed25519ph_final_create')
+        if not all(hasattr(bindings, name) for name in required):
+            raise ImportError
+    except ImportError:
+        print("  [SKIP] PyNaCl/librariesodium Ed25519ph 未安装；CI 打包任务会安装并运行此测试")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        seed = bytes(range(32))
+        wrong_seed = bytes(range(1, 33))
+        seed_path = os.path.join(tmpdir, 'private-seed.bin')
+        wrong_seed_path = os.path.join(tmpdir, 'wrong-seed.bin')
+        pub_path = os.path.join(tmpdir, 'trusted-public.bin')
+        payload_path = os.path.join(tmpdir, 'payload.bin')
+        signed_path = os.path.join(tmpdir, 'signed.efw')
+        with open(seed_path, 'wb') as f:
+            f.write(seed)
+        with open(wrong_seed_path, 'wb') as f:
+            f.write(wrong_seed)
+        with open(payload_path, 'wb') as f:
+            f.write(bytes((i * 13 + 7) & 0xff for i in range(257)))
+
+        cmd = [sys.executable, PACK_TOOL, 'pack', '--bin', payload_path,
+               '--project-id', '0x10010001', '--hardware-id', '1', '--target', 'MCU',
+               '--fw-version', '2.3.4.5', '--min-allow-version', '1.0.0.0',
+               '--signing-key', seed_path, '--public-key-out', pub_path, '--out', signed_path]
+        packed = subprocess.run(cmd, capture_output=True, text=True)
+        assert packed.returncode == 0, packed.stderr
+        assert seed.hex() not in packed.stdout + packed.stderr
+        assert os.path.getsize(pub_path) == 32
+        fixture_path = os.path.join(ROOT_DIR, 'tests', 'fixtures',
+                                    'efw-v2-ed25519ph-monocypher.efw')
+        with open(fixture_path, 'rb') as f:
+            reference_vector = f.read()
+        with open(signed_path, 'rb') as f:
+            cli_vector = f.read()
+        assert cli_vector == reference_vector, \
+            "PyNaCl CLI output must byte-match the Monocypher Ed25519ph reference vector"
+
+        info = subprocess.run([sys.executable, PACK_TOOL, 'info', signed_path],
+                              capture_output=True, text=True)
+        assert info.returncode == 0 and '存在，未验证' in info.stdout
+        verified = subprocess.run([sys.executable, PACK_TOOL, 'info', signed_path,
+                                   '--public-key', pub_path], capture_output=True, text=True)
+        assert verified.returncode == 0, verified.stderr
+        assert 'Ed25519ph 已验证' in verified.stdout
+        wrong_pub, _ = bindings.crypto_sign_seed_keypair(wrong_seed)
+        wrong_pub_path = os.path.join(tmpdir, 'wrong-public.bin')
+        with open(wrong_pub_path, 'wb') as f:
+            f.write(wrong_pub)
+        wrong = subprocess.run([sys.executable, PACK_TOOL, 'inspect', signed_path,
+                                '--public-key', wrong_pub_path], capture_output=True, text=True)
+        assert wrong.returncode != 0 and ('Key ID' in wrong.stderr or 'Key ID' in wrong.stdout)
+
+        original = bytearray(open(signed_path, 'rb').read())
+        mutations = (('payload', 148, None), ('target', 20, 2), ('version', 24, None))
+        for name, offset, explicit_value in mutations:
+            altered = bytearray(original)
+            altered[offset] = explicit_value if explicit_value is not None else altered[offset] ^ 1
+            if name != 'payload':
+                altered[144:148] = binascii.crc32(altered[:144]).to_bytes(4, 'little')
+            bad_path = os.path.join(tmpdir, f'altered-{name}.efw')
+            with open(bad_path, 'wb') as f:
+                f.write(altered)
+            result = subprocess.run([sys.executable, PACK_TOOL, 'info', bad_path,
+                                     '--public-key', pub_path], capture_output=True, text=True)
+            assert result.returncode != 0, f'{name} tampering must fail signature verification'
+
+        truncated_path = os.path.join(tmpdir, 'truncated.efw')
+        with open(truncated_path, 'wb') as f:
+            f.write(original[:-1])
+        truncated = subprocess.run([sys.executable, PACK_TOOL, 'info', truncated_path,
+                                    '--public-key', pub_path], capture_output=True, text=True)
+        assert truncated.returncode != 0
+        malformed = bytearray(original)
+        malformed[66:68] = (99).to_bytes(2, 'little')
+        malformed[144:148] = binascii.crc32(malformed[:144]).to_bytes(4, 'little')
+        malformed_path = os.path.join(tmpdir, 'malformed.efw')
+        with open(malformed_path, 'wb') as f:
+            f.write(malformed)
+        bad_format = subprocess.run([sys.executable, PACK_TOOL, 'info', malformed_path],
+                                    capture_output=True, text=True)
+        assert bad_format.returncode != 0
+
+        no_signing_key = subprocess.run(
+            [sys.executable, PACK_TOOL, 'pack', '--bin', payload_path,
+             '--project-id', '1', '--hardware-id', '1', '--target', 'MCU',
+             '--fw-version', '1.0.0.0', '--public-key-out', os.path.join(tmpdir, 'orphan.pub')],
+            capture_output=True, text=True)
+        assert no_signing_key.returncode != 0
+    print("  [PASS] Ed25519ph signed package vector, signature verification and tamper rejection")
 
 
 if __name__ == '__main__':
@@ -211,4 +322,5 @@ if __name__ == '__main__':
     test_filename_generator()
     test_empty_payload_rejected_without_output()
     test_foe_packet_size_padding()
+    test_signed_package_round_trip()
     print("--- Python efw_pack 工具测试全部通过 ---")

@@ -4,6 +4,7 @@
  */
 
 #include "ecat_foe_efw.h"
+#include <string.h>
 
 /* -------------------------------------------------------------------------- */
 /*                        IEEE 802.3 CRC32 预计算表                           */
@@ -161,16 +162,15 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage1(
     }
 
     uint16_t header_length = read_u16_le(buf + 0x06);
-    if (header_length < ECAT_FOE_EFW_HEADER_MIN_LEN) {
-        return ECAT_FOE_EFW_ERR_HEADER_LEN_MIN;
-    }
+    uint16_t expected_length = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if (header_length < expected_length) return ECAT_FOE_EFW_ERR_HEADER_LEN_MIN;
     if (max_header_len > 0U && header_length > max_header_len) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_MAX;
     }
     if ((header_length % 4U) != 0U) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN;
     }
-
+    if (header_length != expected_length) return ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT;
     *out_header_len = header_length;
     return ECAT_FOE_EFW_OK;
 }
@@ -183,14 +183,18 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
     if (buf == NULL || out_hdr == NULL) {
         return ECAT_FOE_EFW_ERR_INVALID_ARG;
     }
-    if (len < ECAT_FOE_EFW_HEADER_MIN_LEN) {
+    if (len < 8U) {
         return ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL;
     }
 
+    uint16_t format_version = read_u16_le(buf + 0x04);
     uint16_t header_length = read_u16_le(buf + 0x06);
-    if (header_length < ECAT_FOE_EFW_HEADER_MIN_LEN || (header_length % 4U) != 0U) {
+    uint16_t expected_length = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if ((format_version != ECAT_FOE_EFW_FORMAT_VERSION) ||
+        header_length != expected_length || (header_length % 4U) != 0U) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_MIN;
     }
+    if (len < (size_t)expected_length) return ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL;
     if (len < (size_t)header_length) {
         return ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL;
     }
@@ -222,6 +226,32 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
         out_hdr->reserved[i] = buf[0x28 + i];
     }
     out_hdr->header_crc32 = expected_crc;
+    out_hdr->signed_package = false;
+    memset(out_hdr->key_id, 0, sizeof(out_hdr->key_id));
+    memset(out_hdr->signature, 0, sizeof(out_hdr->signature));
+    static const uint8_t sig_magic[4] = {'S', 'I', 'G', '2'};
+    if (memcmp(buf + 60U, sig_magic, sizeof(sig_magic)) != 0 ||
+        read_u16_le(buf + 64U) != 1U ||
+        (read_u16_le(buf + 66U) != 0U && read_u16_le(buf + 66U) != 1U)) {
+        return ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT;
+    }
+    uint16_t algorithm = read_u16_le(buf + 66U);
+    uint16_t signature_len = read_u16_le(buf + 68U);
+    uint16_t key_id_len = read_u16_le(buf + 70U);
+    if ((algorithm == 0U && (signature_len != 0U || key_id_len != 0U)) ||
+        (algorithm == 1U && (signature_len != ECAT_FOE_EFW_SIGNATURE_LEN ||
+                             key_id_len != ECAT_FOE_EFW_KEY_ID_LEN))) {
+        return ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT;
+    }
+    if (algorithm == 0U) {
+        for (size_t i = 72U; i < 144U; i++) {
+            if (buf[i] != 0U) return ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT;
+        }
+    } else {
+        memcpy(out_hdr->key_id, buf + 72U, ECAT_FOE_EFW_KEY_ID_LEN);
+        memcpy(out_hdr->signature, buf + 80U, ECAT_FOE_EFW_SIGNATURE_LEN);
+        out_hdr->signed_package = true;
+    }
 
     return ECAT_FOE_EFW_OK;
 }
@@ -239,16 +269,20 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
         return ECAT_FOE_EFW_ERR_MAGIC;
     }
 
-    /* 2. format_version 严格等于 1 */
+    /* Only the current unified container format is accepted. */
     if (hdr->format_version != ECAT_FOE_EFW_FORMAT_VERSION) {
         return ECAT_FOE_EFW_ERR_FORMAT_VERSION;
     }
 
-    /* 3. header_length >= 64 且为 4 的倍数 */
-    if (hdr->header_length < ECAT_FOE_EFW_HEADER_MIN_LEN) {
-        return ECAT_FOE_EFW_ERR_HEADER_LEN_MIN;
+    if (cfg->signature_verify_enable) {
+        if (hdr->format_version != ECAT_FOE_EFW_FORMAT_VERSION || !hdr->signed_package) {
+            return ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED;
+        }
     }
-    if ((hdr->header_length % 4U) != 0U) {
+
+    uint16_t expected_header_length =
+        ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if (hdr->header_length != expected_header_length || (hdr->header_length % 4U) != 0U) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN;
     }
 
@@ -257,7 +291,7 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
         return ECAT_FOE_EFW_ERR_FLAGS_NONZERO;
     }
 
-    /* 5. reserved 区域 (20 字节) 全为 0x00 */
+    /* Reserved bytes 40..59 must remain zero. */
     for (size_t i = 0; i < ECAT_FOE_EFW_RESERVED_LEN; i++) {
         if (hdr->reserved[i] != 0U) {
             return ECAT_FOE_EFW_ERR_RESERVED_NONZERO;
@@ -330,7 +364,7 @@ const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)
     case ECAT_FOE_EFW_ERR_FORMAT_VERSION:
         return "Format version unsupported";
     case ECAT_FOE_EFW_ERR_HEADER_LEN_MIN:
-        return "Header length < 64 bytes";
+        return "Header length is below the supported format minimum";
     case ECAT_FOE_EFW_ERR_HEADER_LEN_MAX:
         return "Header length exceeds local max";
     case ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN:
@@ -361,6 +395,10 @@ const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)
         return "Anti-rollback check failed";
     case ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY:
         return "Payload length is zero";
+    case ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT:
+        return "Signature extension format or algorithm unsupported";
+    case ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED:
+        return "Signed firmware required";
     default:
         return "Unknown error";
     }

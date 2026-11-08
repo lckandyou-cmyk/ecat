@@ -37,7 +37,7 @@ typedef struct {
 } master_foe_response_t;
 
 /**
- * @brief 构造合成标准 .efw 固件容器镜像 (包含 64 字节头部及有效载荷)
+ * @brief 构造合成标准 v2 .efw 固件容器镜像 (包含 148 字节头部及有效载荷)
  *
  * @param out_buf       输出固件缓冲区
  * @param out_max       缓冲区最大容量

@@ -1,8 +1,8 @@
 /**
  * @file ecat_foe_efw.h
- * @brief EtherCAT .efw 固件容器格式解析与核验接口定义 (v0.1)
+ * @brief EtherCAT .efw 固件容器格式解析与核验接口定义 (format v2)
  *
- * 严格遵循 docs/spec/efw-format-v0.1.md 规范：
+ * 严格遵循 docs/spec/efw-format-v0.2.md 规范：
  * - 纯 C99 实现，零动态内存分配 (无 malloc)
  * - 小端序逐字节安全反序列化，不依赖结构体物理对齐与主机字节序
  * - 三阶段解析顺序：阶段 1 探测、阶段 2 头部装配与 CRC32、阶段 3 全量元数据安全核验
@@ -28,10 +28,12 @@ extern "C" {
 #define ECAT_FOE_EFW_MAGIC                  0x57464345U
 
 /** @brief 当前规范版本号 */
-#define ECAT_FOE_EFW_FORMAT_VERSION         1U
+#define ECAT_FOE_EFW_FORMAT_VERSION         2U
 
 /** @brief 头部最小长度 (字节) */
-#define ECAT_FOE_EFW_HEADER_MIN_LEN         64U
+#define ECAT_FOE_EFW_HEADER_MIN_LEN         148U
+#define ECAT_FOE_EFW_SIGNATURE_LEN          64U
+#define ECAT_FOE_EFW_KEY_ID_LEN             8U
 
 /** @brief 扩展保留区长度 (字节，偏移 0x28 - 0x3B) */
 #define ECAT_FOE_EFW_RESERVED_LEN           20U
@@ -39,7 +41,7 @@ extern "C" {
 /** @brief 阶段 1 探测所需最小字节数 */
 #define ECAT_FOE_EFW_STAGE1_PROBE_LEN       8U
 
-/* 升级目标定义 (efw-format v0.1 第 5 节) */
+/* 升级目标定义 (efw-format 第 5 节) */
 #define ECAT_FOE_TARGET_MCU                 0x0001U  /**< MCU 固件 (字样: MCU) */
 #define ECAT_FOE_TARGET_FPGA                0x0002U  /**< FPGA 镜像 (字样: FPGA) */
 #define ECAT_FOE_TARGET_SII                 0x0003U  /**< ESC SII EEPROM (字样: SII) */
@@ -59,8 +61,8 @@ typedef enum {
 
     /* 阶段 1 探测错误 (前 8 字节) */
     ECAT_FOE_EFW_ERR_MAGIC,                   /**< 魔数错误 (magic != 0x57464345) */
-    ECAT_FOE_EFW_ERR_FORMAT_VERSION,          /**< 规范版本号不支持 (format_version != 1) */
-    ECAT_FOE_EFW_ERR_HEADER_LEN_MIN,          /**< 头部长度小于 64 字节 */
+    ECAT_FOE_EFW_ERR_FORMAT_VERSION,          /**< 规范版本号不支持 */
+    ECAT_FOE_EFW_ERR_HEADER_LEN_MIN,          /**< 头部长度小于该格式固定头长度 */
     ECAT_FOE_EFW_ERR_HEADER_LEN_MAX,          /**< 头部长度超过本地允许上限 */
     ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN,        /**< 头部长度不是 4 的倍数 */
 
@@ -79,7 +81,9 @@ typedef enum {
     ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE,       /**< payload_length 超过本地分区容量上限 */
     ECAT_FOE_EFW_ERR_MIN_ALLOW_VER_INVALID,   /**< 允许运行下限大于固件版本 (min_allow_version > fw_version) */
     ECAT_FOE_EFW_ERR_ANTI_ROLLBACK,           /**< 防回滚拦截: 固件版本低于本地持久化下限 */
-    ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY            /**< 固件有效载荷长度为零 */
+    ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY,           /**< 固件有效载荷长度为零 */
+    ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT,        /**< 签名扩展格式或算法不受支持 */
+    ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED       /**< 本地要求签名，但包未签名 */
 } ecat_foe_efw_err_t;
 
 /* -------------------------------------------------------------------------- */
@@ -92,8 +96,8 @@ typedef enum {
  */
 typedef struct {
     uint32_t magic;                              /**< 0x00: 魔数 (0x57464345) */
-    uint16_t format_version;                     /**< 0x04: 规范格式版本 (1) */
-    uint16_t header_length;                      /**< 0x06: 头部总字节数 (>= 64, 4 的倍数) */
+    uint16_t format_version;                     /**< 0x04: 规范格式版本 (2) */
+    uint16_t header_length;                      /**< 0x06: 固定头部长度 (148) */
     uint32_t project_id;                         /**< 0x08: 目标工程唯一标识 ID */
     uint32_t hardware_id;                        /**< 0x0C: 目标硬件板型标识 ID */
     uint16_t hw_ver_min;                         /**< 0x10: 支持的最低硬件版本号 */
@@ -105,7 +109,10 @@ typedef struct {
     uint32_t payload_length;                     /**< 0x20: 有效负载长度 (字节数) */
     uint32_t payload_crc32;                      /**< 0x24: 有效负载 IEEE 802.3 CRC32 校验码 */
     uint8_t  reserved[ECAT_FOE_EFW_RESERVED_LEN];/**< 0x28 - 0x3B: 扩展保留区 (必须全为 0x00) */
-    uint32_t header_crc32;                       /**< header_length - 4: 头部 CRC32 校验码 */
+    uint32_t header_crc32;                       /**< 0x90: 头部 CRC32 校验码 */
+    uint8_t  key_id[ECAT_FOE_EFW_KEY_ID_LEN];    /**< v2: 0x48..0x4F */
+    uint8_t  signature[ECAT_FOE_EFW_SIGNATURE_LEN]; /**< v2 Ed25519ph */
+    bool     signed_package;                     /**< v2 是否带 Ed25519ph 签名 */
 } ecat_foe_efw_header_t;
 
 /**
@@ -125,6 +132,7 @@ typedef struct {
     uint32_t hardware_id;                        /**< 本地硬件 ID */
     uint16_t local_hw_ver;                       /**< 本地硬件版本号 (uint16) */
     bool     anti_rollback_enable;               /**< 是否启用防版本回滚校验 */
+    bool     signature_verify_enable;             /**< 本地强制验签；默认 false */
     ecat_foe_efw_target_cfg_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 配置 (索引 target_id - 1) */
 } ecat_foe_efw_config_t;
 
@@ -168,14 +176,13 @@ uint32_t ecat_foe_crc32_calc(const uint8_t *data, size_t len);
  *
  * 检查项：
  * - magic == 0x57464345
- * - format_version == 1
- * - header_length >= 64
- * - header_length <= max_header_len
- * - header_length % 4 == 0
+ * - format_version == 2
+ * - header_length == 148
+ * - header_length <= max_header_len (0 表示仅使用格式固定上限)
  *
  * @param buf            数据流起始缓冲指针 (至少 8 字节)
  * @param len            输入数据长度
- * @param max_header_len 本地允许的最大头部装配长度 (例如 128)
+ * @param max_header_len 本地允许的最大头部装配长度 (至少 148)
  * @param out_header_len 输出解析得到的 header_length (不可为 NULL)
  * @return ECAT_FOE_EFW_OK 探测成功，否则返回对应细分错误码
  */
@@ -208,10 +215,10 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
 /**
  * @brief 阶段 3：全量元数据安全核验 ("擦除前必须全过"清单)
  *
- * 严格按照 efw-format-v0.1.md 第 4.2 节清单执行核验：
+ * 按当前 efw-format-v0.2.md 规范执行核验：
  * 1. magic 严格等于 0x57464345
- * 2. format_version 严格等于 1
- * 3. header_length >= 64 且为 4 的倍数
+ * 2. format_version 严格等于当前格式版本
+ * 3. header_length 等于当前格式固定长度 148
  * 4. flags 严格等于 0
  * 5. reserved 区域 (20 字节) 全为 0x00
  * 6. project_id 与本地配置一致

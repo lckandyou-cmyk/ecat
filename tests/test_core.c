@@ -150,13 +150,13 @@ static size_t build_test_efw(
     const uint8_t *payload,
     uint32_t payload_len)
 {
-    memset(out_buf, 0, 64);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
     /* 0x00: magic */
     out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57;
-    /* 0x04: format_version = 1 */
-    out_buf[4] = 0x01; out_buf[5] = 0x00;
-    /* 0x06: header_length = 64 */
-    out_buf[6] = 0x40; out_buf[7] = 0x00;
+    /* Current unified container format version 2, fixed 148-byte header. */
+    out_buf[4] = 0x02; out_buf[5] = 0x00;
+    out_buf[6] = (uint8_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
+    out_buf[7] = (uint8_t)(ECAT_FOE_EFW_HEADER_MIN_LEN >> 8);
     /* 0x08: project_id */
     out_buf[8] = (uint8_t)(project_id & 0xFF);
     out_buf[9] = (uint8_t)((project_id >> 8) & 0xFF);
@@ -202,19 +202,93 @@ static size_t build_test_efw(
     out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
     out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
 
-    /* 0x28 - 0x3B: reserved (20 bytes all 0x00) */
-
-    /* 0x3C: header_crc32 */
-    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
-    out_buf[60] = (uint8_t)(h_crc & 0xFF);
-    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
-    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
-    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+    /* Reserved bytes 40..59 remain zero. Optional signature extension defaults unsigned. */
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U; /* extension version */
+    /* alg, signature length, key id length and signature slots are zero (unsigned). */
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
 
     if (payload != NULL && payload_len > 0) {
-        memcpy(out_buf + 64, payload, payload_len);
+        memcpy(out_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, payload_len);
     }
-    return 64U + payload_len;
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
+}
+
+typedef struct {
+    uint8_t expected[512];
+    size_t expected_len;
+    uint8_t observed[512];
+    size_t observed_len;
+    bool fail_begin;
+    bool fail_finish;
+    unsigned begin_calls;
+    unsigned finish_calls;
+    unsigned abort_calls;
+} mock_signature_verifier_t;
+
+static int mock_signature_begin(const uint8_t key_id[ECAT_FOE_EFW_KEY_ID_LEN],
+                                const uint8_t signature[ECAT_FOE_EFW_SIGNATURE_LEN],
+                                void *user_ctx)
+{
+    mock_signature_verifier_t *m = (mock_signature_verifier_t *)user_ctx;
+    m->begin_calls++;
+    for (size_t i = 0; i < ECAT_FOE_EFW_KEY_ID_LEN; ++i) {
+        if (key_id[i] != (uint8_t)(0x10U + i)) return -1;
+    }
+    for (size_t i = 0; i < ECAT_FOE_EFW_SIGNATURE_LEN; ++i) {
+        if (signature[i] != 0xA5U) return -1;
+    }
+    return m->fail_begin ? -1 : 0;
+}
+
+static int mock_signature_update(const uint8_t *data, size_t len, void *user_ctx)
+{
+    mock_signature_verifier_t *m = (mock_signature_verifier_t *)user_ctx;
+    if ((data == NULL && len != 0U) || len > sizeof(m->observed) - m->observed_len) return -1;
+    memcpy(m->observed + m->observed_len, data, len);
+    m->observed_len += len;
+    return 0;
+}
+
+static int mock_signature_finish(void *user_ctx)
+{
+    mock_signature_verifier_t *m = (mock_signature_verifier_t *)user_ctx;
+    static const uint8_t domain[] = "ECAT-EFW-SIG-V2";
+    m->finish_calls++;
+    size_t payload_len = m->expected_len - ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if (m->observed_len != ECAT_FOE_SIGNATURE_DOMAIN_LEN + 80U + payload_len ||
+        memcmp(m->observed, domain, sizeof(domain)) != 0 ||
+        memcmp(m->observed + sizeof(domain), m->expected, 80U) != 0 ||
+        memcmp(m->observed + sizeof(domain) + 80U,
+               m->expected + ECAT_FOE_EFW_HEADER_MIN_LEN, payload_len) != 0) {
+        return -1;
+    }
+    return m->fail_finish ? -1 : 0;
+}
+
+static void mock_signature_abort(void *user_ctx)
+{
+    mock_signature_verifier_t *m = (mock_signature_verifier_t *)user_ctx;
+    m->abort_calls++;
+}
+
+static size_t build_signed_test_efw(uint8_t *out, const uint8_t *payload, uint32_t len)
+{
+    size_t total = build_test_efw(out, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                                  0x01000000U, 0U, payload, len);
+    out[66] = 1U; /* algorithm: Ed25519ph */
+    out[68] = ECAT_FOE_EFW_SIGNATURE_LEN;
+    out[70] = ECAT_FOE_EFW_KEY_ID_LEN;
+    for (size_t i = 0; i < ECAT_FOE_EFW_KEY_ID_LEN; ++i) out[72U + i] = (uint8_t)(0x10U + i);
+    memset(out + 80U, 0xA5, ECAT_FOE_EFW_SIGNATURE_LEN);
+    uint32_t crc = ecat_foe_crc32_calc(out, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    out[144] = (uint8_t)crc; out[145] = (uint8_t)(crc >> 8);
+    out[146] = (uint8_t)(crc >> 16); out[147] = (uint8_t)(crc >> 24);
+    return total;
 }
 
 static int test_wrq(ecat_foe_core_t *core, const char *fn)
@@ -231,7 +305,7 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     /* Target 1: MCU */
     cfg.targets[0].target_id = 1;
@@ -301,6 +375,158 @@ static int feed_stream_chunks(
         return ecat_foe_core_on_data(core, NULL, 0);
     }
     return 0;
+}
+
+static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
+                                mock_signature_verifier_t *verifier)
+{
+    ecat_foe_core_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.project_id = 0x10010001U;
+    cfg.project_name = "SERVO_DRV";
+    cfg.hardware_id = 1U;
+    cfg.local_hw_ver = 1U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    cfg.targets[0].target_id = 1U;
+    cfg.targets[0].enabled = true;
+    cfg.targets[0].max_payload_size = sizeof(mcu->mem);
+    cfg.targets[0].write_unit = 8U;
+    cfg.targets[0].driver = &mcu->driver;
+    cfg.targets[0].user_ctx = mcu;
+    mcu->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    cfg.signature_verify_enable = true;
+    cfg.signature_verifier.begin = mock_signature_begin;
+    cfg.signature_verifier.update = mock_signature_update;
+    cfg.signature_verifier.finish = mock_signature_finish;
+    cfg.signature_verifier.abort = mock_signature_abort;
+    cfg.signature_verifier.user_ctx = verifier;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
+}
+
+static void test_optional_signature_policy_and_readback(void)
+{
+    static mock_driver_t mcu;
+    mock_driver_init(&mcu);
+    ecat_foe_core_t core;
+    static mock_signature_verifier_t verifier;
+    memset(&verifier, 0, sizeof(verifier));
+    uint8_t payload[16];
+    for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (uint8_t)(i + 1U);
+    uint8_t efw[256];
+
+    /* Required verification rejects unsigned packages before touching storage. */
+    setup_signature_core(&core, &mcu, &verifier);
+    size_t n = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                              0x01000000U, 0U, payload, sizeof(payload));
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT(feed_stream_chunks(&core, efw, n, 31U, false) != 0,
+                "强制验签设备拒绝未签名包");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "拒绝未签名包时不初始化目标驱动");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "拒绝未签名包时不失效旧镜像");
+    TEST_ASSERT_EQ_INT(verifier.begin_calls, 0, "未签名包不调用验签器");
+
+    /* Successful Ed25519ph adapter path sees canonical header and the flash readback payload. */
+    memset(&verifier, 0, sizeof(verifier));
+    mock_driver_reset(&mcu);
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    memcpy(verifier.expected, efw, n);
+    verifier.expected_len = n;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, n, 37U, false), 0,
+                       "签名包的分包写入成功");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "签名验真后提交成功");
+    TEST_ASSERT_EQ_INT(verifier.begin_calls, 1, "一次签名会话调用 begin 一次");
+    TEST_ASSERT_EQ_INT(verifier.finish_calls, 1, "验签在回读之后且提交之前完成");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "有效签名才提交镜像");
+    TEST_ASSERT(!core.cfg.anti_rollback_enable,
+                "启用验签不会隐式启用防回滚");
+
+    /* 签名与防回滚独立：防回滚开启且版本下限允许时，有效旧版本签名包仍可提交。 */
+    memset(&verifier, 0, sizeof(verifier));
+    mock_driver_reset(&mcu);
+    s_mock_version_floors[0] = 0U;
+    setup_signature_core(&core, &mcu, &verifier);
+    core.cfg.anti_rollback_enable = true;
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    memcpy(verifier.expected, efw, n);
+    verifier.expected_len = n;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, n, 53U, false), 0,
+                       "验签与防回滚同时开启时仍按本地下限判断");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0,
+                       "本地下限允许时合法签名固件提交成功");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1,
+                       "原子防回滚提交在验签成功后执行");
+
+    /* 介质回读被篡改时不得通过 CRC 或签名步骤提交。 */
+    memset(&verifier, 0, sizeof(verifier));
+    mock_driver_reset(&mcu);
+    mcu.inject_corrupt_read = true;
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    memcpy(verifier.expected, efw, n);
+    verifier.expected_len = n;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, n, 47U, false), 0,
+                       "回读比较发生前数据接收成功");
+    TEST_ASSERT(ecat_foe_core_on_end(&core) != 0,
+                "回读篡改必须拒绝提交");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0,
+                       "回读篡改不得设置有效标记");
+    TEST_ASSERT_EQ_INT(verifier.finish_calls, 0,
+                       "回读 CRC 失败时不调用验签器 finish");
+
+    /* Missing trusted key fails before init/invalidate; no fallback to unsigned mode. */
+    memset(&verifier, 0, sizeof(verifier));
+    verifier.fail_begin = true;
+    mock_driver_reset(&mcu);
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT(feed_stream_chunks(&core, efw, n, 64U, false) != 0,
+                "密钥不可用时拒绝升级");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "密钥不可用时未触碰目标驱动");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "密钥解析失败后清理部分初始化的验签上下文");
+
+    /* init 失败时释放验签器，但遵守驱动 init 失败自清理契约，不调用驱动 abort。 */
+    memset(&verifier, 0, sizeof(verifier));
+    mock_driver_reset(&mcu);
+    mcu.inject_fail_init = true;
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT(feed_stream_chunks(&core, efw, n, 64U, false) != 0,
+                "存储驱动 init 失败时拒绝升级");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "存储驱动 init 失败后清理验签上下文");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "驱动 init 失败时核心不调用驱动 abort");
+
+    /* 头部与同一数据块多收时验签器必须清理，目标驱动尚未启动。 */
+    memset(&verifier, 0, sizeof(verifier));
+    mock_driver_reset(&mcu);
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    efw[n] = 0xA5U;
+    TEST_ASSERT(feed_stream_chunks(&core, efw, n + 1U, n + 1U, false) != 0,
+                "头部所在首包中的多收字节被拒绝");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "首包多收拒绝后清理验签器");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "首包多收时目标驱动尚未启动");
+
+    /* A verifier failure after flash readback aborts and never marks the image valid. */
+    memset(&verifier, 0, sizeof(verifier));
+    verifier.fail_finish = true;
+    mock_driver_reset(&mcu);
+    setup_signature_core(&core, &mcu, &verifier);
+    n = build_signed_test_efw(efw, payload, sizeof(payload));
+    memcpy(verifier.expected, efw, n);
+    verifier.expected_len = n;
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, n, 64U, false), 0,
+                       "签名包接收成功，提交阶段再验签失败");
+    TEST_ASSERT(ecat_foe_core_on_end(&core) != 0, "验签失败阻止升级提交");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "验签失败不调用 finalize");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "验签失败走驱动 abort 清理");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -443,14 +669,14 @@ static void test_header_rejections_driver_zero_calls(void)
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
 
-    uint8_t efw[128];
+    uint8_t efw[256];
 
     /* A. magic 错 */
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, NULL, 0);
     efw[0] ^= 0xFF; /* 破坏 magic */
-    int ret = ecat_foe_core_on_data(&core, efw, 64);
+    int ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "magic 错被拒");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "magic 错驱动 init 必须为 0");
     TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "magic 错驱动 invalidate 必须为 0");
@@ -460,8 +686,8 @@ static void test_header_rejections_driver_zero_calls(void)
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, NULL, 0);
-    efw[4] = 2; /* version = 2 */
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    efw[4] = 3; /* unsupported format version */
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "version 错被拒");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "version 错驱动 init 必须为 0");
 
@@ -470,7 +696,7 @@ static void test_header_rejections_driver_zero_calls(void)
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0x0001U, 0x01000000U, 0, NULL, 0);
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "flags 非零被拒");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "flags 非零驱动 init 必须为 0");
 
@@ -479,8 +705,8 @@ static void test_header_rejections_driver_zero_calls(void)
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, NULL, 0);
-    efw[63] ^= 0xFF;
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    efw[147] ^= 0xFF;
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "Header CRC 错被拒");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "Header CRC 错驱动 init 必须为 0");
 
@@ -490,7 +716,7 @@ static void test_header_rejections_driver_zero_calls(void)
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0,
                    0x01000000U, 0, NULL, 0);
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "零长度 payload 固件必须被拒绝");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "空固件不得调用驱动 init");
     TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "空固件不得清除原镜像有效标记");
@@ -577,7 +803,7 @@ static void test_stream_length_under_and_over_receive(void)
     /* A. 少收 */
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 64); /* 仅发头 */
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN); /* 仅发容器头 */
     int ret = ecat_foe_core_on_end(&core);
     TEST_ASSERT(ret != 0, "少收应当报错");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_UNDER_RECEIVE, "应当报 UNDER_RECEIVE");
@@ -588,7 +814,7 @@ static void test_stream_length_under_and_over_receive(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 64 + 8);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN + 8U);
     uint32_t writes_before = mcu.count_write;
 
     uint8_t over_chunk[20];
@@ -615,7 +841,7 @@ static void test_crc_and_readback_errors(void)
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     uint8_t bad_stream[256];
     memcpy(bad_stream, efw, efw_len);
-    bad_stream[64] ^= 0xFF; /* 篡改负载 */
+    bad_stream[ECAT_FOE_EFW_HEADER_MIN_LEN] ^= 0xFF; /* 篡改负载 */
     feed_stream_chunks(&core, bad_stream, efw_len, 64, false);
     int ret = ecat_foe_core_on_end(&core);
     TEST_ASSERT(ret != 0, "流 CRC 错拒绝提交");
@@ -685,7 +911,7 @@ static void test_on_abort_and_stack_abort_self_healing(void)
 
     /* A. 中途调用 on_abort */
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 64);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_DATA, "已进入 DATA 态");
     ecat_foe_core_on_abort(&core);
     TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_IDLE, "on_abort 后重置为 IDLE");
@@ -695,7 +921,7 @@ static void test_on_abort_and_stack_abort_self_healing(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 64);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     int ret_heal = test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     TEST_ASSERT_EQ_INT(ret_heal, 0, "新会话自愈成功");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "上一残留驱动 abort 被成功自愈触发");
@@ -717,7 +943,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
     /* 恰好等于 64 字节 -> 成功 */
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 64);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    int ret = ecat_foe_core_on_data(&core, efw, 64);
+    int ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret, 0, "容量等于上限应当通过");
 
     /* 超 1 字节 -> 拒绝 */
@@ -726,7 +952,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
     core.cfg.targets[0].max_payload_size = 64U;
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 65);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "容量超 1 字节必须拒绝");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "超容量驱动 init 不应被调用");
 }
@@ -786,7 +1012,7 @@ static void test_anti_rollback_full_behavior(void)
     s_mock_get_floor_fail = true; /* 注入获取失败 */
     size_t len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x02000000U, 0, payload, 16);
     test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
-    int ret = ecat_foe_core_on_data(&core, efw, 64);
+    int ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "get floor 失败必须拒绝升级");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET, "报 ANTI_ROLLBACK_GET");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "get floor 失败驱动不能调 init");
@@ -799,7 +1025,7 @@ static void test_anti_rollback_full_behavior(void)
     port_set_version_floor(1, 0x01000000U);
     len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x00090000U, 0, payload, 16);
     test_wrq(&core, "SERVO_DRV_MCU_V0.9.0.0.efw");
-    ret = ecat_foe_core_on_data(&core, efw, 64);
+    ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ret != 0, "降级必须被拦截");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_HDR_VERIFY, "报 HDR_VERIFY");
 
@@ -924,7 +1150,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
 
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
-    efw[64] ^= 0xFF; /* 头部通过且驱动已 init，破坏 payload 导致校验失败 */
+    efw[ECAT_FOE_EFW_HEADER_MIN_LEN] ^= 0xFF; /* 头部通过且驱动已 init，破坏 payload 导致校验失败 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
     TEST_ASSERT(ret_cb != 0, "失败回调返回非零");
     TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "失败后核心机状态置为 ERROR");
@@ -968,22 +1194,22 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     /* 将 buffer_size 设为 64，构造 64 字节负载 (总长 128 字节，正好为 2 个 64 字节整包，不触发短包结束，必须由 0 长度包结束) */
-    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_init(&adapter, &core, 0U);
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     uint8_t payload64[64];
     for (int i = 0; i < 64; i++) payload64[i] = (uint8_t)(i + 1);
     uint8_t efw128[256];
     size_t efw128_len = build_test_efw(efw128, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload64, 64);
-    TEST_ASSERT_EQ_INT(efw128_len, 128, "总固件长度为 128 字节");
+    TEST_ASSERT_EQ_INT(efw128_len, 212, "总固件长度为 128 字节");
 
     /* A. 故意诱发 0 长度包结束时失败 (CRC 错误) */
     ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
-    /* 发送头部 64 字节整包 */
-    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, 64);
-    TEST_ASSERT_EQ_INT(ret_cb, 0, "发送第 1 块 64 字节成功");
+    /* 发送完整容器头部整包，保留会话以便单独验证负载 CRC 失败。 */
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "发送容器头部成功");
     /* 发送有效载荷 64 字节整包，但故意篡改第 1 字节导致 CRC 校验失败 */
     uint8_t bad_chunk[64];
-    memcpy(bad_chunk, efw128 + 64, 64);
+    memcpy(bad_chunk, efw128 + ECAT_FOE_EFW_HEADER_MIN_LEN, 64);
     bad_chunk[0] ^= 0xAA;
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, bad_chunk, 64);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "第 2 块整包由于尚未触发 on_end 返回 0");
@@ -996,10 +1222,10 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     mock_driver_reset(&mcu);
     ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     /* 发送正确的第 1 块 64 字节 */
-    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, 64);
-    TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试第 1 块 64 字节成功");
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试容器头部成功");
     /* 发送正确的第 2 块 64 字节 */
-    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128 + 64, 64);
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128 + ECAT_FOE_EFW_HEADER_MIN_LEN, 64);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试第 2 块 64 字节成功");
     /* 发送 0 长度包闭环 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, NULL, 0);
@@ -1025,15 +1251,15 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     /* 设置 buffer_size 为 64，发送 64 字节整包不触发短包结束，仅完成头部装配与驱动 invalidate */
-    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
 
-    /* 主站发起 WRQ 并发送 64 字节头部 */
+    /* 主站发起 WRQ 并发送完整头部；整包边界不触发短包结束 */
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, 64);
+    ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "头部写入成功");
     TEST_ASSERT(core.session_active, "会话处于活跃状态");
     TEST_ASSERT(core.driver_invalidated, "驱动已成功执行 invalidate (固件标记已失效)");
@@ -1081,7 +1307,7 @@ static void test_config_validation_rules(void)
     cfg.project_name = "SERVO_DRV";
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
     cfg.targets[0].max_payload_size = 384U * 1024U;
@@ -1154,13 +1380,16 @@ static void test_config_validation_rules(void)
     TEST_ASSERT_EQ_INT(reinit_core.last_error, ECAT_FOE_CORE_ERR_INVALID_STATE, "不可用 core 错误码为 ERR_INVALID_STATE");
 
     /* C. max_header_size 下限/对齐/上限检查 */
+    cfg.max_header_size = 64U;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0,
+                "统一格式需要至少 148 字节头缓冲");
     cfg.max_header_size = 60U; /* < 64 */
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_header_size < 64 必须报错");
     cfg.max_header_size = 65U; /* 非 4 对齐 */
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_header_size 非 4 字节对齐必须报错");
     cfg.max_header_size = 256U; /* > ECAT_FOE_HEADER_BUF_MAX */
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_header_size > 128 必须报错");
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     /* D. 启用目标的驱动及全部 7 个回调完整性逐一校验 */
     cfg.targets[0].driver = NULL;
@@ -1383,15 +1612,15 @@ static void test_same_block_header_over_receive_protects_valid_flag(void)
 
     /* 构造一个首包，其头部声明 payload_length = 16 (总长 80)
      * 但本数据块推送了 64 字节头部 + 40 字节负载 = 104 字节 (同块多收溢出) */
-    uint8_t big_chunk[128];
+    uint8_t big_chunk[256];
     uint8_t payload[40];
     memset(payload, 0x55, sizeof(payload));
     build_test_efw(big_chunk, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
     /* 在末尾追加额外的多收字节，使单块总长达到 104 字节 */
-    memset(big_chunk + 80, 0xAA, 24);
+    memset(big_chunk + ECAT_FOE_EFW_HEADER_MIN_LEN + 16U, 0xAA, 24);
 
     /* 一次性将 104 字节推入核心 */
-    int ret = ecat_foe_core_on_data(&core, big_chunk, 104);
+    int ret = ecat_foe_core_on_data(&core, big_chunk, 188);
     TEST_ASSERT(ret != 0, "同块多收超总长必须立即拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_OVER_RECEIVE, "报 OVER_RECEIVE 熔断");
 
@@ -1478,13 +1707,13 @@ static void test_erase_to_insufficient_erased_end_fails(void)
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     /* 送 64B 头部 + 4B 负载 (residual_len = 4, 此时调用了第 1 次正常擦除) */
-    ecat_foe_core_on_data(&core, efw, 68);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN + 4U);
     TEST_ASSERT_EQ_INT(core.residual_len, 4, "头部完成后残留 4 字节");
     /* 此时强行将 erased_watermark 改小到 4，使得凑满 8 字节时必须再次调 erase_to，并注入擦除不足 */
     core.erased_watermark = 4;
     mcu.inject_insufficient_erase = true;
     /* 再送 4 字节，凑满 8 字节 (触发路径 1) */
-    ret = ecat_foe_core_on_data(&core, efw + 68, 4);
+    ret = ecat_foe_core_on_data(&core, efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 4U, 4);
     TEST_ASSERT(ret != 0, "路径 1: 凑满 write_unit 时 erased_end < need_end 必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_DRV_ERASE, "路径 1 报 DRV_ERASE 错误");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "路径 1 必须调用 abort 释放资源");
@@ -1496,7 +1725,7 @@ static void test_erase_to_insufficient_erased_end_fails(void)
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 4);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     /* 发送 64B 头部 + 4B 负载，全部滞留在 residual_buf 中，尚未触发写入和擦除 */
-    ecat_foe_core_on_data(&core, efw, 68);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN + 4U);
     TEST_ASSERT_EQ_INT(core.residual_len, 4, "4 字节滞留在 residual_buf");
     TEST_ASSERT_EQ_INT(mcu.count_erase, 0, "此时尚未调用擦除");
     /* 注入擦除不足，触发 on_end 补齐写入 (路径 3) */
@@ -1542,7 +1771,7 @@ static void test_padding_capacity_boundary(void)
     /* 发送 4 字节数据滞留于 residual_buf */
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 4);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 68);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN + 4U);
     /* 此时在 on_end 执行前，若分区物理限额被异常收缩为 4 字节 (补齐需要写到第 8 字节) */
     core.cfg.targets[0].max_payload_size = 4U;
     ret = ecat_foe_core_on_end(&core);
@@ -1571,7 +1800,7 @@ static void test_failed_session_new_wrq_full_upgrade_recovery(void)
         temp_cfg.project_name = temp_stack_project;
         temp_cfg.hardware_id = 0x00000001U;
         temp_cfg.local_hw_ver = 1;
-        temp_cfg.max_header_size = 64;
+        temp_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
         temp_cfg.targets[0].target_id = 1;
         temp_cfg.targets[0].enabled = true;
         temp_cfg.targets[0].max_payload_size = 0x00010000U;
@@ -1594,7 +1823,7 @@ static void test_failed_session_new_wrq_full_upgrade_recovery(void)
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     uint8_t bad_efw[256];
     memcpy(bad_efw, efw, efw_len);
-    bad_efw[64] ^= 0xEE; /* 篡改有效 Payload 破坏 CRC */
+    bad_efw[ECAT_FOE_EFW_HEADER_MIN_LEN] ^= 0xEE; /* 篡改有效 Payload 破坏 CRC */
     feed_stream_chunks(&core, bad_efw, efw_len, 32, false);
     int ret_fail = ecat_foe_core_on_end(&core);
     TEST_ASSERT(ret_fail != 0, "上一会话 CRC 损坏必须失败");
@@ -1713,7 +1942,7 @@ static void test_core_deinit_lifecycle(void)
     uint8_t efw[256];
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
     /* 发送 64 字节头部，使驱动执行 init 与 invalidate 并进入活跃会话 */
-    ecat_foe_core_on_data(&core, efw, 64);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(core.session_active, "会话处于活跃状态");
     TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动已执行 init");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "尚未执行 abort");
@@ -1748,7 +1977,7 @@ static void test_core_deinit_lifecycle(void)
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw, 64);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(core.session_active, "会话活跃");
     /* 显式 deinit 安全释放硬件资源 */
     ecat_foe_core_deinit(&core);
@@ -1778,7 +2007,7 @@ static void test_mid_session_drop_same_core_recovery(void)
     /* 初始化核心与驱动 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     s_mock_al_error_calls = 0;
     s_mock_al_error_val = 0;
@@ -1786,7 +2015,7 @@ static void test_mid_session_drop_same_core_recovery(void)
     /* 会话 1: 发起合法 WRQ 并只发送 64 字节头部，模拟写入一部分后主站中途断开/超时 */
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    int ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, 64);
+    int ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "会话 1: 头部写入成功");
     TEST_ASSERT(core.session_active, "会话 1: 处于活跃写入状态");
     TEST_ASSERT(core.driver_invalidated, "会话 1: 驱动已执行 invalidate");
@@ -1850,7 +2079,7 @@ static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     /* Target 1: MCU - user_ctx 明确指向调用方对象 caller_obj */
     cfg.targets[0].target_id = 1;
@@ -1905,7 +2134,7 @@ static void test_100_failed_self_healing_cycles(void)
         TEST_ASSERT_EQ_INT(ret_wrq, 0, "循环中 WRQ 正常受理");
 
         /* 发送 64 字节头部，使驱动 invalidate */
-        int ret_data = ecat_foe_core_on_data(&core, efw, 64);
+        int ret_data = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
         TEST_ASSERT_EQ_INT(ret_data, 0, "头部装配通过");
         TEST_ASSERT(core.session_active, "会话进入活跃");
         TEST_ASSERT(core.driver_invalidated, "驱动已 invalidate");
@@ -1979,7 +2208,7 @@ static void test_null_project_name_rejection(void)
     null_cfg.project_id = 0x10010001U;
     null_cfg.hardware_id = 0x00000001U;
     null_cfg.local_hw_ver = 1U;
-    null_cfg.max_header_size = 128U;
+    null_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     null_cfg.targets[0].target_id = 1;
     null_cfg.targets[0].enabled = true;
     null_cfg.targets[0].max_payload_size = 384U * 1024U;
@@ -2187,7 +2416,7 @@ static void test_hook_invalidate_ok_stream_stops_blocked(void)
     setup_default_core(&core, &mcu, NULL, NULL);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
@@ -2198,7 +2427,7 @@ static void test_hook_invalidate_ok_stream_stops_blocked(void)
     uint8_t payload[16] = {0x01, 0x02};
     uint8_t efw[256];
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    int ret_data = ecat_foe_core_on_data(&core, efw, 64);
+    int ret_data = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_data, 0, "发送 64 字节头部成功返回 0");
     TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功调用");
     TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 成功调用");
@@ -2300,7 +2529,7 @@ static void test_hook_stream_stops_then_new_upgrade_success_not_blocked(void)
     setup_default_core(&core, &mcu, NULL, NULL);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, 64);
+    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
@@ -2312,7 +2541,7 @@ static void test_hook_stream_stops_then_new_upgrade_success_not_blocked(void)
     uint8_t payload[16] = {0x11, 0x22};
     uint8_t efw[256];
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    int ret_data1 = ecat_foe_core_on_data(&core, efw, 64);
+    int ret_data1 = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_data1, 0, "第 1 次发送 64 字节头部成功");
     TEST_ASSERT_EQ_INT(mcu.count_init, 1, "驱动 init 成功");
     TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "驱动 invalidate 成功");
@@ -2379,7 +2608,7 @@ static void test_reproduce_cross_target_incomplete_upgrade_leak(void)
     size_t efw_a_len = build_test_efw(efw_a, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload_a, 16);
     (void)efw_a_len;
 
-    int ret_hdr_a = ecat_foe_core_on_data(&core, efw_a, 64);
+    int ret_hdr_a = ecat_foe_core_on_data(&core, efw_a, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_hdr_a, 0, "目标 A 发送头部成功");
     TEST_ASSERT_EQ_INT(mcu.count_init, 1, "目标 A 驱动 init 成功");
     TEST_ASSERT_EQ_INT(mcu.count_invalidate, 1, "目标 A 驱动 invalidate 成功 (物理固件已失效)");
@@ -2452,7 +2681,7 @@ static void test_cross_target_same_target_recovery(void)
     uint8_t payload[16] = {1, 2};
     uint8_t efw[256];
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    ecat_foe_core_on_data(&core, efw, 64);
+    ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 A 处于未完成状态");
 
     uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
@@ -2503,12 +2732,12 @@ static void test_cross_target_multiple_incomplete_targets(void)
 
     /* 1. 目标 1 (MCU) 启动后失败 */
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw_mcu, 64);
+    ecat_foe_core_on_data(&core, efw_mcu, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 1 未完成");
 
     /* 2. 目标 3 (SII) 启动后也失败 */
     test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw_sii, 64);
+    ecat_foe_core_on_data(&core, efw_sii, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 未完成");
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 1), "目标 1 依然未完成");
 
@@ -2576,7 +2805,7 @@ static void test_cross_target_different_targets_success_interleaving(void)
 
     /* B. 目标 3 升级启动后中断 */
     test_wrq(&core, "SERVO_DRV_SII_V1.0.0.0.efw");
-    ecat_foe_core_on_data(&core, efw3, 64);
+    ecat_foe_core_on_data(&core, efw3, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, 3), "目标 3 未完成");
     TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "存在未完成目标");
 
@@ -2751,6 +2980,7 @@ int main(void)
     RUN_TEST(test_zero_length_chunk_and_exact_division);
     RUN_TEST(test_header_rejections_driver_zero_calls);
     RUN_TEST(test_filename_rejection_driver_zero_calls);
+    RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);
     RUN_TEST(test_stream_length_under_and_over_receive);
     RUN_TEST(test_crc_and_readback_errors);

@@ -69,7 +69,7 @@ int main(void)
     cfg.project_name = "SERVO_DRV";
     cfg.hardware_id = 1U;
     cfg.local_hw_ver = 1U;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg.targets[0].target_id = 1U;
     cfg.targets[0].enabled = true;
     cfg.targets[0].max_payload_size = 4096U;

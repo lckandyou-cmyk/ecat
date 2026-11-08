@@ -177,7 +177,7 @@ int main(void)
         assert(init_rc == 0);
         assert(app.is_initialized == true);
 
-        /* 1. 构造合法 .efw 固件 (64 字节头部 + 128 字节载荷 = 192 字节) */
+        /* 1. 构造合法 v2 .efw 固件 (148 字节头部 + 128 字节载荷 = 276 字节) */
         size_t efw_len = bootloader_master_build_efw(
             s_test_efw_buf,
             sizeof(s_test_efw_buf),
@@ -190,7 +190,7 @@ int main(void)
             0x01000000U, /* 1.0.0.0 */
             s_test_payload,
             sizeof(s_test_payload));
-        assert(efw_len == (64 + sizeof(s_test_payload)));
+        assert(efw_len == (ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_test_payload)));
 
         /* 2. 主站下发 WRQ 写请求 */
         master_foe_response_t resp;
@@ -211,11 +211,16 @@ int main(void)
         /* 满包在 SOES fbuffer 中累积，待短包收尾时统一刷新写入 */
         assert(app.core.state == ECAT_FOE_STATE_WRQ_ACKED);
 
-        /* 4. 主站发送分块 2 (剩余 76 字节短包收尾，触发 FOE_fclose 刷新与驱动闭环) */
-        send_rc = bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 76, &resp);
+        /* 分块 2 继续满包，分块 3 的短包触发 FOE_fclose 与最终校验提交。 */
+        send_rc = bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 116, &resp);
         assert(send_rc == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
         assert(resp.packet_number == 2);
+
+        send_rc = bootloader_master_send_data(&app, &s_foe_cfg, 3, &s_test_efw_buf[232], efw_len - 232U, &resp);
+        assert(send_rc == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(resp.packet_number == 3);
 
         /* 核心与驱动状态断言: 校验通过、驱动初始化、置无效先行、按需擦写与最终提交全闭环 */
         assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
@@ -271,9 +276,13 @@ int main(void)
             assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
             assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 1);
 
-            /* 分块 2: 76 字节短包 (收尾触发 FOE_fclose 与最终校验提交) */
-            assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 76, &resp) == 0);
+            /* 分块 2 满包，分块 3 短包收尾。 */
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 116, &resp) == 0);
             assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 2);
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, 3, &s_test_efw_buf[232],
+                                               ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_test_payload) - 232U,
+                                               &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 3);
 
             assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
             assert(app.flash_drv.is_finalized == true);
@@ -313,7 +322,9 @@ int main(void)
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
 
         /* 发送包含非法头部的数据包 1 */
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 64, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 32, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ERR); /* FOE_OP_ERR */
         assert(resp.error_code == 0x800B);
         assert(app.core.state == ECAT_FOE_STATE_ERROR);
@@ -339,7 +350,9 @@ int main(void)
         assert(bad_efw_len > 0);
 
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 64, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 32, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
         assert(resp.error_code == 0x800B);
         assert(app.core.state == ECAT_FOE_STATE_ERROR);
@@ -370,7 +383,9 @@ int main(void)
         master_foe_response_t resp;
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
         /* 擦除失败导致第 1 包被拒 */
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 64, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 32, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
         assert(resp.error_code == 0x800B);
         assert(app.core.state == ECAT_FOE_STATE_ERROR);
@@ -386,12 +401,14 @@ int main(void)
             BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
             BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
             0x01000000U, s_test_payload, 16);
-        assert(efw_len == 80);
+        assert(efw_len == ECAT_FOE_EFW_HEADER_MIN_LEN + 16U);
 
         app.flash_drv.inject_write_err = true;
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
-        /* 发送 80 字节短包，在执行写入载荷时触发硬件故障 */
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 80, &resp) == 0);
+        /* 首包接收完整 v2 头的一部分，次包补齐头并触发写入故障。 */
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], efw_len - 116U, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
         assert(resp.error_code == 0x800B);
         assert(app.core.state == ECAT_FOE_STATE_ERROR);
@@ -458,7 +475,7 @@ int main(void)
         assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
                                    s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
 
-        /* 构造 200 字节载荷的固件镜像 (64 字节头 + 200 字节载荷 = 264 字节) */
+        /* 构造 200 字节载荷的 v2 固件镜像 (148 字节头 + 200 字节载荷 = 348 字节) */
         uint8_t payload_200[200];
         for (size_t i = 0; i < sizeof(payload_200); i++) {
             payload_200[i] = (uint8_t)(0x30 + (i & 0x3F));
@@ -469,7 +486,7 @@ int main(void)
             BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
             BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
             0x01000000U, payload_200, sizeof(payload_200));
-        assert(efw_200_len == 264);
+        assert(efw_200_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(payload_200));
 
         master_foe_response_t resp;
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
@@ -479,9 +496,11 @@ int main(void)
         assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &efw_200[0], 116, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 1);
 
-        /* 发送分块 2 (116 字节满包，累计接收 232 字节，跨过 64 字节头，核心进入 DATA 态且驱动进入活跃期) */
+        /* 分块 2 后头部仍未完整到达；继续发满包 3，令 SOES 缓冲刷新完整 v2 头与部分载荷。 */
         assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &efw_200[116], 116, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 2);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 3, &efw_200[232], 116, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 3);
 
         /* 确证核心已进入活跃会话且驱动已完成初始化与 invalidate */
         assert(app.core.session_active == true);
@@ -504,13 +523,13 @@ int main(void)
         assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
 
         /* 此时 SOES 经过 FOE_error() -> FOE_abort() -> FOE_init() 自愈复位回 FOE_READY */
-        /* 主站重新发起全新的固件升级全流程 (重新生成 192 字节基准固件) */
+        /* 主站重新发起全新的固件升级全流程 (重新生成 v2 基准固件) */
         size_t retry_len = bootloader_master_build_efw(
             s_test_efw_buf, sizeof(s_test_efw_buf),
             BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
             BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
             0x01000000U, s_test_payload, 128);
-        assert(retry_len == 192);
+        assert(retry_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_test_payload));
 
         assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
@@ -518,8 +537,11 @@ int main(void)
         assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, &s_test_efw_buf[0], 116, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 1);
 
-        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 76, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, &s_test_efw_buf[116], 116, &resp) == 0);
         assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 2);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 3, &s_test_efw_buf[232],
+                                           retry_len - 232U, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 3);
 
         assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
         assert(app.flash_drv.is_finalized == true);

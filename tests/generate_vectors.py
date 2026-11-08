@@ -63,8 +63,8 @@ def generate_all(out_dir: str = None, overwrite: bool = False):
         ] + extra_args
         subprocess.check_call(cmd_pos)
 
-        # 2. 尾部填充例 (MCU 目标, 原始 448 字节, 加上头 64 字节恰好 512 字节, 单包 512 时补 1 字节 0xFF)
-        p_pad = bytes([i % 256 for i in range(448)])
+        # 2. 尾部填充例 (MCU 目标, 原始 364 字节, 加上头 148 字节恰好 512 字节)
+        p_pad = bytes([i % 256 for i in range(364)])
         bin_pad = os.path.join(tmp_bin_dir, 'tmp_pad.bin')
         with open(bin_pad, 'wb') as f:
             f.write(p_pad)
@@ -84,7 +84,7 @@ def generate_all(out_dir: str = None, overwrite: bool = False):
         ] + extra_args
         subprocess.check_call(cmd_pad)
 
-        # 3. SII 偶数填充例 (SII 目标, 原始 448 字节, 加上头 64 字节恰好 512 字节, 单包 512 时补 2 字节 0xFF)
+        # 3. SII 偶数填充例 (SII 目标, 原始 364 字节, 加上头 148 字节恰好 512 字节)
         out_sii_pad = os.path.join(out_dir, 'padded_sii.efw')
         safe_check_not_symlink(out_sii_pad)
         cmd_sii_pad = [

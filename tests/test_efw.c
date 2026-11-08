@@ -4,7 +4,7 @@
  *
  * 严格覆盖：
  * 1. CRC32 "123456789" 标准测试向量 (0xCBF43926)
- * 2. efw-format-v0.1 第 8 节完整正例，十六进制逐字节比对，C 与 Python 互测
+ * 2. efw-format-v0.2 当前格式正例，C 解析器与 Python 打包器交叉核验
  * 3. 第 8 节 4 个典型反例 (Header CRC 错、少收、flags 非零、多收熔断)
  * 4. 全量边界异常测项 (magic、version、header_len 下限/上限/对齐、reserved 非零、
  *    硬件版本倒置/不在区间、project/hw_id 不符、target 未使能、超容量、防回滚)
@@ -73,23 +73,50 @@ static bool g_efw_test_failed = false;
 } while(0)
 
 /* -------------------------------------------------------------------------- */
-/*             efw-format-v0.1 第 8.1 节规范写死的完整正例数据                */
+/*             规范当前 v2 格式的确定性未签名正例数据                        */
 /* -------------------------------------------------------------------------- */
-static const uint8_t s_spec_valid_efw[80] = {
-    /* 0x0000: Header (64 字节) */
-    0x45, 0x43, 0x46, 0x57, 0x01, 0x00, 0x40, 0x00,
-    0x01, 0x00, 0x01, 0x10, 0x01, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x04, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01,
-    0x10, 0x00, 0x00, 0x00, 0x88, 0xE2, 0xCE, 0xCE,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0xE3, 0x52, 0xC2, 0x61,
+static uint8_t s_spec_valid_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
 
-    /* 0x0040: Valid Payload (16 字节: 0x00..0x0F) */
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
-};
+static void init_valid_vector(void)
+{
+    uint8_t *h = s_spec_valid_efw;
+    memset(h, 0, sizeof(s_spec_valid_efw));
+    h[0] = 0x45; h[1] = 0x43; h[2] = 0x46; h[3] = 0x57;
+    h[4] = ECAT_FOE_EFW_FORMAT_VERSION;
+    h[6] = (uint8_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
+    h[7] = (uint8_t)(ECAT_FOE_EFW_HEADER_MIN_LEN >> 8);
+    h[8] = 0x01; h[9] = 0x00; h[10] = 0x01; h[11] = 0x10;
+    h[12] = 0x01; h[16] = 1; h[18] = 1; h[20] = 1;
+    h[24] = 4; h[25] = 3; h[26] = 2; h[27] = 1;
+    h[28] = 0; h[29] = 0; h[30] = 0; h[31] = 1;
+    h[32] = 16;
+    for (uint8_t i = 0; i < 16; ++i) h[ECAT_FOE_EFW_HEADER_MIN_LEN + i] = i;
+    uint32_t payload_crc = ecat_foe_crc32_calc(h + ECAT_FOE_EFW_HEADER_MIN_LEN, 16U);
+    h[36] = (uint8_t)payload_crc; h[37] = (uint8_t)(payload_crc >> 8);
+    h[38] = (uint8_t)(payload_crc >> 16); h[39] = (uint8_t)(payload_crc >> 24);
+    memcpy(h + 60U, "SIG2", 4U);
+    h[64] = 1U; /* extension version */
+    uint32_t header_crc = ecat_foe_crc32_calc(h, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    h[144] = (uint8_t)header_crc; h[145] = (uint8_t)(header_crc >> 8);
+    h[146] = (uint8_t)(header_crc >> 16); h[147] = (uint8_t)(header_crc >> 24);
+}
+
+/* A legacy v1 unsigned package reconstructed from the historical 64-byte layout. */
+static void build_legacy_v1_vector(uint8_t out[64U + 16U])
+{
+    memset(out, 0, 64U + 16U);
+    memcpy(out, s_spec_valid_efw, 40U);
+    out[4] = 1U;
+    out[5] = 0U;
+    out[6] = 64U;
+    out[7] = 0U;
+    memcpy(out + 64U, s_spec_valid_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 16U);
+    uint32_t crc = ecat_foe_crc32_calc(out, 60U);
+    out[60] = (uint8_t)crc;
+    out[61] = (uint8_t)(crc >> 8);
+    out[62] = (uint8_t)(crc >> 16);
+    out[63] = (uint8_t)(crc >> 24);
+}
 
 /* 辅助函数：构造默认正例从站本地配置 */
 static void get_default_valid_config(ecat_foe_efw_config_t *cfg)
@@ -152,17 +179,17 @@ static void test_spec_section8_positive_example(void)
     ecat_foe_efw_err_t err;
 
     /* 阶段 1: 前 8 字节探测 */
-    err = ecat_foe_efw_parse_stage1(s_spec_valid_efw, 8, 128, &header_len);
+    err = ecat_foe_efw_parse_stage1(s_spec_valid_efw, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &header_len);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 1 探测应当成功");
-    TEST_ASSERT_EQ_INT(header_len, 64, "解析出的头部长度应当为 64");
+    TEST_ASSERT_EQ_INT(header_len, ECAT_FOE_EFW_HEADER_MIN_LEN, "解析出的固定头部长度");
 
     /* 阶段 2: 头部装配与 Header CRC32 校验 */
     ecat_foe_efw_header_t hdr;
-    err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 装配与 CRC 应当成功");
     TEST_ASSERT_EQ_HEX32(hdr.magic, 0x57464345U, "hdr.magic 应为 0x57464345");
-    TEST_ASSERT_EQ_INT(hdr.format_version, 1, "hdr.format_version 应为 1");
-    TEST_ASSERT_EQ_INT(hdr.header_length, 64, "hdr.header_length 应为 64");
+    TEST_ASSERT_EQ_INT(hdr.format_version, ECAT_FOE_EFW_FORMAT_VERSION, "当前格式版本号");
+    TEST_ASSERT_EQ_INT(hdr.header_length, ECAT_FOE_EFW_HEADER_MIN_LEN, "当前固定头部长度");
     TEST_ASSERT_EQ_HEX32(hdr.project_id, 0x10010001U, "hdr.project_id 应为 0x10010001");
     TEST_ASSERT_EQ_HEX32(hdr.hardware_id, 0x00000001U, "hdr.hardware_id 应为 0x00000001");
     TEST_ASSERT_EQ_INT(hdr.hw_ver_min, 1, "hdr.hw_ver_min 应为 1");
@@ -173,10 +200,10 @@ static void test_spec_section8_positive_example(void)
     TEST_ASSERT_EQ_HEX32(hdr.min_allow_version, 0x01000000U, "hdr.min_allow_version 应为 0x01000000");
     TEST_ASSERT_EQ_INT(hdr.payload_length, 16, "hdr.payload_length 应为 16");
     TEST_ASSERT_EQ_HEX32(hdr.payload_crc32, 0xCECEE288U, "hdr.payload_crc32 应为 0xCECEE288");
-    TEST_ASSERT_EQ_HEX32(hdr.header_crc32, 0x61C252E3U, "hdr.header_crc32 应为 0x61C252E3");
+    TEST_ASSERT_EQ_HEX32(hdr.header_crc32, ecat_foe_crc32_calc(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U), "头部 CRC 与规范覆盖范围一致");
 
     /* 验证 Payload 数据流 CRC32 */
-    uint32_t calc_p_crc = ecat_foe_crc32_calc(s_spec_valid_efw + 64, 16);
+    uint32_t calc_p_crc = ecat_foe_crc32_calc(s_spec_valid_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 16);
     TEST_ASSERT_EQ_HEX32(calc_p_crc, hdr.payload_crc32, "有效负载数据流计算 CRC32 与头部应严格一致");
 
     /* 阶段 3: 全量元数据安全核验 */
@@ -186,26 +213,37 @@ static void test_spec_section8_positive_example(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 3 元数据安全核验应当成功");
 }
 
+static void test_legacy_v1_rejected(void)
+{
+    uint8_t legacy[64U + 16U];
+    uint16_t header_len = 0U;
+    build_legacy_v1_vector(legacy);
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage1(legacy, 8U,
+                      ECAT_FOE_EFW_HEADER_MIN_LEN, &header_len),
+                      ECAT_FOE_EFW_ERR_FORMAT_VERSION,
+                      "旧格式必须拒绝，保持单一容器格式");
+}
+
 /**
  * 测项 3: 反例 1 - Header CRC 损坏或被篡改
  */
 static void test_negative_case1_bad_header_crc(void)
 {
-    uint8_t bad_efw[64];
-    memcpy(bad_efw, s_spec_valid_efw, 64);
+    uint8_t bad_efw[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(bad_efw, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
 
     /* 篡改末尾 Header CRC 为 0x9E3DAD1C */
-    bad_efw[60] = 0x1C;
-    bad_efw[61] = 0xAD;
-    bad_efw[62] = 0x3D;
-    bad_efw[63] = 0x9E;
+    bad_efw[144] = 0x1C;
+    bad_efw[145] = 0xAD;
+    bad_efw[146] = 0x3D;
+    bad_efw[147] = 0x9E;
 
     uint16_t header_len = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(bad_efw, 8, 128, &header_len);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(bad_efw, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &header_len);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "反例 1 阶段 1 应当通过");
 
     ecat_foe_efw_header_t hdr;
-    err = ecat_foe_efw_parse_stage2(bad_efw, 64, &hdr);
+    err = ecat_foe_efw_parse_stage2(bad_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HEADER_CRC, "反例 1 阶段 2 应当检出 Header CRC32 不匹配");
 }
 
@@ -216,12 +254,12 @@ static void test_negative_case2_short_stream(void)
 {
     /* 阶段 1 和阶段 2 解析头部 */
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "头部应当合法");
 
     /* 模拟传输结束时的总长度校验规则 */
     uint32_t expected_total = hdr.header_length + hdr.payload_length;
-    TEST_ASSERT_EQ_INT(expected_total, 80, "期望总长度应为 80 字节");
+    TEST_ASSERT_EQ_INT(expected_total, 164, "期望总长度应为头部和负载总和");
 
     uint32_t actual_received = 76U;  /* 少收 4 字节 */
     TEST_ASSERT(actual_received != expected_total, "传输结束时实际长度不等于 Expected_Total 判定为失败");
@@ -232,24 +270,19 @@ static void test_negative_case2_short_stream(void)
  */
 static void test_negative_case3_bad_flags(void)
 {
-    /* 严格按照 efw-format 8.2 反例 3 十六进制转储 */
-    static const uint8_t s_case3_header[64] = {
-        0x45, 0x43, 0x46, 0x57, 0x01, 0x00, 0x40, 0x00,
-        0x01, 0x00, 0x01, 0x10, 0x01, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,  /* 偏移 0x16-0x17 flags = 0x0001 */
-        0x04, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x10, 0x00, 0x00, 0x00, 0x88, 0xE2, 0xCE, 0xCE,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x01, 0xAF, 0x4A, 0xEC   /* header_crc32 = 0xEC4AAF01 */
-    };
+    uint8_t s_case3_header[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(s_case3_header, s_spec_valid_efw, sizeof(s_case3_header));
+    s_case3_header[22] = 1U; /* flags = 1 */
+    uint32_t crc = ecat_foe_crc32_calc(s_case3_header, sizeof(s_case3_header) - 4U);
+    s_case3_header[144] = (uint8_t)crc; s_case3_header[145] = (uint8_t)(crc >> 8);
+    s_case3_header[146] = (uint8_t)(crc >> 16); s_case3_header[147] = (uint8_t)(crc >> 24);
 
     uint16_t header_len = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(s_case3_header, 8, 128, &header_len);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(s_case3_header, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &header_len);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "反例 3 阶段 1 应当通过");
 
     ecat_foe_efw_header_t hdr;
-    err = ecat_foe_efw_parse_stage2(s_case3_header, 64, &hdr);
+    err = ecat_foe_efw_parse_stage2(s_case3_header, sizeof(s_case3_header), &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "反例 3 阶段 2 Header CRC 自洽应当通过");
     TEST_ASSERT_EQ_INT(hdr.flags, 0x0001, "hdr.flags 应当为 0x0001");
 
@@ -265,14 +298,14 @@ static void test_negative_case3_bad_flags(void)
 static void test_negative_case4_over_receive_fuse(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "头部应当合法");
 
     uint64_t expected_total = (uint64_t)hdr.header_length + (uint64_t)hdr.payload_length; /* 80 */
-    TEST_ASSERT_EQ_INT((int)expected_total, 80, "Expected_Total 应为 80");
+    TEST_ASSERT_EQ_INT((int)expected_total, 164, "Expected_Total 应为固定头部加负载");
 
     /* 模拟数据包流式累加接收 */
-    uint64_t rx_offset = 64;  /* 已接收头部 64 字节 */
+    uint64_t rx_offset = ECAT_FOE_EFW_HEADER_MIN_LEN;  /* 已接收完整头部 */
     uint32_t block_len = 20;  /* 某次到达 20 字节 Payload (期望仅 16 字节) */
 
     bool fuse_triggered = false;
@@ -287,27 +320,27 @@ static void test_negative_case4_over_receive_fuse(void)
  */
 static void test_edge_case_magic_err(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     buf[0] = 0xAA; buf[1] = 0xBB; buf[2] = 0xCC; buf[3] = 0xDD;
 
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 0U, &hlen);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_MAGIC, "magic 错误应当被阶段 1 检出");
 }
 
 /**
- * 测项 8: 边界异常 - format_version 不是 1
+ * 测项 8: 边界异常 - format_version 不受支持
  */
 static void test_edge_case_format_version_err(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
-    buf[4] = 0x02; buf[5] = 0x00; /* format_version = 2 */
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    buf[4] = 0x03; buf[5] = 0x00; /* unsupported format_version */
 
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
-    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_FORMAT_VERSION, "format_version != 1 应当被阶段 1 检出");
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 0U, &hlen);
+    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_FORMAT_VERSION, "不支持的 format_version 应当被阶段 1 检出");
 }
 
 /**
@@ -315,12 +348,12 @@ static void test_edge_case_format_version_err(void)
  */
 static void test_edge_case_header_len_min(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     buf[6] = 0x3C; buf[7] = 0x00; /* header_length = 60 */
 
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HEADER_LEN_MIN, "header_length < 64 应当被阶段 1 检出");
 }
 
@@ -329,12 +362,12 @@ static void test_edge_case_header_len_min(void)
  */
 static void test_edge_case_header_len_max(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     buf[6] = 0x00; buf[7] = 0x01; /* header_length = 256 */
 
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen); /* max_header_len = 128 */
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen); /* max_header_len = 128 */
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HEADER_LEN_MAX, "header_length > max 应当被阶段 1 检出");
 }
 
@@ -343,12 +376,12 @@ static void test_edge_case_header_len_max(void)
  */
 static void test_edge_case_header_len_align(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
-    buf[6] = 0x41; buf[7] = 0x00; /* header_length = 65 */
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    buf[6] = 0x95; buf[7] = 0x00; /* header_length = 149 */
 
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(buf, 8, 0U, &hlen);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN, "header_length % 4 != 0 应当被阶段 1 检出");
 }
 
@@ -357,19 +390,19 @@ static void test_edge_case_header_len_align(void)
  */
 static void test_edge_case_reserved_nonzero(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     buf[0x28 + 5] = 0xFF; /* 注入非零 */
 
     /* 重算 CRC 使得阶段 2 能够通过，专门考察阶段 3 */
-    uint32_t new_crc = ecat_foe_crc32_calc(buf, 60);
-    buf[60] = (uint8_t)(new_crc & 0xFF);
-    buf[61] = (uint8_t)((new_crc >> 8) & 0xFF);
-    buf[62] = (uint8_t)((new_crc >> 16) & 0xFF);
-    buf[63] = (uint8_t)((new_crc >> 24) & 0xFF);
+    uint32_t new_crc = ecat_foe_crc32_calc(buf, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    buf[144] = (uint8_t)(new_crc & 0xFF);
+    buf[145] = (uint8_t)((new_crc >> 8) & 0xFF);
+    buf[146] = (uint8_t)((new_crc >> 16) & 0xFF);
+    buf[147] = (uint8_t)((new_crc >> 24) & 0xFF);
 
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, sizeof(buf), &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应装配成功");
 
     ecat_foe_efw_config_t cfg;
@@ -383,19 +416,19 @@ static void test_edge_case_reserved_nonzero(void)
  */
 static void test_edge_case_hw_ver_min_gt_max(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
     buf[0x10] = 0x05; buf[0x11] = 0x00; /* min = 5 */
     buf[0x12] = 0x02; buf[0x13] = 0x00; /* max = 2 */
 
-    uint32_t new_crc = ecat_foe_crc32_calc(buf, 60);
-    buf[60] = (uint8_t)(new_crc & 0xFF);
-    buf[61] = (uint8_t)((new_crc >> 8) & 0xFF);
-    buf[62] = (uint8_t)((new_crc >> 16) & 0xFF);
-    buf[63] = (uint8_t)((new_crc >> 24) & 0xFF);
+    uint32_t new_crc = ecat_foe_crc32_calc(buf, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    buf[144] = (uint8_t)(new_crc & 0xFF);
+    buf[145] = (uint8_t)((new_crc >> 8) & 0xFF);
+    buf[146] = (uint8_t)((new_crc >> 16) & 0xFF);
+    buf[147] = (uint8_t)((new_crc >> 24) & 0xFF);
 
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, sizeof(buf), &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -410,7 +443,7 @@ static void test_edge_case_hw_ver_min_gt_max(void)
 static void test_edge_case_local_hw_ver_not_supported(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -427,7 +460,7 @@ static void test_edge_case_local_hw_ver_not_supported(void)
 static void test_edge_case_id_mismatch(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -451,7 +484,7 @@ static void test_edge_case_id_mismatch(void)
 static void test_edge_case_target_not_enabled(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -468,7 +501,7 @@ static void test_edge_case_target_not_enabled(void)
 static void test_edge_case_payload_too_large(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -481,14 +514,14 @@ static void test_edge_case_payload_too_large(void)
 
 static void test_zero_length_payload_rejected(void)
 {
-    uint8_t empty_efw[64];
+    uint8_t empty_efw[ECAT_FOE_EFW_HEADER_MIN_LEN];
     memcpy(empty_efw, s_spec_valid_efw, sizeof(empty_efw));
     memset(empty_efw + 32, 0, 8U); /* payload_length=0, CRC32(empty)=0 */
-    uint32_t header_crc = ecat_foe_crc32_calc(empty_efw, 60U);
-    empty_efw[60] = (uint8_t)(header_crc & 0xFFU);
-    empty_efw[61] = (uint8_t)((header_crc >> 8) & 0xFFU);
-    empty_efw[62] = (uint8_t)((header_crc >> 16) & 0xFFU);
-    empty_efw[63] = (uint8_t)((header_crc >> 24) & 0xFFU);
+    uint32_t header_crc = ecat_foe_crc32_calc(empty_efw, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    empty_efw[144] = (uint8_t)(header_crc & 0xFFU);
+    empty_efw[145] = (uint8_t)((header_crc >> 8) & 0xFFU);
+    empty_efw[146] = (uint8_t)((header_crc >> 16) & 0xFFU);
+    empty_efw[147] = (uint8_t)((header_crc >> 24) & 0xFFU);
 
     ecat_foe_efw_header_t hdr;
     TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(empty_efw, sizeof(empty_efw), &hdr),
@@ -505,20 +538,20 @@ static void test_zero_length_payload_rejected(void)
  */
 static void test_edge_case_min_allow_version_invalid(void)
 {
-    uint8_t buf[64];
-    memcpy(buf, s_spec_valid_efw, 64);
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
 
     /* 注入 min_allow_version = 0x02000000 (大于 fw_version 0x01020304) */
     buf[0x1C] = 0x00; buf[0x1D] = 0x00; buf[0x1E] = 0x00; buf[0x1F] = 0x02;
 
-    uint32_t new_crc = ecat_foe_crc32_calc(buf, 60);
-    buf[60] = (uint8_t)(new_crc & 0xFF);
-    buf[61] = (uint8_t)((new_crc >> 8) & 0xFF);
-    buf[62] = (uint8_t)((new_crc >> 16) & 0xFF);
-    buf[63] = (uint8_t)((new_crc >> 24) & 0xFF);
+    uint32_t new_crc = ecat_foe_crc32_calc(buf, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    buf[144] = (uint8_t)(new_crc & 0xFF);
+    buf[145] = (uint8_t)((new_crc >> 8) & 0xFF);
+    buf[146] = (uint8_t)((new_crc >> 16) & 0xFF);
+    buf[147] = (uint8_t)((new_crc >> 24) & 0xFF);
 
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(buf, sizeof(buf), &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -534,7 +567,7 @@ static void test_edge_case_min_allow_version_invalid(void)
 static void test_edge_case_anti_rollback(void)
 {
     ecat_foe_efw_header_t hdr;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, 64, &hdr);
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage2(s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
@@ -549,82 +582,40 @@ static void test_edge_case_anti_rollback(void)
 /**
  * 测项 20: 向前兼容性 - header_length = 128 (解析器跳过未知扩展字段)
  */
-static void test_forward_compatibility_128_byte_header(void)
+static void test_noncanonical_header_rejected(void)
 {
-    uint8_t efw_128[128 + 16];
-    memset(efw_128, 0, sizeof(efw_128));
-
-    /* 拷贝基础 60 字节 */
-    memcpy(efw_128, s_spec_valid_efw, 60);
-
-    /* 设置 header_length = 128 (0x0080) */
-    efw_128[6] = 0x80;
-    efw_128[7] = 0x00;
-
-    /* 填充 0x40 - 123 (共 64 字节未知扩展字段) */
-    for (size_t i = 64; i < 124; i++) {
-        efw_128[i] = (uint8_t)(i ^ 0x5A);
-    }
-
-    /* 位于 header_length - 4 (124..127) 处写入覆盖前 124 字节的 Header CRC32 */
-    uint32_t h_crc_128 = ecat_foe_crc32_calc(efw_128, 124);
-    efw_128[124] = (uint8_t)(h_crc_128 & 0xFF);
-    efw_128[125] = (uint8_t)((h_crc_128 >> 8) & 0xFF);
-    efw_128[126] = (uint8_t)((h_crc_128 >> 16) & 0xFF);
-    efw_128[127] = (uint8_t)((h_crc_128 >> 24) & 0xFF);
-
-    /* 追加 16 字节有效负载 (位于 offset 128) */
-    memcpy(efw_128 + 128, s_spec_valid_efw + 64, 16);
-
-    /* 阶段 1 探测 (max_header_len = 128) */
-    uint16_t out_hlen = 0;
-    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(efw_128, 8, 128, &out_hlen);
-    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "128 字节头部阶段 1 应当探测成功");
-    TEST_ASSERT_EQ_INT(out_hlen, 128, "探测出的 header_length 应为 128");
-
-    /* 阶段 2 装配与 CRC */
-    ecat_foe_efw_header_t hdr;
-    err = ecat_foe_efw_parse_stage2(efw_128, 128, &hdr);
-    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "128 字节头部阶段 2 CRC 校验应当通过");
-    TEST_ASSERT_EQ_INT(hdr.header_length, 128, "装配后的 header_length 应为 128");
-    TEST_ASSERT_EQ_HEX32(hdr.header_crc32, h_crc_128, "Header CRC32 应匹配 124 字节覆盖范围计算值");
-    TEST_ASSERT_EQ_HEX32(hdr.project_id, 0x10010001U, "基础字段反序列化正常");
-
-    /* 阶段 3 全量元数据安全核验 */
-    ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
-    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "128 字节扩展头部阶段 3 安全核验应当通过");
-
-    /* 验证有效负载偏移跳过未知扩展字段 */
-    uint32_t p_crc = ecat_foe_crc32_calc(efw_128 + hdr.header_length, hdr.payload_length);
-    TEST_ASSERT_EQ_HEX32(p_crc, hdr.payload_crc32, "跳过 64 字节扩展区后 Payload CRC 应依然吻合");
+    uint8_t header[ECAT_FOE_EFW_HEADER_MIN_LEN];
+    memcpy(header, s_spec_valid_efw, sizeof(header));
+    header[6] = 0x98U; header[7] = 0U;
+    uint16_t length = 0U;
+    ecat_foe_efw_err_t err = ecat_foe_efw_parse_stage1(header, 8U, 0U, &length);
+    TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_SIGNATURE_FORMAT,
+                       "统一格式拒绝可变头长度，避免旧式未知扩展歧义");
 }
 
-
 /**
- * 测项 21: 属性测试 - 64 字节头部 512 种单比特翻转全拒绝
+ * 测项 21: 属性测试 - 当前固定头部 512 种单比特翻转全拒绝
  */
 static void test_property_512_bit_flips(void)
 {
-    uint8_t buf[64];
+    uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
     ecat_foe_efw_config_t cfg;
     get_default_valid_config(&cfg);
 
     int failed_rejections = 0;
     for (size_t byte_idx = 0; byte_idx < 64; byte_idx++) {
         for (int bit_idx = 0; bit_idx < 8; bit_idx++) {
-            memcpy(buf, s_spec_valid_efw, 64);
+            memcpy(buf, s_spec_valid_efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
             buf[byte_idx] ^= (uint8_t)(1U << bit_idx);
 
             uint16_t hlen = 0;
-            ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(buf, 8, 128, &hlen);
+            ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(buf, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
             if (err1 != ECAT_FOE_EFW_OK) {
                 continue;
             }
 
             ecat_foe_efw_header_t hdr;
-            ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(buf, 64, &hdr);
+            ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(buf, sizeof(buf), &hdr);
             if (err2 != ECAT_FOE_EFW_OK) {
                 continue;
             }
@@ -647,7 +638,7 @@ static void test_property_truncation(void)
 {
     for (size_t len = 0; len < 64; len++) {
         uint16_t hlen = 0;
-        ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(s_spec_valid_efw, len, 128, &hlen);
+        ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(s_spec_valid_efw, len, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
         if (len < 8) {
             TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 1 长度 < 8 必须返回 BUFFER_TOO_SMALL");
         } else {
@@ -679,11 +670,11 @@ static void verify_vector_file(
     size_t n = fread(file_buf, 1, sizeof(file_buf), fp);
     fclose(fp);
 
-    TEST_ASSERT(n >= 64, "文件大小必须 >= 64 字节");
+    TEST_ASSERT(n >= ECAT_FOE_EFW_HEADER_MIN_LEN, "文件大小必须至少包含固定头部");
     uint16_t hlen = 0;
-    ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(file_buf, 8, 128, &hlen);
+    ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(file_buf, 8, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
     TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_OK, "向量文件阶段 1 探测成功");
-    TEST_ASSERT_EQ_INT(hlen, 64, "向量文件头部长度应为 64");
+    TEST_ASSERT_EQ_INT(hlen, ECAT_FOE_EFW_HEADER_MIN_LEN, "向量文件使用当前固定头长度");
 
     ecat_foe_efw_header_t hdr;
     ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(file_buf, n, &hdr);
@@ -694,15 +685,15 @@ static void verify_vector_file(
     TEST_ASSERT_EQ_INT(hdr.payload_length, expected_payload_len, "有效负载长度应与期望一致");
 
     /* 验证 Payload 数据流 CRC32 */
-    uint32_t calc_p_crc = ecat_foe_crc32_calc(file_buf + 64, hdr.payload_length);
+    uint32_t calc_p_crc = ecat_foe_crc32_calc(file_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, hdr.payload_length);
     TEST_ASSERT_EQ_HEX32(calc_p_crc, hdr.payload_crc32, "文件 Payload CRC 与头中记录必须一致");
 
     if (check_tail_mcu_pad) {
-        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 1], 0xFF, "MCU 尾部填充字节必须为 0xFF");
+        TEST_ASSERT_EQ_INT(file_buf[ECAT_FOE_EFW_HEADER_MIN_LEN + hdr.payload_length - 1], 0xFF, "MCU 尾部填充字节必须为 0xFF");
     }
     if (check_tail_sii_pad) {
-        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 2], 0xFF, "SII 偶数填充字节 1 必须为 0xFF");
-        TEST_ASSERT_EQ_INT(file_buf[64 + hdr.payload_length - 1], 0xFF, "SII 偶数填充字节 2 必须为 0xFF");
+        TEST_ASSERT_EQ_INT(file_buf[ECAT_FOE_EFW_HEADER_MIN_LEN + hdr.payload_length - 2], 0xFF, "SII 偶数填充字节 1 必须为 0xFF");
+        TEST_ASSERT_EQ_INT(file_buf[ECAT_FOE_EFW_HEADER_MIN_LEN + hdr.payload_length - 1], 0xFF, "SII 偶数填充字节 2 必须为 0xFF");
     }
 }
 
@@ -719,11 +710,11 @@ static void test_vector_files_cross_check(void)
     /* 1. 规范正例 (MCU, 16 字节, V1.2.3.4) */
     verify_vector_file(RESOLVE_VEC("positive_mcu.efw"), 1, 0x01020304U, 16, false, false);
 
-    /* 2. MCU 尾部填充例 (448 + 1 = 449 字节) */
-    verify_vector_file(RESOLVE_VEC("padded_mcu.efw"), 1, 0x01020304U, 449, true, false);
+    /* 2. MCU 尾部填充例 (364 + 1 = 365 字节) */
+    verify_vector_file(RESOLVE_VEC("padded_mcu.efw"), 1, 0x01020304U, 365, true, false);
 
-    /* 3. SII 偶数填充例 (448 + 2 = 450 字节) */
-    verify_vector_file(RESOLVE_VEC("padded_sii.efw"), 3, 0x01000000U, 450, false, true);
+    /* 3. SII 偶数填充例 (364 + 2 = 366 字节) */
+    verify_vector_file(RESOLVE_VEC("padded_sii.efw"), 3, 0x01000000U, 366, false, true);
 
     /* 4. FPGA 目标例 (Target 2, 64 字节, V2.0.0.0) */
     verify_vector_file(RESOLVE_VEC("target_fpga.efw"), 2, 0x02000000U, 64, false, false);
@@ -742,15 +733,17 @@ static void test_vector_files_cross_check(void)
 
 int main(void)
 {
+    init_valid_vector();
     printf("====================================================\n");
     printf(" EtherCAT .efw 容器解析与核验单元测试套件 (阶段 A)\n");
-    printf(" 规范依据: docs/spec/efw-format-v0.1.md\n");
+    printf(" 规范依据: docs/spec/efw-format-v0.2.md\n");
     printf(" 编译标准: C99 (-std=c99 -Wall -Wextra -Werror -pedantic)\n");
     printf(" 动态内存: 零 malloc / 零动态分配\n");
     printf("====================================================\n");
 
     RUN_TEST(test_crc32_standard_vector);
     RUN_TEST(test_spec_section8_positive_example);
+    RUN_TEST(test_legacy_v1_rejected);
     RUN_TEST(test_negative_case1_bad_header_crc);
     RUN_TEST(test_negative_case2_short_stream);
     RUN_TEST(test_negative_case3_bad_flags);
@@ -769,7 +762,7 @@ int main(void)
     RUN_TEST(test_zero_length_payload_rejected);
     RUN_TEST(test_edge_case_min_allow_version_invalid);
     RUN_TEST(test_edge_case_anti_rollback);
-    RUN_TEST(test_forward_compatibility_128_byte_header);
+    RUN_TEST(test_noncanonical_header_rejected);
     RUN_TEST(test_property_512_bit_flips);
     RUN_TEST(test_property_truncation);
     RUN_TEST(test_vector_files_cross_check);

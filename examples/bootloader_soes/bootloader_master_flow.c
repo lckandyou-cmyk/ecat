@@ -40,18 +40,18 @@ size_t bootloader_master_build_efw(uint8_t *out_buf,
                                    size_t payload_len)
 {
     (void)project_name;
-    size_t total_len = 64 + payload_len;
+    size_t total_len = ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
     if (out_buf == NULL || out_max < total_len) {
         return 0;
     }
 
-    memset(out_buf, 0, 64);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
     /* 0x00: magic "ECFW" (0x57464345) */
     out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57;
-    /* 0x04: format_version = 1 */
-    out_buf[4] = 0x01; out_buf[5] = 0x00;
-    /* 0x06: header_length = 64 */
-    out_buf[6] = 0x40; out_buf[7] = 0x00;
+    /* 0x04: format_version = 2 */
+    out_buf[4] = 0x02; out_buf[5] = 0x00;
+    /* 0x06: header_length = 148 */
+    out_buf[6] = 0x94; out_buf[7] = 0x00;
     /* 0x08: project_id (小端序) */
     out_buf[8]  = (uint8_t)(project_id & 0xFF);
     out_buf[9]  = (uint8_t)((project_id >> 8) & 0xFF);
@@ -96,16 +96,20 @@ size_t bootloader_master_build_efw(uint8_t *out_buf,
     /* 0x28 - 0x3B: 20 字节保留区 (置 0) */
     memset(&out_buf[40], 0x00, 20);
 
-    /* 0x3C: header_crc32 (对前 60 字节计算 CRC32) */
-    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
-    out_buf[60] = (uint8_t)(h_crc & 0xFF);
-    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
-    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
-    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+    /* SIG2 unsigned extension; all optional signature fields remain zero. */
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U;
+
+    /* Header CRC32 covers bytes [0, 144), including the complete extension. */
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 144U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
 
     /* 拷贝载荷 */
     if (payload != NULL && payload_len > 0) {
-        memcpy(&out_buf[64], payload, payload_len);
+        memcpy(&out_buf[ECAT_FOE_EFW_HEADER_MIN_LEN], payload, payload_len);
     }
     return total_len;
 }

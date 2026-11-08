@@ -61,14 +61,14 @@
 [CORE] Final State: SUCCESS, Last Error: NONE
 
 === Scenario 7: Padded Firmware End-to-End via efw_pack.py ===
-[PACKER] Successfully loaded external .efw (size=129 bytes)
+[PACKER] Successfully loaded external .efw (size=212 bytes)
 [DRV] init(target=1) -> 0 (non-destructive)
 [DRV] invalidate(target=1) -> 0 (flag=0x00000000)
-[DRV] erase_to(need=64) -> erased=4096
-[DRV] write(offset=0, len=64) -> 0
-[DRV] write(offset=64, len=8) -> 0
+[DRV] erase_to(need=40) -> erased=4096
+[DRV] write(offset=0, len=40) -> 0
+[DRV] write(offset=40, len=8) -> 0
+[DRV] write(offset=48, len=16) -> 0
 [DRV] read(offset=0, len=64) -> 0
-[DRV] read(offset=64, len=1) -> 0
 [DRV] finalize(target=1) -> 0 (flag=0x5A5AA5A5)
 [CORE] on_end (padded firmware short packet path) -> OK
 [CORE] Final State: SUCCESS, Last Error: NONE

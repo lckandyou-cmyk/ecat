@@ -15,6 +15,10 @@ static void core_abort_driver(ecat_foe_core_t *core)
     if (core == NULL) {
         return;
     }
+    if (core->signature_active && core->cfg.signature_verifier.abort != NULL) {
+        core->cfg.signature_verifier.abort(core->cfg.signature_verifier.user_ctx);
+        core->signature_active = false;
+    }
     if (core->active_drv != NULL && core->active_drv->abort != NULL) {
         if (core->session_active && !core->driver_abort_called && !core->driver_finalized) {
             core->active_drv->abort(core->active_user_ctx);
@@ -266,14 +270,26 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     temp_pname[plen] = '\0';
     ecat_foe_core_cfg_t local_cfg = *cfg;
 
-    /* 2. 校验头部缓冲上限: 至少 64 字节且 4 字节对齐，且不超过静态数组上限 */
-    if (local_cfg.max_header_size < 64U ||
+    uint16_t min_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if (local_cfg.max_header_size < min_header_size ||
         (local_cfg.max_header_size % 4U) != 0 ||
         local_cfg.max_header_size > ECAT_FOE_HEADER_BUF_MAX) {
         memset(core, 0, sizeof(*core));
         core->state = ECAT_FOE_STATE_ERROR;
         core->is_configured = false;
         core->last_error = ECAT_FOE_CORE_ERR_CFG_HEADER_BUF;
+        return -1;
+    }
+    if (local_cfg.signature_verify_enable &&
+        (local_cfg.max_header_size < ECAT_FOE_EFW_HEADER_MIN_LEN ||
+         local_cfg.signature_verifier.begin == NULL ||
+         local_cfg.signature_verifier.update == NULL ||
+         local_cfg.signature_verifier.finish == NULL ||
+         local_cfg.signature_verifier.abort == NULL)) {
+        memset(core, 0, sizeof(*core));
+        core->state = ECAT_FOE_STATE_ERROR;
+        core->is_configured = false;
+        core->last_error = ECAT_FOE_CORE_ERR_CFG_INVALID;
         return -1;
     }
 
@@ -610,6 +626,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         efw_cfg.hardware_id = core->cfg.hardware_id;
         efw_cfg.local_hw_ver = core->cfg.local_hw_ver;
         efw_cfg.anti_rollback_enable = core->cfg.anti_rollback_enable;
+        efw_cfg.signature_verify_enable = core->cfg.signature_verify_enable;
 
         for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
             efw_cfg.targets[i].enabled = core->cfg.targets[i].enabled;
@@ -679,9 +696,36 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             return -1;
         }
 
+        /* Resolve the trusted key before any target init/invalidate/erase side effect. */
+        if (core->cfg.signature_verify_enable) {
+            ecat_foe_signature_verifier_t *v = &core->cfg.signature_verifier;
+            if (!core->hdr.signed_package) {
+                core->last_error = ECAT_FOE_CORE_ERR_SIGNATURE_REQUIRED;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+            if (v->begin(core->hdr.key_id, core->hdr.signature, v->user_ctx) != 0) {
+                /* begin 回调失败时也清理可能已部分初始化的密码学上下文。 */
+                v->abort(v->user_ctx);
+                core->last_error = ECAT_FOE_CORE_ERR_SIGNATURE_UNAVAILABLE;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+            core->signature_active = true;
+            if (v->update((const uint8_t *)ECAT_FOE_SIGNATURE_DOMAIN,
+                          ECAT_FOE_SIGNATURE_DOMAIN_LEN, v->user_ctx) != 0 ||
+                v->update(core->header_buf, 80U, v->user_ctx) != 0) {
+                core_abort_driver(core);
+                core->last_error = ECAT_FOE_CORE_ERR_SIGNATURE_INVALID;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+        }
+
         /* 关键防御：检查头部与多收同块时在 invalidate 前拒绝，保证旧有效标记不被破坏 */
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
         if ((uint64_t)core->header_total_len + (uint64_t)p_len > expected_total) {
+            core_abort_driver(core); /* 头部已开始验签，但目标驱动尚未初始化。 */
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
             core->state = ECAT_FOE_STATE_ERROR;
             return -1; /* 拒绝且不调用 invalidate */
@@ -694,6 +738,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         /* 全量校验全部通过，此时方可安全调用驱动: 1. init -> 2. invalidate */
         if (core->active_drv->init != NULL) {
             if (core->active_drv->init(core->active_user_ctx) != 0) {
+                core_abort_driver(core); /* 只释放已启动的验签器；init 失败由驱动自行清理。 */
                 core->last_error = ECAT_FOE_CORE_ERR_DRV_INIT;
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
@@ -842,6 +887,14 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
             return -1;
         }
         ecat_foe_crc32_update(&read_crc, read_buf, r_chunk);
+        if (core->cfg.signature_verify_enable &&
+            core->cfg.signature_verifier.update(read_buf, r_chunk,
+                                                 core->cfg.signature_verifier.user_ctx) != 0) {
+            core_abort_driver(core);
+            core->state = ECAT_FOE_STATE_ERROR;
+            core->last_error = ECAT_FOE_CORE_ERR_SIGNATURE_INVALID;
+            return -1;
+        }
         r_offset += r_chunk;
         r_remaining -= r_chunk;
     }
@@ -852,6 +905,18 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         core->state = ECAT_FOE_STATE_ERROR;
         core->last_error = ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH;
         return -1;
+    }
+
+    /* Verify exactly the bytes read back from storage before any activation commit. */
+    if (core->cfg.signature_verify_enable) {
+        if (!core->signature_active ||
+            core->cfg.signature_verifier.finish(core->cfg.signature_verifier.user_ctx) != 0) {
+            core_abort_driver(core);
+            core->state = ECAT_FOE_STATE_ERROR;
+            core->last_error = ECAT_FOE_CORE_ERR_SIGNATURE_INVALID;
+            return -1;
+        }
+        core->signature_active = false;
     }
 
     /* 5. 提交候选镜像；防回滚模式必须由驱动原子提交镜像与版本下限。 */
@@ -989,6 +1054,9 @@ const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err)
     case ECAT_FOE_CORE_ERR_DRV_WRITE: return "Driver write() failed";
     case ECAT_FOE_CORE_ERR_DRV_READ: return "Driver read() failed";
     case ECAT_FOE_CORE_ERR_DRV_FINALIZE: return "Driver finalize() failed";
+    case ECAT_FOE_CORE_ERR_SIGNATURE_REQUIRED: return "Signed firmware required";
+    case ECAT_FOE_CORE_ERR_SIGNATURE_UNAVAILABLE: return "Signature key or verifier unavailable";
+    case ECAT_FOE_CORE_ERR_SIGNATURE_INVALID: return "Firmware signature verification failed";
     case ECAT_FOE_CORE_ERR_OVER_RECEIVE: return "Over-receive detected";
     case ECAT_FOE_CORE_ERR_UNDER_RECEIVE: return "Under-receive detected";
     case ECAT_FOE_CORE_ERR_STREAM_CRC_MISMATCH: return "Stream CRC32 mismatch";

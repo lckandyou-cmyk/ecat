@@ -24,8 +24,8 @@ extern "C" {
 #define ECAT_FOE_HARDWARE_ID                0x00000001U
 #define ECAT_FOE_LOCAL_HW_VER               0x0001U  /* uint16，与 efw 头的 hw_ver_min/max 一致 */
 
-/* 头部装配缓冲上限 (必须 >= 64 字节且为 4 的倍数) */
-#define ECAT_FOE_HEADER_BUF_MAX             128U
+/* 最大受支持头为 v2 的 148 字节；必须 >= 148 且为 4 的倍数。 */
+#define ECAT_FOE_HEADER_BUF_MAX             148U
 
 /* -------------------------------------------------------------------------- */
 /*                             目标升级使能开关                               */
@@ -37,6 +37,9 @@ extern "C" {
 
 /* 防版本回滚开关 (已拍板：默认关闭) */
 #define ECAT_FOE_ANTI_ROLLBACK_ENABLE       0
+
+/* Firmware signature verification is optional and fail-closed when enabled. */
+#define ECAT_FOE_SIGNATURE_VERIFY_ENABLE    0
 
 /* 容灾分区策略 (已拍板：默认单分区覆盖，A/B 双分区可选) */
 #define ECAT_FOE_DUAL_BANK_ENABLE           0

@@ -54,7 +54,7 @@ static void setup_core_and_adapter(ecat_foe_core_t *core, ecat_foe_ssc_adapter_t
     cfg.hardware_id = TEST_HARDWARE_ID;
     cfg.local_hw_ver = TEST_HW_VER;
     cfg.anti_rollback_enable = false;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
@@ -67,14 +67,14 @@ static void setup_core_and_adapter(ecat_foe_core_t *core, ecat_foe_ssc_adapter_t
     ecat_foe_ssc_init(adapter, core, packet_size);
 }
 
-/* 构造合法的固件数据包 (64 字节头部 + 负载) */
+/* 构造合法的 v2 固件数据包 (148 字节头部 + 负载) */
 static size_t build_valid_firmware(uint8_t *out_buf, size_t buf_size, const uint8_t *payload, uint32_t payload_len)
 {
-    assert(buf_size >= 64U + payload_len);
-    memset(out_buf, 0, 64);
+    assert(buf_size >= ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
     out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57; /* ECFW */
-    out_buf[4] = 0x01; out_buf[5] = 0x00;                                         /* v1 */
-    out_buf[6] = 0x40; out_buf[7] = 0x00;                                         /* 64 字节头 */
+    out_buf[4] = 0x02; out_buf[5] = 0x00;                                         /* v2 */
+    out_buf[6] = 0x94; out_buf[7] = 0x00;                                         /* 148 字节头 */
 
     out_buf[8]  = (uint8_t)(TEST_PROJECT_ID & 0xFF);
     out_buf[9]  = (uint8_t)((TEST_PROJECT_ID >> 8) & 0xFF);
@@ -110,16 +110,18 @@ static size_t build_valid_firmware(uint8_t *out_buf, size_t buf_size, const uint
     out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
     out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
 
-    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
-    out_buf[60] = (uint8_t)(h_crc & 0xFF);
-    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
-    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
-    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U;
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 144U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
 
     if (payload != NULL && payload_len > 0) {
-        memcpy(out_buf + 64, payload, payload_len);
+        memcpy(out_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, payload_len);
     }
-    return 64U + payload_len;
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
 }
 
 int main(void)
@@ -135,7 +137,7 @@ int main(void)
     /* [TEST 1] 标准全流程验证: WRQ -> DATA -> 短包 EOF */
     {
         printf("\n[TEST 1] 验证 SSC 适配层标准升级全流程 (短包定界 EOF)...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
@@ -145,12 +147,12 @@ int main(void)
         uint16_t err = ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0);
         assert(err == 0);
 
-        /* 2. DATA 阶段 (分块下发: 64 字节头部块，等于 max_packet_size) */
-        err = ecat_foe_ssc_on_data(&adapter, fw_buf, 64U);
+        /* 2. DATA 阶段: 固定 148 字节头部跨过首个 128 字节满包。 */
+        err = ecat_foe_ssc_on_data(&adapter, fw_buf, 128U);
         assert(err == 0);
 
-        /* 3. DATA 阶段 (32 字节负载块，因 32 < 64 触发短包结束) */
-        err = ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, (uint16_t)sizeof(short_payload));
+        /* 3. 最后一包包含剩余 20 字节头部和 32 字节负载，短包结束。 */
+        err = ecat_foe_ssc_on_data(&adapter, fw_buf + 128U, 52U);
         assert(err == 0);
 
         /* 验证驱动落盘成功，有效标记已写入 */
@@ -183,15 +185,17 @@ int main(void)
     /* [TEST 4] 独立 0 长度包定界验证 */
     {
         printf("[TEST 4] 验证独立 0 长度数据包显式触发 EOF 定界...");
-        setup_core_and_adapter(&core, &adapter, 64U);
-        build_valid_firmware(fw_buf, sizeof(fw_buf), payload, (uint32_t)sizeof(payload));
+        setup_core_and_adapter(&core, &adapter, 128U);
+        uint8_t exact_payload[108];
+        memset(exact_payload, 0x5A, sizeof(exact_payload));
+        build_valid_firmware(fw_buf, sizeof(fw_buf), exact_payload, (uint32_t)sizeof(exact_payload));
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
 
-        /* 灌入完整数据块 (每块 64 字节，恰好等于 max_packet_size，不走短包分支) */
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 64U) == 0);
+        /* 256 字节包分两次 128 字节满包发送，不走短包分支。 */
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 128U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 128U, 128U) == 0);
         assert(s_mock_drv.valid_flag == false); /* 未发 0 长度包前尚未 finalize */
 
         /* 发送独立 0 长度数据包 */
@@ -203,16 +207,16 @@ int main(void)
     /* [TEST 5] 底层 Flash 驱动校验失败时错误码映射 */
     {
         printf("[TEST 5] 验证底层驱动写入失败时映射为 0x800B 并中止...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_core_and_adapter(&core, &adapter, 128U);
         build_valid_firmware(fw_buf, sizeof(fw_buf), payload, (uint32_t)sizeof(payload));
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 128U) == 0);
 
         /* 注入驱动写入故障 */
         s_mock_drv.inject_fail_write = true;
-        uint16_t err = ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 64U);
+        uint16_t err = ecat_foe_ssc_on_data(&adapter, fw_buf + 128U, 84U);
         assert(err == ECAT_FOE_SSC_ERR_PROGERROR); /* 0x800B */
         assert(!adapter.session_active);
         assert(s_mock_drv.valid_flag == false);
@@ -257,7 +261,7 @@ int main(void)
     /* [TEST 8] 短包定界成功落盘后，主站补发 0 长度包幂等确认 */
     {
         printf("[TEST 8] 验证短包定界落盘后补发 0 长度包幂等成功 (返回 0)...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
@@ -265,9 +269,9 @@ int main(void)
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
 
-        /* 分块下发: 64 满包 + 32 短包 (触发成功落盘) */
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 32U) == 0);
+        /* 分块下发: 128 满包 + 52 短包 (触发成功落盘) */
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 128U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 128U, 52U) == 0);
         assert(s_mock_drv.valid_flag == true);
         assert(core.state == ECAT_FOE_STATE_SUCCESS);
 
@@ -280,15 +284,15 @@ int main(void)
     /* [TEST 9] 升级成功后调用 on_abort 保护终态不被重置为 IDLE */
     {
         printf("[TEST 9] 验证升级成功终态在调用 on_abort 时保持 SUCCESS 标记...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 64U) == 0);
-        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 64U, 32U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf, 128U) == 0);
+        assert(ecat_foe_ssc_on_data(&adapter, fw_buf + 128U, 52U) == 0);
         assert(core.state == ECAT_FOE_STATE_SUCCESS);
 
         /* 外部调用 on_abort */

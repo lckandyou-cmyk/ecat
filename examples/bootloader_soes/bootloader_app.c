@@ -37,7 +37,8 @@ int bootloader_app_init(bootloader_app_t *app,
     core_cfg.hardware_id = BOOTLOADER_HARDWARE_ID;
     core_cfg.local_hw_ver = BOOTLOADER_LOCAL_HW_VER;
     core_cfg.anti_rollback_enable = false;
-    core_cfg.max_header_size = 128;
+    core_cfg.signature_verify_enable = (ECAT_FOE_SIGNATURE_VERIFY_ENABLE != 0);
+    core_cfg.max_header_size = ECAT_FOE_HEADER_BUF_MAX;
 
     /* 注册 Target 1 (主 MCU 片内 Flash) */
     core_cfg.targets[0].target_id = BOOTLOADER_TARGET_MCU_ID;

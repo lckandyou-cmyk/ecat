@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix="ecat-release-test-") as directory:
     assert (root / "output.efw").read_bytes() == before
     invalid = bytearray(before)
     struct.pack_into("<HH", invalid, 16, 9, 1)
-    struct.pack_into("<I", invalid, 60, binascii.crc32(invalid[:60]) & 0xffffffff)
+    struct.pack_into("<I", invalid, 144, binascii.crc32(invalid[:144]) & 0xffffffff)
     (root / "invalid-range.efw").write_bytes(invalid)
     run("inspect", "invalid-range.efw", ok=False)
     if os.name != 'nt':

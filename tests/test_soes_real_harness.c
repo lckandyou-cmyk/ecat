@@ -400,8 +400,8 @@ static void test_real_soes_zero_len_vs_short_packet(void)
     printf("  [PASS] 零长度包分支下 FOE_fclose() 返回非零时，真实 SOES 果然忽略返回值并错误发送了成功 ACK\n");
 }
 
-/* 静态构造测试用 .efw 固件流 (64 字节头 + payload) */
-static uint8_t s_efw_test_buf[256];
+/* 静态构造测试用当前 v2 .efw 固件流 (148 字节头 + payload) */
+static uint8_t s_efw_test_buf[512];
 
 static size_t build_harness_test_efw(
     uint8_t *out_buf,
@@ -416,13 +416,13 @@ static size_t build_harness_test_efw(
     const uint8_t *payload,
     uint32_t payload_len)
 {
-    memset(out_buf, 0, 64);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
     /* 0x00: magic "ECFW" */
     out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57;
-    /* 0x04: format_version = 1 */
-    out_buf[4] = 0x01; out_buf[5] = 0x00;
-    /* 0x06: header_length = 64 */
-    out_buf[6] = 0x40; out_buf[7] = 0x00;
+    /* 0x04: format_version = 2 */
+    out_buf[4] = 0x02; out_buf[5] = 0x00;
+    /* 0x06: header_length = 148 */
+    out_buf[6] = 0x94; out_buf[7] = 0x00;
     /* 0x08: project_id */
     out_buf[8] = (uint8_t)(project_id & 0xFF);
     out_buf[9] = (uint8_t)((project_id >> 8) & 0xFF);
@@ -468,17 +468,19 @@ static size_t build_harness_test_efw(
     out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
     out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
 
-    /* 0x3C: header_crc32 */
-    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 60);
-    out_buf[60] = (uint8_t)(h_crc & 0xFF);
-    out_buf[61] = (uint8_t)((h_crc >> 8) & 0xFF);
-    out_buf[62] = (uint8_t)((h_crc >> 16) & 0xFF);
-    out_buf[63] = (uint8_t)((h_crc >> 24) & 0xFF);
+    /* Unsigned SIG2 extension and header CRC32 over bytes [0, 144). */
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U;
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 144U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
 
     if (payload != NULL && payload_len > 0) {
-        memcpy(out_buf + 64, payload, payload_len);
+        memcpy(out_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, payload_len);
     }
-    return 64U + payload_len;
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
 }
 
 /* 静态夹具驱动 */
@@ -502,7 +504,7 @@ static void test_direct_api_calls_defense_without_wrq(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
@@ -559,7 +561,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
@@ -614,27 +616,39 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
         0x01000000U, /* fw_version: 1.0.0.0 (Major=1 in MSB) */
         0,           /* min_allow_version */
         s_payload, 16);
-    assert(efw_len == 80);
+    assert(efw_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_payload));
 
-    /* 4. 主站发送 DATA 报文 (包号 1, 数据长度 80) */
+    /* 4. 主站按 FoE 容量分成满包与短包发送 v2 容器。 */
     MBXcontrol[0].state = MBXstate_inclaim;
-    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116U);
     req->mbxheader.mbxtype = MBXFOE;
     req->foeheader.opcode = FOE_OP_DATA;
     req->foeheader.packetnumber = 1;
-    memcpy(req->data, s_efw_test_buf, efw_len);
+    memcpy(req->data, s_efw_test_buf, 116U);
 
-    /* 驱动真实 SOES 处理 DATA 报文 -> 真实 SOES 自动调用已注册的 write_cb -> 核心状态机写入并 finalize */
+    /* 完整头部尚未到齐，首包只应得到 ACK，不能提交。 */
     ESC_foeprocess();
 
     res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 1);
+    assert(s_harness_drv.count_finalize == 0);
+    mock_master_read_outbox();
+
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len - 116U);
+    req->foeheader.packetnumber = 2;
+    memcpy(req->data, s_efw_test_buf + 116U, efw_len - 116U);
+    ESC_foeprocess();
+    res_mbx = get_last_outbound_foe();
+    assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    assert(res_mbx->foeheader.packetnumber == 2);
+    mock_master_read_outbox();
     assert(s_harness_drv.count_init == 1);
     assert(s_harness_drv.count_write == 1);
     assert(s_harness_drv.count_finalize == 1);
     assert(core.state == ECAT_FOE_STATE_SUCCESS);
-    printf("  [PASS] 真实 SOES 驱动 write_cb 成功流: WRQ->DATA 经真实协议栈驱动回调闭环，驱动 finalize 完成，SOES 回复 ACK(1)\n");
+    printf("  [PASS] 真实 SOES 驱动 write_cb 成功流: v2 头跨 FoE 分包接收，回读验签前置，驱动 finalize 完成并回复 ACK(2)\n");
 
     /* 子测试 5B: 固件数据损坏触发真实 SOES FOE Abort 中止流 */
     reset_soes_environment();
@@ -659,18 +673,28 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     assert(wrq_ret == 0);
     mock_master_read_outbox();
 
-    /* 故意破坏 header CRC (第 60 字节取反) */
-    s_efw_test_buf[60] ^= 0xFF;
+    /* 故意破坏 v2 固定头末尾 CRC (偏移 144) */
+    s_efw_test_buf[144] ^= 0xFF;
 
-    /* 发送损坏的 DATA 报文 */
+    /* 第一包只接收头部前 116 字节。 */
     MBXcontrol[0].state = MBXstate_inclaim;
-    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116U);
     req->mbxheader.mbxtype = MBXFOE;
     req->foeheader.opcode = FOE_OP_DATA;
     req->foeheader.packetnumber = 1;
-    memcpy(req->data, s_efw_test_buf, efw_len);
+    memcpy(req->data, s_efw_test_buf, 116U);
+    ESC_foeprocess();
+    res_mbx = get_last_outbound_foe();
+    assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
-    /* 驱动真实 SOES: 内部调用 write_cb 失败 -> 真实 SOES 触发 FOE_abort(FOE_ERR_PROGERROR) */
+    /* 第二个短包补齐损坏的头，验证 SOES 映射核心拒绝为 FoE ERR。 */
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len - 116U);
+    req->foeheader.packetnumber = 2;
+    memcpy(req->data, s_efw_test_buf + 116U, efw_len - 116U);
+
+    /* 驱动真实 SOES: 第二包触发头 CRC 检查，失败映射为 FOE Abort。 */
     ESC_foeprocess();
 
     res_mbx = get_last_outbound_foe();
@@ -704,7 +728,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
     cfg.project_name = "SERVO_DRV";
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
     cfg.targets[0].max_payload_size = 4096U;
@@ -717,6 +741,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
 
     ecat_foe_soes_adapter_t adapter;
     ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    _FOE *res_mbx = NULL;
 
     /* 1. 主站下发 WRQ 报文 */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -731,7 +756,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
 
     ESC_foeprocess();
 
-    _FOE *res_mbx = get_last_outbound_foe();
+    res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
     assert(res_mbx->foeheader.packetnumber == 0);
     mock_master_read_outbox();
@@ -1006,7 +1031,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     cfg.project_name = "SERVO_DRV";
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
-    cfg.max_header_size = 128U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg.targets[0].target_id = 1;
     cfg.targets[0].enabled = true;
     cfg.targets[0].max_payload_size = 4096U;
@@ -1019,6 +1044,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
 
     ecat_foe_soes_adapter_t adapter;
     ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    _FOE *res_mbx = NULL;
 
     /* 1. WRQ 握手 */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -1035,28 +1061,37 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     assert(wrq_ret == 0);
     mock_master_read_outbox();
 
-    /* 2. 构造补齐后的固件 (单包载荷上限设为 64，总长 80 字节，80 % 64 = 16，末包为 16 字节短包) */
+    /* 2. 构造 v2 固件；FoE DATA 单包上限为 116 字节，容器将跨包接收。 */
     static const uint8_t s_payload[16] = {0x01, 0x02, 0x03, 0x04};
     size_t efw_len = build_harness_test_efw(
         s_efw_test_buf,
         0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0,
         s_payload, 16);
-    assert(efw_len == 80);
+    assert(efw_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_payload));
 
     /* 故意在驱动 finalize 中注入失败，测试短包路径下的错误映射 */
     s_harness_drv.inject_fail_finalize = true;
 
-    /* 发送 DATA 报文 (80 字节短包) */
+    /* 首包满包、次包短包，最终提交阶段注入失败。 */
     MBXcontrol[0].state = MBXstate_inclaim;
-    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116U);
     req->mbxheader.mbxtype = MBXFOE;
     req->foeheader.opcode = FOE_OP_DATA;
     req->foeheader.packetnumber = 1;
-    memcpy(req->data, s_efw_test_buf, efw_len);
+    memcpy(req->data, s_efw_test_buf, 116U);
 
     ESC_foeprocess();
+    res_mbx = get_last_outbound_foe();
+    assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+    mock_master_read_outbox();
 
-    _FOE *res_mbx = get_last_outbound_foe();
+    MBXcontrol[0].state = MBXstate_inclaim;
+    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len - 116U);
+    req->foeheader.packetnumber = 2;
+    memcpy(req->data, s_efw_test_buf + 116U, efw_len - 116U);
+    ESC_foeprocess();
+
+    res_mbx = get_last_outbound_foe();
     /* 关键观察: 补齐避开 0 长度包后，走短包路径，驱动 finalize 失败被正确捕获并映射为 0x800B */
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800B);
@@ -1190,7 +1225,7 @@ static void init_harness_cfg(ecat_foe_core_cfg_t *cfg, mock_driver_t *drv)
     cfg->hardware_id = 0x00000001U;
     cfg->local_hw_ver = 1U;
     cfg->anti_rollback_enable = false;
-    cfg->max_header_size = 128U;
+    cfg->max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg->project_name = "SERVO_DRV";
     cfg->targets[0].target_id = 1;
     cfg->targets[0].enabled = true;
@@ -1220,7 +1255,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 128);
+        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* Case 1A: 报文总长不足 12 字节 (例如只有 8 字节) */
@@ -1268,7 +1303,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 128);
+        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* 从站针对 files[0] 配置专属密码 */
@@ -1407,13 +1442,13 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(strcmp(s_foe_files[0].name, mcu_fn) == 0);
         mock_master_read_outbox();
 
-        /* 构造 116 字节的第一包数据 (64 字节头部 + 52 字节有效载荷)，使传输进入中途 WAITING_FOR_DATA 态 */
+        /* 构造 v2 固定头与载荷，首个 FoE DATA 分包为 116 字节。 */
         static const uint8_t s_p1[52] = {0x11, 0x22, 0x33, 0x44};
         size_t efw_p1_len = build_harness_test_efw(
             s_efw_test_buf,
             0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0,
             s_p1, 52);
-        assert(efw_p1_len == 116);
+        assert(efw_p1_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_p1));
 
         MBXcontrol[0].state = MBXstate_inclaim;
         req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116);
@@ -1475,7 +1510,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 128);
+        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -1500,26 +1535,36 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
         mock_master_read_outbox();
 
-        /* 构造 80 字节固件 (64 字节头 + 16 字节 payload) */
+        /* 构造 v2 固件 (148 字节头 + 16 字节 payload) */
         static const uint8_t s_payload[16] = {0xAA, 0xBB, 0xCC, 0xDD};
         size_t efw_len = build_harness_test_efw(
             s_efw_test_buf,
             0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0,
             s_payload, 16);
-        assert(efw_len == 80);
+        assert(efw_len == ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(s_payload));
 
-        /* 发送 80 字节短包 */
+        /* 第一个满包后再发短包，覆盖完整头部跨包装配。 */
         MBXcontrol[0].state = MBXstate_inclaim;
-        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len);
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + 116U);
         req->mbxheader.mbxtype = MBXFOE;
         req->foeheader.opcode = FOE_OP_DATA;
         req->foeheader.packetnumber = 1;
-        memcpy(req->data, s_efw_test_buf, efw_len);
+        memcpy(req->data, s_efw_test_buf, 116U);
 
         ESC_foeprocess();
         res_mbx = get_last_outbound_foe();
         assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
         assert(res_mbx->foeheader.packetnumber == 1);
+        mock_master_read_outbox();
+
+        MBXcontrol[0].state = MBXstate_inclaim;
+        req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + efw_len - 116U);
+        req->foeheader.packetnumber = 2;
+        memcpy(req->data, s_efw_test_buf + 116U, efw_len - 116U);
+        ESC_foeprocess();
+        res_mbx = get_last_outbound_foe();
+        assert(res_mbx->foeheader.opcode == FOE_OP_ACK);
+        assert(res_mbx->foeheader.packetnumber == 2);
         assert(core.state == ECAT_FOE_STATE_SUCCESS);
         assert(s_harness_drv.valid_flag == true);
         mock_master_read_outbox();
