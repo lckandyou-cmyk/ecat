@@ -162,7 +162,7 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
                                                  (size_t)length,
                                                  data_following,
                                                  now_ticks);
-    if (adapter->async_gate->pending) {
+    if (adapter->async_gate->pending && result == adapter->async_gate->busy_foe_code) {
         return result;
     }
     if (result != 0U) {

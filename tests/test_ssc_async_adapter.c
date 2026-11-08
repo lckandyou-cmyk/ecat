@@ -89,9 +89,16 @@ int main(void)
     const uint8_t first[] = {1U, 2U, 3U};
     CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 10U) == 0x800AU);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, (uint8_t[]){9U, 2U, 3U}, sizeof(first), true, 10U) == ECAT_FOE_SSC_ERR_PACKETNO);
-    CHECK(adapter.async_gate->pending && adapter.session_active && async.starts == 1U);
+    CHECK(!gate.pending && !gate.completed && !adapter.session_active && async.aborts == 1U);
+    CHECK(core.state == ECAT_FOE_STATE_IDLE);
+    CHECK(ecat_foe_ssc_on_main_loop(&adapter, 11U) == ECAT_FOE_SSC_ERR_PACKETNO);
+    CHECK(async.polls == 0U && async.aborts == 1U);
+    ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_PACKETNO);
+    CHECK(async.aborts == 1U);
+    CHECK(ecat_foe_ssc_on_write(&adapter, filename, (uint16_t)(sizeof(filename) - 1U), 0U) == 0U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 11U) == 0x800AU);
-    CHECK(async.starts == 1U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 11U) == 0x800AU);
+    CHECK(async.starts == 2U);
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, 12U) == 0x800AU);
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, 13U) == 0U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 14U) == 0U);
@@ -104,7 +111,14 @@ int main(void)
     CHECK(ecat_foe_ssc_on_data_following(&adapter, final, sizeof(final), false, 23U) == 0U);
     CHECK(!adapter.session_active && adapter.async_final_acked);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, NULL, 0U, false, 24U) == 0U);
-    CHECK(async.starts == 2U && async.aborts == 0U);
+    CHECK(async.starts == 3U && async.aborts == 1U);
+
+    /* Invalid input while work is pending also cancels it exactly once. */
+    CHECK(ecat_foe_ssc_on_write(&adapter, filename, (uint16_t)(sizeof(filename) - 1U), 0U) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 30U) == 0x800AU);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, NULL, 1U, true, 31U) == ECAT_FOE_SSC_ERR_PACKETNO);
+    CHECK(!gate.pending && !adapter.session_active && async.aborts == 2U);
+    CHECK(core.state == ECAT_FOE_STATE_IDLE);
 
     puts("PASS: SSC async callback routing, bDataFollowing and main-loop poll");
     return 0;

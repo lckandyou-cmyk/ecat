@@ -50,7 +50,8 @@ typedef struct {
 
 /*
  * Initialize with caller-owned packet storage and SSC-specific FoE return
- * values. `ops`, storage, and context must outlive the adapter.
+ * values. BUSY must differ from both error values. `ops`, storage, and
+ * context must outlive the adapter.
  */
 int ecat_foe_ssc_async_init(ecat_foe_ssc_async_t *adapter,
                             const ecat_foe_ssc_async_ops_t *ops,

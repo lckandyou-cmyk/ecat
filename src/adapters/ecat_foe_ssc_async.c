@@ -60,7 +60,8 @@ int ecat_foe_ssc_async_init(ecat_foe_ssc_async_t *a,
     if (a == NULL || ops == NULL || ops->start == NULL || ops->poll == NULL ||
         ops->abort == NULL || packet_storage == NULL || packet_capacity == 0U ||
         timeout_ticks >= 0x80000000UL || busy_foe_code == 0U ||
-        packet_error_foe_code == 0U || operation_error_foe_code == 0U) {
+        packet_error_foe_code == 0U || operation_error_foe_code == 0U ||
+        busy_foe_code == packet_error_foe_code || busy_foe_code == operation_error_foe_code) {
         return -1;
     }
 

@@ -51,6 +51,12 @@ int main(void)
     uint8_t packet_storage[32];
     uint8_t packet[] = {1U, 2U, 3U, 4U};
 
+    CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, packet_storage,
+                                  sizeof(packet_storage), 10U,
+                                  0x800AU, 0x800AU, 0x800BU) == -1);
+    CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, packet_storage,
+                                  sizeof(packet_storage), 10U,
+                                  0x800AU, 0x8005U, 0x800AU) == -1);
     mock.pending_polls = 1U;
     CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, packet_storage,
                                   sizeof(packet_storage), 10U,

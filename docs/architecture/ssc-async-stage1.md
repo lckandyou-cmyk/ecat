@@ -29,7 +29,9 @@ wrapper without blocking the SSC main loop.
 - While pending, a callback retry must have identical bytes, length, and
   `data_following`. Matching retries return BUSY without re-running `start`;
   a different packet returns the configured packet error and does not replace
-  the outstanding block.
+  the outstanding block. The standalone gate retains the operation; the SSC
+  wrapper treats that error as terminal, aborts pending work, and closes the
+  core session. BUSY must be distinct from both configured error codes.
 - After `poll` reaches a terminal state, the next identical SSC callback retry
   receives success or the configured operation error. The adapter does not
   send protocol responses itself; SSC sends the response based on the callback
