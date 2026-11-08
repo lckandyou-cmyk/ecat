@@ -1,6 +1,6 @@
 # 通用 EtherCAT FoE 升级库开放问题与待定项汇总 (Open Issues)
 
-本文档集中汇总 `docs/architecture/SAD-v0.1.md` 与 `docs/spec/efw-format-v0.1.md` 中所有标记为 **【待验证】**、**【未核实】**、**【待硬件确认】**、**【推断】** 的事项。严格分为三类进行跟踪闭环。
+本文档跟踪架构和格式设计中标记为 **【待验证】**、**【未核实】**、**【待硬件确认】**、**【推断】** 的事项。按来源与验证方式分类；当前格式以 `docs/spec/efw-format-v0.2.md` 为准。
 
 ---
 
@@ -19,7 +19,7 @@
    - 出处：`docs/architecture/SAD-v0.1.md` 第 4.3 节第 5 条。
 4. **FoE 文件名编码与协议前缀限制【未核实】（长度上限【已核实 SOES】）**：
    - 内容：SOES 协议栈头文件 `soes/esc_foe.h` 明确宏定义 `#define FOE_FN_MAX      31`，文件名长度上限已确定为 31 字节；ETG.1000.6 官方规范对 FoE 文件名字符编码（ASCII / UTF-8）以及官方是否强制特定前缀的约束仍标记为 **【未核实】**。
-   - 出处：`docs/spec/efw-format-v0.1.md` 第 7.1 节。
+   - 出处：历史格式说明 `docs/spec/efw-format-v0.1.md` 第 7.1 节；当前文件名规则以项目代码为准。
 5. **EtherCAT 主站单包响应超时标准数值【未核实】**：
    - 内容：TwinCAT 及标准 EtherCAT 主站对 FoE 单包数据请求与写入响应的默认超时时间阈值。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 3 节时序图及 3.1 节第 3 条。

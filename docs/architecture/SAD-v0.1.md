@@ -42,7 +42,7 @@
 
 | 模块名称 | 职责 (Responsibility) | 边界与禁区 (Boundary & Non-Goals) | 规范状态 |
 | :--- | :--- | :--- | :--- |
-| **核心协议机 (Core)** | 维护 FoE 升级会话状态机；暴露 `on_wrq`、`on_data`、`on_end`、`on_abort` 四个纯事件接口；流式装配 `.efw` 文件头；执行文件名与文件头双向强交叉校验；执行“擦除前必须全过”检查；以回调块为粒度检测总长越界；维护擦除水位并调度 `erase_to`；分步调用驱动 `read` 并累加计算比对 CRC32；控制错误与熔断中止。 | **不包含**任何硬件寄存器读写；**不包含**任何特定协议栈私有数据结构；**不执行**动态内存申请 (`malloc`/`free`)；**不提供** FoE 读（RRQ）功能（v1 不支持，收到直接回复 `FOE_ERR_ACCESS`）。 | 【已确定】 |
+| **核心协议机 (Core)** | 维护 FoE 升级会话状态机；暴露 `on_wrq`、`on_data`、`on_end`、`on_abort` 四个纯事件接口；流式装配 `.efw` 文件头；执行文件名与文件头双向强交叉校验；执行“擦除前必须全过”检查；以回调块为粒度检测总长越界；维护擦除水位并调度 `erase_to`；分步调用驱动 `read` 并累加计算比对 CRC32；控制错误与熔断中止。 | **不包含**任何硬件寄存器读写；**不包含**任何特定协议栈私有数据结构；**不执行**动态内存申请 (`malloc`/`free`)；**不提供** FoE 读（RRQ）功能（当前核心不支持；实际协议栈响应取决于其配置）。 | 【已确定】 |
 | **FoE 适配接口 (Adapter)** | 作为协议栈与核心机的薄转接层；将 SSC 的 FoE 回调或 SOES 的前后置邮箱嗅探/中和钩子及 `foe_file_cfg_t` 回调映射到核心机的 `on_wrq`、`on_data`、`on_end`、`on_abort` 事件接口；解析 SOES 的 `buffer_size` 粒度并定界结束（注：真实 SOES 已接通前后置邮箱钩子并在宿主套件完成验证，真实 SSC 适配层目前仅完成接口抽象与 Mock 契约）。 | **不修改**官方协议栈内部状态机；**不越过**核心机直接操作底层驱动。 | 【已确定】 |
 | **目标驱动接口 (Target Driver)** | 抽象各目标硬件（内部 Flash、外部 SPI Flash、ESC SII EEPROM、外部用户数据 EEPROM）的真实物理擦除、覆盖擦除（`erase_to`）、对齐写入、底层物理读取（`read`）、提交与中止操作。 | 仅由用户按硬件实现抽象函数指针；**不解析** FoE 协议；**不决定**写入基地址；**不负责** CRC32 算法计算。 | 【已确定】 |
 | **全局配置头 (Config)** | 集中管理单一工程的 Project ID、Hardware ID、本地硬件版本 (uint16)、各目标使能宏开关、头部缓冲上限、Bootloader 硬编码分区物理基地址与最大限制尺寸。 | 仅提供静态宏定义常量；**严禁**运行时动态修改分区基地址。 | 【已确定】 |
@@ -54,13 +54,13 @@
 
 ```c
 /* 核心协议机暴露的事件接口原型 (纯 C，无协议栈依赖) */
-int ecat_foe_core_on_wrq(const char *filename, uint32_t filename_len, void *user_ctx);
-int ecat_foe_core_on_data(const uint8_t *chunk, uint32_t chunk_len, void *user_ctx);
-int ecat_foe_core_on_end(void *user_ctx);
-void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
+int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t filename_len);
+int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len);
+int ecat_foe_core_on_end(ecat_foe_core_t *core);
+void ecat_foe_core_on_abort(ecat_foe_core_t *core);
 ```
 
-* **FoE 读请求 (RRQ) 规则【已确定】**：v1 规范明确不支持 FoE 读操作。若从站接收到 FoE RRQ 请求，适配层统一回复 `FOE_ERR_ACCESS` (`0x8002`)，核心机不暴露 `on_rrq` 接口。
+* **FoE 读请求 (RRQ) 边界**：当前升级核心不提供 `on_rrq` 或目标导出接口。未定义 `FOE_READ_SUPPORTED` 时，所核对的 SOES 版本对 RRQ 返回 `FOE_ERR_NOTDEFINED`；实际 SSC 响应须在其源码和配置中核实。
 * **两层结束判定机制【已确定，已核实】**：
   在从站协议栈与升级库架构中，必须明确区分两层结束判定：
   1. **底层 FoE 邮箱包级定界（SOES 内部）**：
@@ -117,7 +117,7 @@ void ecat_foe_core_on_abort(uint16_t error_code, void *user_ctx);
   - 源码事实：查阅 `soes/esc_foe.c` 中写入回调返回值检查与 `FOE_abort` 错误处理逻辑。SOES 仅检查返回值是否非零，不解析具体错误码数值。
 * **SOES 与核心机内存缓冲约束【已确定】**：
   1. **配置参数获取**：SOES 适配层必须获取当前工程配置的 `foe_cfg->buffer_size`，核心接口保持不变；
-  2. **整倍数对齐约束**：SOES 的 `foe_cfg->buffer_size` **必须配置为各已启用目标 `write_unit` 的公倍数**（如片内 Flash 为 8 字节、SPI Flash 为 256 字节，则 `buffer_size` 须为 256 整数倍，如 512 或 1024 字节）；
+  2. **缓冲容量与写入对齐**：SOES 的 `foe_cfg->buffer_size` 应与实际 fbuffer 容量一致；核心通过残留缓冲处理目标 `write_unit` 对齐，不要求该缓冲大小是写入粒度的公倍数。须按目标协议栈和主站实测容量及分包；
   3. **有效负载对齐与残留缓冲**：核心维护一个残留缓冲，大小为配置项 `ECAT_FOE_MAX_WRITE_UNIT`（各启用目标 `write_unit` 的最大值）；头剥离后的有效负载起点不一定对齐，残留字节在此累积，凑满一个 `write_unit` 再下发驱动写入；不另做整块二次复制，避免在 MCU 紧张的 RAM 中维护双份数据缓冲。
 * **SSC 协议栈映射规则**：SSC 侧的回调粒度与内存聚合机制标为 **【未核实（未读到 SSC 源码）】**。
 
@@ -304,7 +304,7 @@ sequenceDiagram
             BL->>Drv: drv->abort() (保持无效)
             BL-->>Stack: 返回非零 -> SOES 触发 FOE_abort(0x800B)
         else 物理回读 CRC 完全一致
-            Note over BL,Drv: 3. 成功提交
+            Note over BL,Drv: 启用验签时先验证存储回读内容，失败则中止；成功后提交
             alt 防回滚关闭
                 BL->>Drv: drv->finalize() (写入固件有效标记 / 切换活动分区)
             else 防回滚开启
@@ -370,10 +370,10 @@ sequenceDiagram
 
 | 错误码常量 (`soes/esc.h`) | 数值 | 错误定义类别 | 本库理论触发场景与失败原因 | SOES 适配层实际回给主站 |
 | :--- | :--- | :--- | :--- | :--- |
-| `FOE_ERR_NOTFOUND` | `0x8001` | 文件不存在/未找到 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | 见下方限制说明：原生 SOES 在调用 `on_wrq` 前已向主站发送 ACK(0)，WRQ 阶段拒绝无法直接下发，只会在首块数据阶段转为 `0x800B`【宿主 harness 观察】 |
-| `FOE_ERR_ACCESS` | `0x8002` | 访问被拒绝/权限不足 | 收到 FoE RRQ 读请求（本库不支持读操作）；首包文件头与本地 Hardware ID 不符；本地硬件版本不在 `[hw_ver_min, hw_ver_max]` 区间；文件名与文件头字段交叉比对不一致。 | 数据阶段收敛为 `0x800B` |
+| `FOE_ERR_NOTFOUND` | `0x8001` | 文件不存在/未找到 | WRQ 阶段文件名项目名与本地 `ECAT_FOE_PROJECT_NAME` 不符；目标字样不存在或在本地未启用 (`ENABLE_TARGET_x == 0`)。 | 当前前后置钩子可在宿主测试中中和异常响应；具体行为和错误码见 [SOES 接入分析](soes-integration-options.md)，真实设备待验证。 |
+| `FOE_ERR_ACCESS` | `0x8002` | 访问被拒绝/权限不足 | 保留的协议错误码；当前核心不实现 RRQ。设备不匹配或文件名/头部不一致由核心记录头部错误，SOES 数据阶段收敛为编程错误。 | RRQ 的实际响应取决于协议栈及配置 |
 | `FOE_ERR_DISKFULL` | `0x8003` | 介质已满/容量溢出 | `payload_length` 超过本地静态配置的分区容量上限 (`ECAT_FOE_xxx_MAX_SIZE`)；或回调块累加超过 64 位期望总长（多收溢出即时熔断）。 | `0x800B` (数据阶段收敛) |
-| `FOE_ERR_ILLEGAL` | `0x8004` | 非法报文/参数格式错误 | 文件名格式不对（无法逆向切分、非 .efw 后缀或版本格式错误）；魔数错误 (`magic != 0x57464345`)；格式版本不支持 (`format_version != 1`)；头部长度非法（<64、>本地上限或非 4 倍数）；保留标志位非零 (`flags != 0`)；`reserved` 区非全 0；版本倒置 (`hw_ver_min > hw_ver_max` 或 `min_allow_version > fw_version`)；防回滚开启时 `port_get_version_floor` 失败或触发版本倒退拦截。 | 数据阶段收敛为 `0x800B` |
+| `FOE_ERR_ILLEGAL` | `0x8004` | 非法报文/参数格式错误 | 文件名格式不对（无法逆向切分、非 .efw 后缀或版本格式错误）；魔数错误 (`magic != 0x57464345`)；格式版本不支持 (`format_version != 2`)；头部长度不是固定 148 字节或超过本地上限；保留标志位非零 (`flags != 0`)；`reserved` 区非全 0；版本倒置 (`hw_ver_min > hw_ver_max` 或 `min_allow_version > fw_version`)；防回滚开启时 `port_get_version_floor` 失败或触发版本倒退拦截。 | 数据阶段收敛为 `0x800B` |
 | `FOE_ERR_PACKETNO` | `0x8005` | 数据包包号错误 | FoE 数据包包号错乱或丢包（由协议栈底层检出）。 | `0x8005` (协议栈底层回复) |
 | `FOE_ERR_PROGERROR` | `0x800B` | 介质编程/校验失败 | 目标驱动硬件操作失败（`init`、`erase_to`、`write`、`read`、`finalize` 返回错误）；主站传输超时；传输中途物理断开。 | `0x800B` (原生支持) |
 | `FOE_ERR_CHECKSUM` | `0x800C` | 校验和/CRC 不匹配 | `header_crc32` 校验不匹配；流 Payload CRC32 不匹配；物理回读比对 CRC32 不匹配。 | `0x800B` (数据阶段收敛) |
@@ -424,8 +424,8 @@ sequenceDiagram
 #define ECAT_FOE_HARDWARE_ID                0x00000001U
 #define ECAT_FOE_LOCAL_HW_VER               0x0001U      /* 本地硬件版本号 (uint16，与 efw 头的 hw_ver_min/max 一致) */
 
-/* 头部装配缓冲上限 (必须 >= 64 字节且为 4 的倍数) */
-#define ECAT_FOE_HEADER_BUF_MAX             128U
+/* 头部装配缓冲上限 (必须 >= 148 字节且为 4 的倍数) */
+#define ECAT_FOE_HEADER_BUF_MAX             148U
 
 /* 目标升级使能开关 (全部可选，默认只开 APP) */
 #define ECAT_FOE_ENABLE_TARGET_APP          1  /* 目标 1: APP 固件 (字样: MCU) */
@@ -620,7 +620,7 @@ typedef struct ecat_foe_target_driver {
 
 ### 5.1 已拍板决策（已定稿同步）
 
-1. **【已确定】文件头格式**：采用固定 64 字节基础长度，包含 `format_version` 与 `header_length` 字段，Header CRC32 固定放置于头最后 4 字节，支持向前兼容跳过未知扩展字段。
+1. **当前文件头格式**：统一采用 148 字节固定头，格式版本为 2，包含可选 Ed25519ph 签名字段；旧格式不再接受。完整字段与验证规则见 [当前格式规范](../spec/efw-format-v0.2.md)。
 2. **【已确定】版本号与防回滚**：固件版本采用 32 位数值型表示；防版本回滚做成编译宏开关（`ECAT_FOE_ANTI_ROLLBACK_ENABLE`），默认严格保持关闭（`0`）；若开启，按 Target ID 独立保存版本下限，升级成功后持久化更新。
 3. **【已确定】容灾分区策略**：默认采用单分区直接覆盖模式，依靠常驻且物理隔离的独立 MCU Bootloader 提供盲救保障；A/B 双分区做成可选宏配置（`ECAT_FOE_DUAL_BANK_ENABLE`）。
 4. **【已确定】切换架构主备线**：ESC 复位引脚由 MCU 独立 GPIO 控制并配外部上拉，方案 A（MCU 硬件复位重启）作为官方主线架构；方案 B（纯软件安全内存跳转）降为兼容历史复位脚直连旧板的备选。

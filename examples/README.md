@@ -12,7 +12,7 @@ examples/
 │   ├── main.c                     # 8 大场景测试入口与文件 Flash 模拟驱动
 │   └── expected_output.txt        # 宿主示例基准参考输出 (用于自动化对比回归)
 └── driver_template/               # 底层物理介质驱动模板
-    ├── ecat_foe_driver_template.h # 七大回调契约头文件
+    ├── ecat_foe_driver_template.h # 目标驱动回调契约头文件
     └── ecat_foe_driver_template.c # 驱动骨架实现
 ```
 
@@ -32,7 +32,7 @@ examples/
 4. **Stream Under-Receive**：数据流提前截断，`on_end` 校验接收总长不足并触发 abort；
 5. **Stream Over-Receive**：数据流超出预期长度，核心在 `on_data` 触发即时防溢出熔断；
 6. **Abort and Retry on Same Core**：中途断流 abort 后恢复为 IDLE 态，在同一个 core 实例上接收新 WRQ 重新升级成功；
-7. **Padded Firmware End-to-End via efw_pack.py**：加载真实打包的补零固件，验证以短包收尾的端到端流程；
+7. **Padded Firmware End-to-End via efw_pack.py**：加载真实打包的 `0xFF` 填充固件，验证核心分块接收和提交；
 8. **Core Defense on Driver Finalize Failure**：演示核心机在驱动提交失败时主动触发 abort 并保持介质无效（注：真实 SOES 协议栈在零长度结束包忽略返回值的行为由 `tests/test_soes_real_harness.c` 独立验证）。
 
 ### 2.3 运行与验证命令
@@ -55,7 +55,7 @@ rm -rf "$TMP_DIR"
 
 ## 3. 驱动模板 (driver_template)
 
-`driver_template` 演示了用户自定义物理介质存储驱动对接核心机所需的 7 个函数指针回调实现骨架与生命周期契约：
+`driver_template` 演示了用户自定义物理介质存储驱动对接核心机所需的七个基础回调的实现骨架与生命周期契约；启用防回滚还需实现可断电恢复的 `finalize_with_version_floor` 联合提交回调，当前模板未实现该事务：
 - `init`：初始化介质；非破坏性操作，失败时自行清理，核心不会调用 `abort`；
 - `invalidate`：擦除前同步使物理有效标志失效；
 - `erase_to`：按需扇区擦除（未失效前拒绝擦除）；
