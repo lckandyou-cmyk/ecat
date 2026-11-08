@@ -445,6 +445,46 @@ static void test_soes_state_transition_aborts_active_session(void)
     TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "成功后允许迁移");
 }
 
+static void test_soes_invalid_boot_exit_aborts_active_session(void)
+{
+    const uint8_t transitions[] = { ECAT_TRANSITION_BOOT_TO_PREOP,
+                                    ECAT_TRANSITION_BOOT_TO_SAFEOP,
+                                    ECAT_TRANSITION_BOOT_TO_OP };
+    static mock_driver_t mcu;
+    static mock_signature_verifier_t verifier;
+    for (size_t i = 0; i < sizeof(transitions); i++) {
+        mock_driver_init(&mcu);
+        memset(&verifier, 0, sizeof(verifier));
+        ecat_foe_core_t core;
+        setup_signature_core(&core, &mcu, &verifier);
+        uint8_t payload[16] = {1, 2, 3};
+        uint8_t efw[256];
+        size_t n = build_signed_test_efw(efw, payload, sizeof(payload));
+        TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "WRQ 接受");
+        TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "头部有效");
+        TEST_ASSERT(core.session_active && core.signature_active, "驱动及验签器活跃");
+        ecat_foe_soes_adapter_t adapter;
+        ecat_foe_soes_init(&adapter, &core, 64U);
+        uint8_t as = transitions[i], an = ECAT_STATE_PREOP | ECAT_STATE_FLAG_ERROR;
+        ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+        TEST_ASSERT_EQ_INT(an, ECAT_STATE_PREOP | ECAT_STATE_FLAG_ERROR, "保留协议栈原始错误状态");
+        TEST_ASSERT(!core.session_active && !core.signature_active, "活跃会话已释放");
+        TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "驱动中止一次");
+        TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "验签器中止一次");
+        TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "未完成标记保留");
+        ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+        TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "重复请求不重复中止驱动");
+        TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "重复请求不重复中止验签器");
+        memset(&verifier, 0, sizeof(verifier));
+        memcpy(verifier.expected, efw, n);
+        verifier.expected_len = n;
+        TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "新 WRQ 接受");
+        TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, n), 0, "重新传输成功");
+        TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "重新提交成功");
+        TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "完成后清除未完成标记");
+    }
+}
+
 static void test_optional_signature_policy_and_readback(void)
 {
     static mock_driver_t mcu;
@@ -3024,6 +3064,7 @@ int main(void)
     RUN_TEST(test_header_rejections_driver_zero_calls);
     RUN_TEST(test_filename_rejection_driver_zero_calls);
     RUN_TEST(test_soes_state_transition_aborts_active_session);
+    RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);
     RUN_TEST(test_stream_length_under_and_over_receive);

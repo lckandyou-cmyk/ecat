@@ -177,34 +177,23 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
         return;
     }
 
-    /* 依据 SAD 1.2 缓解措施 2: 检测 BOOT -> INIT 迁移
-     * 使用语义清晰的命名常量严格区分迁移码与 AL 状态值：
-     * - *as 匹配 ECAT_TRANSITION_BOOT_TO_INIT ((ESCinit << 4) | ESCboot = 0x13)
-     * - *an 改写为 ECAT_AL_STATUS_BOOT_ERROR (ESCboot | ESCerror = 0x13)
-     *
-     * 判定只依赖核心公开查询函数：
-     * ecat_foe_core_upgrade_incomplete(adapter->core)
-     * 若固件升级未闭环 (底层驱动已 init 但未成功 finalize，例如中途断开、校验失败或残留无效固件)，
-     * 固件即处于残缺/不可用状态，必须强行拦截 BOOT->INIT 迁移。
-     *
-     *
-     * 时序与物理限制明确说明：
-     * 1. 当该 post hook 触发时，SOES esc.c:1193 已执行 ESC_stopmbx()，此时物理邮箱已被停用；
-     * 2. 若在此处改写 *an 为 BOOT|Error 并调用注入的 al_error_fn(0x0014) (在真实 SOES 中对应 ESC_ALerror)，
-     *    可向 0x134 写入 AL Status Code 并阻断从站进入 INIT 正常通信态；
-     * 3. 局限性说明：真实 SOES esc_foe.c 已在独立宿主 Harness 中完成编译与联动验证，但生产环境目前仍未正式接入，
-     *    未在真实硬件上集成编译，未进行真实物理总线与主站动态联调；真实硬件环境下由于邮箱已停止，主站无法在该状态下通过 FoE 继续交互，
-     *    必须先按 EtherCAT 状态机规范执行故障复位后重新启动升级流程；绝不能宣称已在真实硬件上验证该拦截行为。
-     */
+    /* BOOT->INIT stops the mailbox. The pinned SOES also reports invalid
+     * BOOT->PREOP/SAFEOP/OP requests as PREOP+Error; an in-flight FoE session
+     * cannot safely continue in that AL state. The post hook runs after SOES
+     * has processed the transition. Physical hardware behavior requires testing. */
+    const bool is_boot_exit = (*as == ECAT_TRANSITION_BOOT_TO_INIT ||
+                               *as == ECAT_TRANSITION_BOOT_TO_PREOP ||
+                               *as == ECAT_TRANSITION_BOOT_TO_SAFEOP ||
+                               *as == ECAT_TRANSITION_BOOT_TO_OP);
     bool should_block_init = false;
     if (adapter->core != NULL) {
         should_block_init = ecat_foe_core_upgrade_incomplete(adapter->core);
     }
 
-    if (*as == ECAT_TRANSITION_BOOT_TO_INIT && adapter->core != NULL &&
+    if (is_boot_exit && adapter->core != NULL &&
         (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
          adapter->core->state == ECAT_FOE_STATE_DATA || adapter->core->session_active)) {
-        /* 邮箱已经停止：同步中止核心和 SOES 会话，保留未完成标记。 */
+        /* 同步中止核心和 SOES 会话，保留未完成标记。 */
         ecat_foe_core_on_abort(adapter->core);
         if (adapter->foe_reset_fn != NULL) {
             adapter->foe_reset_fn();

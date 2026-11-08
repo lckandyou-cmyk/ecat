@@ -32,6 +32,16 @@ _ESCvar ESCvar;
 _MBXcontrol MBXcontrol[MBXBUFFERS];
 uint8_t MBX[MBXBUFFERS * MBXSIZE];
 
+/* Test-only AL Control emulation for exercising the real ESC_state(). */
+static bool s_emulate_al_control;
+static uint8_t s_requested_al_state;
+static bootloader_app_t *s_state_hook_app;
+
+static void test_post_state_hook(uint8_t *as, uint8_t *an)
+{
+    ecat_foe_soes_post_state_hook(&s_state_hook_app->adapter, as, an);
+}
+
 /* 宿主模拟 ESC 物理硬件端口 */
 static uint8_t s_hw_sm1_buf[128];
 static uint16_t s_hw_sm1_len = 0;
@@ -46,7 +56,12 @@ void ESC_write(uint16_t address, void *buf, uint16_t len)
 
 void ESC_read(uint16_t address, void *buf, uint16_t len)
 {
-    (void)address;
+    if (s_emulate_al_control && address == ESCREG_ALCONTROL && buf != NULL && len == 2U) {
+        uint8_t *out = (uint8_t *)buf;
+        out[0] = s_requested_al_state;
+        out[1] = 0U;
+        return;
+    }
     if (buf != NULL && len > 0) {
         memset(buf, 0, len);
     }
@@ -728,6 +743,63 @@ int main(void)
         }
     }
     printf("  [PASS] BOOT 中止后 SOES 复位与无复位回调恢复验证通过\n");
+
+    /* Exercise the real SOES AL state machine for invalid BOOT exits. */
+    {
+        const uint8_t requested[] = {ESCpreop, ESCsafeop, ESCop};
+        for (size_t i = 0; i < sizeof(requested); i++) {
+            for (unsigned active = 0; active <= 1U; active++) {
+                for (unsigned has_reset = 0; has_reset <= 1U; has_reset++) {
+                    reset_test_env();
+                    s_foe_cfg.buffer_size = 64U;
+                    assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS,
+                        ESC_MBXSIZE, s_sim_flash, sizeof(s_sim_flash), has_reset ? FOE_init : NULL,
+                        ESC_ALerror) == 0);
+                    assert(bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+                        BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+                        BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+                        0x01000000U, s_test_payload, sizeof(s_test_payload)) > 232U);
+                    master_foe_response_t resp;
+                    assert(bootloader_master_send_wrq(&app, &s_foe_cfg,
+                        "SERVO_DRV_MCU_V1.0.0.0.efw", 0U, &resp) == 0);
+                    assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+                    if (active) {
+                        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U,
+                            s_test_efw_buf, 116U, &resp) == 0);
+                        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2U,
+                            s_test_efw_buf + 116U, 116U, &resp) == 0);
+                        assert(app.core.session_active && app.flash_drv.is_initialized);
+                    }
+                    s_state_hook_app = &app;
+                    s_requested_al_state = requested[i];
+                    s_emulate_al_control = true;
+                    ESCvar.post_state_change_hook = test_post_state_hook;
+                    ESCvar.ALstatus = ESCboot;
+                    ESCvar.ALevent = ESCREG_ALEVENT_CONTROL;
+                    ESC_state();
+                    s_emulate_al_control = false;
+                    assert(ESCvar.ALstatus == (ESCpreop | ESCerror));
+                    assert(ESCvar.ALerror == ALERR_INVALIDSTATECHANGE);
+                    assert(app.core.state == ECAT_FOE_STATE_IDLE && !app.core.session_active);
+                    assert(!app.flash_drv.is_initialized);
+                    assert(ecat_foe_core_upgrade_incomplete(&app.core) == (active != 0U));
+                    assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+                    /* Model a recovered BOOT state; not an AL recovery test. */
+                    ESCvar.ALstatus = ESCboot;
+                    ESCvar.MBXrun = 1U;
+                    assert(bootloader_master_send_wrq(&app, &s_foe_cfg,
+                        "SERVO_DRV_MCU_V1.0.0.0.efw", 0U, &resp) == 0);
+                    if (!has_reset) {
+                        assert(resp.opcode == BOOTLOADER_FOE_OP_ERR && resp.error_code == 0x8004U);
+                        assert(bootloader_master_send_wrq(&app, &s_foe_cfg,
+                            "SERVO_DRV_MCU_V1.0.0.0.efw", 0U, &resp) == 0);
+                    }
+                    assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0U);
+                }
+            }
+        }
+        printf("  [PASS] SOES 非法 BOOT 状态迁移清理和恢复验证通过\n");
+    }
 
     /* SOES counts the full EFW file; Flash capacity applies to payload only. */
     for (unsigned oversized = 0; oversized <= 1U; oversized++) {

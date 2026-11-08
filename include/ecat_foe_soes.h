@@ -38,6 +38,9 @@ extern "C" {
 #define ECAT_FOE_HDR_SIZE               6U
 
 #define ECAT_TRANSITION_BOOT_TO_INIT    ((uint8_t)((ECAT_STATE_INIT << 4) | ECAT_STATE_BOOT)) /**< 0x13U: BOOT->INIT 迁移码 */
+#define ECAT_TRANSITION_BOOT_TO_PREOP   ((uint8_t)((ECAT_STATE_PREOP << 4) | ECAT_STATE_BOOT))
+#define ECAT_TRANSITION_BOOT_TO_SAFEOP  ((uint8_t)((ECAT_STATE_SAFEOP << 4) | ECAT_STATE_BOOT))
+#define ECAT_TRANSITION_BOOT_TO_OP      ((uint8_t)((ECAT_STATE_OP << 4) | ECAT_STATE_BOOT))
 #define ECAT_AL_STATUS_BOOT_ERROR       ((uint8_t)(ECAT_STATE_BOOT | ECAT_STATE_FLAG_ERROR))  /**< 0x13U: BOOT+Error 状态值 */
 #define ECAT_AL_STATUS_CODE_NO_VALID_FW 0x0014U                                               /**< ALERR_NOVALIDFIRMWARE (0x0014) */
 
@@ -208,7 +211,9 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
 
 /**
  * @brief SOES 状态迁移拦截钩子 (post_state_change_hook)
- * 在 BOOT->INIT 迁移时，若最后提交失败，改写 *an 为 BOOT|Error 并写入错误码 0x0014
+ * BOOT->INIT/PREOP/SAFEOP/OP 请求时清理活跃 FoE 会话。
+ * BOOT->INIT 且存在未完成目标时，改写 *an 为 BOOT|Error 并写入错误码 0x0014；
+ * 其他直接从 BOOT 迁移的非法请求保留 SOES 原本的错误状态和错误码。
  */
 void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as, uint8_t *an);
 

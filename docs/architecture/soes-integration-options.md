@@ -217,7 +217,7 @@ void ESC_ALerror (uint16_t errornumber);
 
 ### 4.2 现有实现状态界定 (区分宿主验证与物理硬件)
 - **适配层实现状态**：适配层 `src/adapters/ecat_foe_soes.c` 已完整实现两组机制：
-  1. **状态机钩子**：实现了 `ecat_foe_soes_post_state_hook`，在 `*as == 0x13U` 且核心机未正常完成 finalize（或处于未闭环活跃会话/错误态）时改写 `*an = 0x13U` (BOOT|Error) 并通过注入的 `al_error_fn` 回调上报 `0x0014U` (ALERR_NOVALIDFIRMWARE)；
+  1. **状态机钩子**：`ecat_foe_soes_post_state_hook` 在 BOOT→INIT/PREOP/SAFEOP/OP 请求时清理活跃会话，并在配置复位回调时复位 FoE。BOOT→INIT 且目标未完成时改写为 BOOT|Error、上报 `0x0014`；其他直接从 BOOT 迁移的非法请求保留原生 SOES 的 PREOP|Error 和 `0x0011`。真实 SOES 状态机与模拟寄存器宿主测试已覆盖，现场仍需验证；
   2. **前后置邮箱钩子架构 (方案 C)**：实现了 `ecat_foe_soes_pre_process_hook` 与 `ecat_foe_soes_post_process_hook`，支持前置嗅探暂存 WRQ、后置核验响应并将异常就地中和为标准 0x8000 ERR、保持原有信箱头计数器并注入 `FOE_init` 复位自愈；
 - **宿主验证与真机边界**：
   - **宿主环境已验证**：适配层已在宿主测试 Harness（`tests/test_soes_real_harness.c`）中直接编译链接真实 SOES `esc.c` 与 `esc_foe.c` 源码及硬件端口桩，完成 11 项核心协议行为测试与 9 大深度风险验证，并在 `examples/bootloader_soes/` 中跑通 5 大场景最小 Bootloader 集成测试；

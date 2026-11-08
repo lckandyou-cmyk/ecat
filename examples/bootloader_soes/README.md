@@ -95,7 +95,7 @@ SOES 协议栈本身非多线程安全，接入必须遵循单执行流原子互
 
 ### 4.2 初始化与异常恢复机制
 - **信箱上下文绑定**：调用 `ecat_foe_soes_set_mbx_context()` 建立对 SOES 邮箱数组的状态观察，不篡改 SOES 缓冲区所有权；
-- **状态机复位回调注入**：调用 `ecat_foe_soes_set_foe_reset_fn(&adapter, FOE_init)`。当邮箱后置钩子中和异常 ACK，或 BOOT→INIT 钩子中止活跃会话时，调用 `FOE_init()` 将 SOES 复位回 `FOE_READY`；须先按主站及设备状态机恢复邮箱，才能重新传输；
+- **状态机复位回调注入**：调用 `ecat_foe_soes_set_foe_reset_fn(&adapter, FOE_init)`。当邮箱后置钩子中和异常 ACK，或 BOOT→INIT/PREOP/SAFEOP/OP 状态钩子中止活跃会话时，调用 `FOE_init()` 将 SOES 复位回 `FOE_READY`；须先按主站及设备状态机恢复邮箱，才能重新传输；
 - **信箱计数保持**：异常转换时严格保留原有信箱头部的高 4 位计数（`mbxcnt`），确保主站观察到协议计数连续一致；
 - **自愈恢复重试**：即使未注册复位钩子，原生 SOES 在收到中途新 WRQ 时返回 0x8004 并自动复位，收到后续 DATA 时 write_cb 拦截并返回 0x800B 自动复位，收到主站 ERR 报文自动复位，确保从站通信自愈闭环。
 

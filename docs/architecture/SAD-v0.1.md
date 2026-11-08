@@ -103,7 +103,8 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core);
       3. 调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE);`（`0x0014`），向 `0x134 AL Status Code` 写入固件无效错误码；
       4. SOES 因 `an & ESCerror` 置位跳过清错，通过 `ESC_ALstatus(an)` 将错误状态写入 `0x130`；
       5. **后果**：主站收到状态切换被拒绝，AL Status 停留在 BOOT+Error，AL Status Code 为 `0x0014`。**此时邮箱已停，主站只能看到错误码后重新走 INIT→BOOT 发起升级**（不能直接重试 WRQ）。
-      6. SSC 侧 `post_state_change_hook` 等效机制标记为 **【未核实（未读到 SSC 源码）】**。
+      6. 对 BOOT→PREOP/SAFEOP/OP 的非法请求，适配层同样清理活跃会话并可复位 FoE，但保留原生 SOES 的 PREOP|Error 和 `0x0011`。该状态机路径已有宿主测试，实际设备与主站待验证。
+      7. SSC 侧 `post_state_change_hook` 等效机制标记为 **【未核实（未读到 SSC 源码）】**。
 * **栈层中止通知缺口与会话自愈机制【已确定】**：
   - 源码出处：`soes/esc_foe.c` 中 `FOE_abort()` 函数实现。
   - 源码事实：SOES 协议栈在遭遇通信错误（如包序号错、超时、或主站下发 FoE ERR）进入 `FOE_abort` 路径时，仅发送 ERR 包并调用 `FOE_init()` 重置自身，**不会调用应用层回调函数（既不调用 `write_function`，也无任何 abort 钩子）**。
