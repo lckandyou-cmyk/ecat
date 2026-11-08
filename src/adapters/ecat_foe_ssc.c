@@ -20,6 +20,7 @@ void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, u
     adapter->core = core;
     adapter->async_gate = NULL;
     adapter->max_packet_size = max_packet_size;
+    adapter->expected_password = 0U;
     adapter->session_active = false;
     adapter->async_final_acked = false;
 }
@@ -34,15 +35,30 @@ void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
     adapter->core = core;
     adapter->async_gate = async_gate;
     adapter->max_packet_size = 0U;
+    adapter->expected_password = 0U;
     adapter->session_active = false;
     adapter->async_final_acked = false;
 }
 
+int ecat_foe_ssc_set_expected_password(ecat_foe_ssc_adapter_t *adapter,
+                                      uint32_t expected_password)
+{
+    if (adapter == NULL || adapter->session_active ||
+        (adapter->async_gate != NULL &&
+         (adapter->async_gate->pending || adapter->async_gate->completed))) {
+        return -1;
+    }
+    adapter->expected_password = expected_password;
+    return 0;
+}
+
 uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pName, uint16_t nameSize, uint32_t password)
 {
-    (void)password;
     if (adapter == NULL || adapter->core == NULL || pName == NULL) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+    if (password != adapter->expected_password) {
+        return ECAT_FOE_SSC_ERR_NORIGHTS_PW;
     }
     adapter->async_final_acked = false;
 

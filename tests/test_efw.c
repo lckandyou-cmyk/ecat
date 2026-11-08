@@ -479,6 +479,27 @@ static void test_edge_case_payload_too_large(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "payload 超出分区限额应当被拒绝");
 }
 
+static void test_zero_length_payload_rejected(void)
+{
+    uint8_t empty_efw[64];
+    memcpy(empty_efw, s_spec_valid_efw, sizeof(empty_efw));
+    memset(empty_efw + 32, 0, 8U); /* payload_length=0, CRC32(empty)=0 */
+    uint32_t header_crc = ecat_foe_crc32_calc(empty_efw, 60U);
+    empty_efw[60] = (uint8_t)(header_crc & 0xFFU);
+    empty_efw[61] = (uint8_t)((header_crc >> 8) & 0xFFU);
+    empty_efw[62] = (uint8_t)((header_crc >> 16) & 0xFFU);
+    empty_efw[63] = (uint8_t)((header_crc >> 24) & 0xFFU);
+
+    ecat_foe_efw_header_t hdr;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(empty_efw, sizeof(empty_efw), &hdr),
+                       ECAT_FOE_EFW_OK, "带有效头 CRC 的空载荷头部可被解析");
+    ecat_foe_efw_config_t cfg;
+    get_default_valid_config(&cfg);
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg),
+                       ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY,
+                       "阶段 3 必须拒绝空载荷");
+}
+
 /**
  * 测项 18: 边界异常 - min_allow_version > fw_version
  */
@@ -745,6 +766,7 @@ int main(void)
     RUN_TEST(test_edge_case_id_mismatch);
     RUN_TEST(test_edge_case_target_not_enabled);
     RUN_TEST(test_edge_case_payload_too_large);
+    RUN_TEST(test_zero_length_payload_rejected);
     RUN_TEST(test_edge_case_min_allow_version_invalid);
     RUN_TEST(test_edge_case_anti_rollback);
     RUN_TEST(test_forward_compatibility_128_byte_header);

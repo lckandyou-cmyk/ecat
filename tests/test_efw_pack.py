@@ -87,6 +87,51 @@ def test_filename_generator():
     print("  [PASS] 第 7 节规范文件名生成格式 SERVO_DRV_MCU_V1.2.3.4.efw")
 
 
+def test_empty_payload_rejected_without_output():
+    """拒绝空固件，且不创建输出文件。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_path = os.path.join(tmpdir, 'empty.bin')
+        out_path = os.path.join(tmpdir, 'empty.efw')
+        with open(bin_path, 'wb'):
+            pass
+        cmd = [
+            sys.executable, PACK_TOOL, 'pack',
+            '--bin', bin_path,
+            '--project-id', '0x10010001',
+            '--hardware-id', '0x00000001',
+            '--target', 'MCU',
+            '--fw-version', '1.0.0.0',
+            '--out', out_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode != 0, "空载荷不应生成可分发的固件包"
+        assert '有效负载不能为空' in res.stderr, res.stderr
+        assert not os.path.exists(out_path), "拒绝空固件时不应创建输出包"
+
+        # Also reject a hand-crafted, CRC-correct empty container at inspect time;
+        # otherwise users could bypass pack's validation and extract it as valid.
+        empty_efw = os.path.join(tmpdir, 'crafted-empty.efw')
+        header = bytearray.fromhex(
+            '45434657010040000100011001000000'
+            '01000100010000000403020100000001'
+            '1000000088E2CECE0000000000000000'
+            '000000000000000000000000E352C261'
+        )
+        assert len(header) == 64
+        header[32:40] = bytes(8)  # payload length and CRC of the empty payload
+        header[60:64] = binascii.crc32(header[:60]).to_bytes(4, 'little')
+        with open(empty_efw, 'wb') as f:
+            f.write(header)
+        extracted = os.path.join(tmpdir, 'should-not-extract.bin')
+        inspected = subprocess.run(
+            [sys.executable, PACK_TOOL, 'inspect', empty_efw,
+             '--extract-bin', extracted], capture_output=True, text=True)
+        assert inspected.returncode != 0, "inspect 不应接受手工构造的空固件"
+        assert '有效负载不能为空' in inspected.stderr, inspected.stderr
+        assert not os.path.exists(extracted), "拒绝空固件时不得创建提取文件"
+    print("  [PASS] 空固件打包被拒绝且未创建输出文件")
+
+
 def test_foe_packet_size_padding():
     """验证 --foe-packet-size N 尾部填充规避空包 (第 2.2 节)"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -141,5 +186,6 @@ if __name__ == '__main__':
     print("--- 运行 Python efw_pack 工具测试 ---")
     test_positive_cross_check()
     test_filename_generator()
+    test_empty_payload_rejected_without_output()
     test_foe_packet_size_padding()
     print("--- Python efw_pack 工具测试全部通过 ---")

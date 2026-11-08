@@ -321,6 +321,28 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 11 项测试全部通过 (Mock 环境) <<<\n");
+    /* [TEST 12] FoE 密码校验必须在建立会话和触碰存储驱动之前完成 */
+    {
+        printf("[TEST 12] 验证 FoE 密码匹配与拒绝路径...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        const uint32_t expected_password = 0x13572468U;
+        assert(ecat_foe_ssc_set_expected_password(&adapter, expected_password) == 0);
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn),
+                                    expected_password ^ 1U) == ECAT_FOE_SSC_ERR_NORIGHTS_PW);
+        assert(!adapter.session_active);
+        assert(s_mock_drv.count_init == 0U && s_mock_drv.count_invalidate == 0U);
+        assert(core.state == ECAT_FOE_STATE_IDLE);
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn),
+                                    expected_password) == 0U);
+        assert(adapter.session_active);
+        assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn),
+                                    expected_password ^ 1U) == ECAT_FOE_SSC_ERR_NORIGHTS_PW);
+        assert(adapter.session_active && core.state == ECAT_FOE_STATE_WRQ_ACKED);
+        assert(ecat_foe_ssc_set_expected_password(&adapter, 0U) != 0);
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 12 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

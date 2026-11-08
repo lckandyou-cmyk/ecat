@@ -291,6 +291,11 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
         return ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED;
     }
 
+    /* 空载荷不能代表可启动固件；在任何目标驱动副作用前拒绝。 */
+    if (hdr->payload_length == 0U) {
+        return ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY;
+    }
+
     /* 10. payload_length 未超过本地硬编码配置中分配的分区容量上限 */
     if (tcfg->max_payload_size > 0U && hdr->payload_length > tcfg->max_payload_size) {
         return ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE;
@@ -354,6 +359,8 @@ const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)
         return "min_allow_version > fw_version";
     case ECAT_FOE_EFW_ERR_ANTI_ROLLBACK:
         return "Anti-rollback check failed";
+    case ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY:
+        return "Payload length is zero";
     default:
         return "Unknown error";
     }

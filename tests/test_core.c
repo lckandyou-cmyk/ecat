@@ -443,6 +443,18 @@ static void test_header_rejections_driver_zero_calls(void)
     ret = ecat_foe_core_on_data(&core, efw, 64);
     TEST_ASSERT(ret != 0, "Header CRC 错被拒");
     TEST_ASSERT_EQ_INT(mcu.count_init, 0, "Header CRC 错驱动 init 必须为 0");
+
+    /* E. Header CRC 合法但 payload_length=0：在驱动副作用前拒绝 */
+    mock_driver_reset(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
+    build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0,
+                   0x01000000U, 0, NULL, 0);
+    ret = ecat_foe_core_on_data(&core, efw, 64);
+    TEST_ASSERT(ret != 0, "零长度 payload 固件必须被拒绝");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "空固件不得调用驱动 init");
+    TEST_ASSERT_EQ_INT(mcu.count_invalidate, 0, "空固件不得清除原镜像有效标记");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "空固件不得提交有效标记");
 }
 
 /* 8. 文件名拒绝驱动调用为 0 (授权改动 3.a 验证: 格式错回 0x8004，项目不符/目标禁用回 0x8001) */

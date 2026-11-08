@@ -111,7 +111,7 @@
 8. `hardware_id` 与本地硬编码配置完全一致；
 9. `hw_ver_min <= hw_ver_max`，且当前设备的本地硬件版本必须落在 `[hw_ver_min, hw_ver_max]` 区间内（两端均包含）；
 10. `target_id` 为已知合法目标，且该目标在本地使能宏中已开启（未开启的目标一律拒绝）；
-11. `payload_length` 未超过该目标在本地静态配置 `ECAT_FOE_xxx_MAX_SIZE` 中分配的分区容量上限（分区容量只认本地静态配置，驱动不暴露容量）；
+11. `payload_length` 必须大于 0，且未超过该目标在本地静态配置 `ECAT_FOE_xxx_MAX_SIZE` 中分配的分区容量上限（分区容量只认本地静态配置，驱动不暴露容量）；空负载不是有效固件，不得触发目标驱动或提交有效标记；
 12. **64 位总长度严格约束与即时熔断**：头部校验通过后，立即以 64 位整型计算出期望总长度：
     $$\text{Expected\_Total} = (\text{uint64\_t})\text{header\_length} + (\text{uint64\_t})\text{payload\_length}$$
     在流式接收过程中，以回调块为检测粒度：累计接收偏移加上当前回调块长度若超过 Expected_Total，解析器必须整块拒绝，立即返回 FoE ERR 熔断退出，不等传输结束，且不再向物理存储写入任何数据；在传输正常结束时，累计接收总字节数必须严格等于 Expected_Total。

@@ -44,6 +44,7 @@ typedef struct {
     ecat_foe_core_t *core;                /**< 关联的核心机上下文 */
     ecat_foe_ssc_async_t *async_gate;      /**< 可选：异步 DATA/BUSY 门控 */
     uint32_t         max_packet_size;     /**< SSC 邮箱配置的单包最大容量 (若已知) */
+    uint32_t         expected_password;    /**< 允许的 FoE 密码，默认 0 */
     bool             session_active;      /**< 当前会话是否处于激活状态 */
     bool             async_final_acked;   /**< 异步末包已完成并向 SSC 确认 */
 } ecat_foe_ssc_adapter_t;
@@ -55,6 +56,14 @@ typedef struct {
  * @param max_packet_size SSC 邮箱单包大小 (通常为邮箱数据载荷容量)
  */
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size);
+
+/**
+ * Set the FoE access password expected by this adapter. Defaults to zero after
+ * init; configure this before accepting WRQ requests when using a nonzero value.
+ * This is protocol-level access control, not cryptographic firmware authentication.
+ */
+int ecat_foe_ssc_set_expected_password(ecat_foe_ssc_adapter_t *adapter,
+                                       uint32_t expected_password);
 
 /** Bind an initialized asynchronous DATA gate while keeping WRQ validation in the core. */
 void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,

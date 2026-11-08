@@ -144,6 +144,8 @@ def pack_efw(
         raise ValueError('最低允许版本不能大于固件版本')
     if target_id not in TARGET_ID_TO_NAME:
         raise ValueError('不支持的升级目标 ID')
+    if len(bin_data) == 0:
+        raise ValueError('固件有效负载不能为空')
     if foe_packet_size < 0:
         raise ValueError('FoE 单包大小不能为负数')
     header_length = EFW_HEADER_MIN_LEN  # 64
@@ -267,6 +269,9 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
         return False
     if target_id not in TARGET_ID_TO_NAME:
         print(f'错误: 不支持的升级目标 ID: {target_id}', file=sys.stderr)
+        return False
+    if payload_length == 0:
+        print('错误: 固件有效负载不能为空', file=sys.stderr)
         return False
 
     # 校验流总长度

@@ -78,7 +78,8 @@ typedef enum {
     ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED,      /**< target_id 在从站本地未开启使能 */
     ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE,       /**< payload_length 超过本地分区容量上限 */
     ECAT_FOE_EFW_ERR_MIN_ALLOW_VER_INVALID,   /**< 允许运行下限大于固件版本 (min_allow_version > fw_version) */
-    ECAT_FOE_EFW_ERR_ANTI_ROLLBACK            /**< 防回滚拦截: 固件版本低于本地持久化下限 */
+    ECAT_FOE_EFW_ERR_ANTI_ROLLBACK,           /**< 防回滚拦截: 固件版本低于本地持久化下限 */
+    ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY            /**< 固件有效载荷长度为零 */
 } ecat_foe_efw_err_t;
 
 /* -------------------------------------------------------------------------- */

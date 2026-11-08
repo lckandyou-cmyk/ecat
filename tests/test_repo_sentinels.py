@@ -181,6 +181,88 @@ def test_existing_non_empty_build(repo_dir: str):
     print("  [PASS] 已有非空 build 目录保护验证通过：build/user.txt 完好保留，未发生递归误删")
 
 
+def test_forged_manifest_hardlink_rejected(repo_dir: str):
+    """验证即使清单自校验可伪造，也不能授权覆盖指向外部哨兵的硬链接。"""
+    print("\n[TEST] 验证伪造清单无法授权覆盖硬链接目标...")
+    tools_path = os.path.join(repo_dir, "tools")
+    if tools_path not in sys.path:
+        sys.path.insert(0, tools_path)
+    import safe_build
+
+    with tempfile.TemporaryDirectory(prefix="foe_hardlink_manifest_") as isolated_tmp:
+        original_tempdir = safe_build.tempfile.tempdir
+        safe_build.tempfile.tempdir = isolated_tmp
+        try:
+            build_dir = os.path.join(isolated_tmp, "build")
+            os.mkdir(build_dir)
+            sentinel = os.path.join(isolated_tmp, "user_sentinel.bin")
+            content = b"USER_FILE_MUST_NOT_BE_OVERWRITTEN_VIA_HARDLINK"
+            with open(sentinel, "wb") as f:
+                f.write(content)
+            artifact = os.path.join(build_dir, "test_runner_efw")
+            os.link(sentinel, artifact)
+
+            manifest = {
+                "magic": safe_build.MANIFEST_MAGIC,
+                "version": 1,
+                "created_by": "foe_build_system",
+                "artifacts": {
+                    "test_runner_efw": {
+                        "hash": hashlib.sha256(content).hexdigest(),
+                        "size": len(content)
+                    }
+                },
+                "dsym_files": {},
+                "dsym_dirs": []
+            }
+            manifest["checksum"] = safe_build.compute_manifest_checksum(manifest)
+            with open(os.path.join(build_dir, safe_build.MANIFEST_NAME), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+
+            rejected = False
+            try:
+                safe_build.check_before_build(build_dir, ["test_runner_efw"], overwrite=True)
+            except ValueError as exc:
+                rejected = "硬链接" in str(exc)
+            assert rejected, "安全检查必须拒绝伪造清单登记的硬链接构建目标"
+            expected_hash = hashlib.sha256(content).hexdigest()
+            safe_build.save_host_build_voucher(
+                build_dir,
+                {"test_runner_efw": {"hash": expected_hash}},
+                {},
+                manifest_hash=safe_build.sha256_file(os.path.join(build_dir, safe_build.MANIFEST_NAME))
+            )
+            hardlink_rejected = False
+            try:
+                safe_build.check_before_build(build_dir, ["test_runner_efw"], overwrite=True)
+            except ValueError as exc:
+                hardlink_rejected = "硬链接" in str(exc)
+            assert hardlink_rejected, "即便存在可匹配清单的凭据，硬链接目标仍须被拒绝"
+            with open(sentinel, "rb") as f:
+                assert f.read() == content, "硬链接保护失败：外部哨兵字节被改变"
+            assert os.stat(sentinel).st_nlink == 2, "拒绝后不应更改或拆除用户的硬链接"
+
+            dsym_build_dir = os.path.join(isolated_tmp, "build_dsym")
+            os.mkdir(dsym_build_dir)
+            dsym_file = os.path.join(
+                dsym_build_dir, "test_runner_efw.dSYM", "Contents",
+                "Resources", "DWARF", "test_runner_efw")
+            os.makedirs(os.path.dirname(dsym_file))
+            os.link(sentinel, dsym_file)
+            dsym_rejected = False
+            try:
+                safe_build.check_before_build(
+                    dsym_build_dir, ["test_runner_efw"], overwrite=True)
+            except ValueError as exc:
+                dsym_rejected = "硬链接" in str(exc)
+            assert dsym_rejected, "即便覆盖模式也必须拒绝 dSYM 内的硬链接文件"
+            with open(sentinel, "rb") as f:
+                assert f.read() == content, "dSYM 硬链接保护失败：外部哨兵字节被改变"
+        finally:
+            safe_build.tempfile.tempdir = original_tempdir
+    print("  [PASS] 伪造自校验清单不能授权硬链接覆盖，外部哨兵逐字节不变")
+
+
 def test_user_manifest_and_dsym_protection(repo_dir: str):
     """测试 7: 验证用户预存清单与 dSYM 内部用户文件的非递归保护"""
     print("\n[TEST 7] 验证用户清单与 dSYM 内部用户文件保护 (复现审查数据丢失场景并验证防御)...")
@@ -1366,6 +1448,7 @@ def main():
         test_concurrent_make(tmp_repo, "test", expected_hashes, "CONCURRENT 2")
 
         test_existing_non_empty_build(tmp_repo)
+        test_forged_manifest_hardlink_rejected(tmp_repo)
         test_user_manifest_and_dsym_protection(tmp_repo)
         test_modified_artifact_protection(tmp_repo)
         test_existing_identical_output_defense(tmp_repo)

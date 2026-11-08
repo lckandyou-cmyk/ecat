@@ -35,6 +35,15 @@ def sha256_file(filepath: str) -> str:
     return h.hexdigest()
 
 
+def is_hardlinked_regular_file(filepath: str) -> bool:
+    """Return true for regular files with another directory entry to the same inode."""
+    try:
+        st = os.lstat(filepath)
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
+
+
 def compute_manifest_checksum(data: dict) -> str:
     """计算清单核心数据结构的哈希指纹，防止清单被篡改"""
     core_data = {
@@ -453,9 +462,18 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
             if expected_csum != actual_csum:
                 raise FileExistsError(f"安全拒绝：已有清单指纹不吻合（疑似被手动修改或非标准清单），拒绝覆盖")
 
+            host_voucher = verify_host_build_voucher(build_dir)
+            if (not host_voucher or
+                host_voucher.get("manifest_hash") != sha256_file(manifest_path)):
+                raise FileExistsError("安全拒绝：清单缺少匹配的宿主构建凭据，不能据此覆盖已有文件")
+
             for afname in mdata.get("artifacts", {}):
                 if not is_safe_artifact_name(afname):
                     raise FileExistsError(f"安全拒绝：已有清单中包含非受控路径 {afname}，疑似用户文件")
+                rec = mdata["artifacts"][afname]
+                expected_hash = rec.get("hash") if isinstance(rec, dict) else rec
+                if host_voucher.get("artifacts", {}).get(afname) != expected_hash:
+                    raise FileExistsError(f"安全拒绝：清单产物 {afname} 与宿主构建凭据不匹配")
 
         recorded_artifacts = mdata.get("artifacts", {})
         recorded_dsym_dirs = set(mdata.get("dsym_dirs", []))
@@ -465,6 +483,8 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
         fpath = os.path.join(build_dir, fname)
         if os.path.islink(fpath):
             raise ValueError(f"安全拒绝：构建目标为符号链接: {fpath}")
+        if is_hardlinked_regular_file(fpath):
+            raise ValueError(f"安全拒绝：构建目标为硬链接: {fpath}")
 
         dsym_name = fname + ".dSYM"
         dsym_path = fpath + ".dSYM"
@@ -486,6 +506,13 @@ def check_before_build(build_dir: str, target_files: list, overwrite: bool = Fal
 
         # 检查调试符号目录：若既存但在清单中未登记，或内部含有未登记/已修改文件，主动报错拒绝
         if os.path.exists(dsym_path):
+            # Check every existing regular file, including unrecorded contents and
+            # overwrite mode: the linker may replace these paths in place.
+            for root, _, files in os.walk(dsym_path):
+                for f in files:
+                    fp = os.path.join(root, f)
+                    if is_hardlinked_regular_file(fp):
+                        raise ValueError(f"安全拒绝：调试符号文件为硬链接: {fp}")
             if dsym_name not in recorded_dsym_dirs:
                 if not overwrite:
                     raise FileExistsError(f"安全拒绝：调试符号目录已存在且未在清单中登记: {dsym_path}")
@@ -523,6 +550,8 @@ def record_build(build_dir: str, target_files: list):
             fpath = os.path.join(build_dir, fname)
             if os.path.islink(fpath):
                 raise ValueError(f"安全拒绝：构建目标为符号链接: {fpath}")
+            if is_hardlinked_regular_file(fpath):
+                raise ValueError(f"安全拒绝：构建目标为硬链接: {fpath}")
 
             if os.path.isfile(fpath):
                 artifacts[fname] = {
@@ -540,6 +569,8 @@ def record_build(build_dir: str, target_files: list):
                     for f in files:
                         fp = os.path.join(root, f)
                         if not os.path.islink(fp) and os.path.isfile(fp):
+                            if is_hardlinked_regular_file(fp):
+                                raise ValueError(f"安全拒绝：调试符号文件为硬链接: {fp}")
                             rel = os.path.relpath(fp, build_dir)
                             if is_safe_dsym_relpath(rel):
                                 dsym_files[rel] = sha256_file(fp)
@@ -683,6 +714,9 @@ def clean_build(build_dir: str):
         for fname, finfo in raw_artifacts.items():
             fpath = os.path.join(build_dir, fname)
             if os.path.isfile(fpath) and not os.path.islink(fpath):
+                if is_hardlinked_regular_file(fpath):
+                    print(f"  [WARN] {fname} 是硬链接，为保护其他路径的文件而保留。")
+                    continue
                 expected_hash = finfo.get("hash") if isinstance(finfo, dict) else finfo
                 # 严格双重校验：必须与宿主真实凭据吻合
                 if fname not in voucher_artifacts or voucher_artifacts[fname] != expected_hash:
@@ -704,6 +738,9 @@ def clean_build(build_dir: str):
 
             fpath = os.path.join(build_dir, rel_file)
             if os.path.isfile(fpath) and not os.path.islink(fpath):
+                if is_hardlinked_regular_file(fpath):
+                    print(f"  [WARN] {rel_file} 是硬链接，为保护其他路径的文件而保留。")
+                    continue
                 if rel_file not in voucher_dsym_files or voucher_dsym_files[rel_file] != expected_hash:
                     print(f"  [WARN] {rel_file} 缺乏真实构建凭据，保留文件不予删除。")
                     continue
