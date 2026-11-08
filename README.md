@@ -82,17 +82,6 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 
 宿主测试通过不等于硬件或完整协议栈验证。SOES 测试基线、文件哈希和限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)。
 
-## 本地开发测试
-
-需要 C99 编译器、Python 3、`make` 和 `pdftotext`：
-
-```sh
-make test CC=clang
-make test-asan CC=clang
-```
-
-`make test-soes` 和 `make test-bootloader` 需要额外准备项目指定版本的 SOES 源文件。请按照 [示例文档](examples/bootloader_soes/README.md)中的提交号与哈希，将四个指定文件复制到独立目录后再运行。不要将完整 SOES 源码目录直接作为 `SOES_DIR`；其余头文件可能覆盖本仓库的宿主测试桩。此流程仍是宿主测试，不代表硬件验证。
-
 ## 安全边界
 
 - `.efw` 中的 CRC32 用于检测意外损坏，不提供固件来源认证。项目 ID 和硬件 ID 也不是认证凭据；产品如需防恶意固件，必须另行实现签名验证和信任链。

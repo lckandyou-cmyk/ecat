@@ -82,17 +82,6 @@ Start with the [SOES bootloader example](examples/bootloader_soes/README.md) for
 
 Passing host tests does not establish hardware or full protocol-stack validation. See the [SOES integration analysis](docs/architecture/soes-integration-options.md) for the test baseline, source hashes, and limitations.
 
-## Host development tests
-
-Requirements: a C99 compiler, Python 3, `make`, and `pdftotext`.
-
-```sh
-make test CC=clang
-make test-asan CC=clang
-```
-
-`make test-soes` and `make test-bootloader` also require the SOES revision specified by this project. Follow the commit and hash instructions in the [example documentation](examples/bootloader_soes/README.md), then copy the four required source files into a separate directory. Do not use the complete SOES source tree as `SOES_DIR`; its other headers may override this repository's host stubs. These remain host tests, not hardware validation.
-
 ## Security boundaries
 
 - CRC32 in `.efw` detects accidental corruption; it does not authenticate firmware. Project and hardware IDs are not authentication credentials. Products requiring protection against malicious firmware must implement signature verification and a trust chain.
