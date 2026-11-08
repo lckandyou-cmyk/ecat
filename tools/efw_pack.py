@@ -75,8 +75,14 @@ def _remove_created_file(path: str, identity):
 def safe_output_for_write(path: str, overwrite: bool = False, protected_paths=()):
     """Write replacements beside the target and publish only after a successful close."""
     if not overwrite:
-        with safe_open_for_write(path, protected_paths=protected_paths) as stream:
-            yield stream
+        stream = safe_open_for_write(path, protected_paths=protected_paths)
+        identity = os.fstat(stream.fileno())
+        try:
+            with stream:
+                yield stream
+        except BaseException:
+            _remove_created_file(path, identity)
+            raise
         return
     if not hasattr(os, 'O_NOFOLLOW'):
         raise ValueError('当前平台不支持安全覆盖；请选择不存在的输出路径')

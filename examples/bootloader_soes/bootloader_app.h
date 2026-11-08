@@ -90,7 +90,9 @@ int bootloader_app_step(bootloader_app_t *app,
                         void (*foeprocess_fn)(void));
 
 /**
- * @brief 主动中止升级并复位 Bootloader 核心会话
+ * @brief 主动中止升级并复位核心及已配置的 SOES 会话
+ *
+ * 未提供 reset_fn 时，调用方须在重新传输前复位协议栈。
  *
  * @param app Bootloader 上下文指针
  */

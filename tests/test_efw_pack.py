@@ -43,6 +43,15 @@ def test_overwrite_write_failure_preserves_output():
             with open(output, 'rb') as f:
                 assert f.read() == b'original output'
             assert not any(name.startswith('.ecat-efw-') for name in os.listdir(tmpdir))
+        # New output paths must also be removed after a failed write or close.
+        for args in (pack + [output],
+                     [sys.executable, PACK_TOOL, 'unpack', package,
+                      '--extract-bin', output]):
+            os.unlink(output)
+            result = subprocess.run(args, capture_output=True, preexec_fn=limit_output)
+            assert result.returncode != 0
+            assert not os.path.lexists(output)
+            assert subprocess.run(args, capture_output=True).returncode == 0
         assert subprocess.run(pack + [output, '--overwrite'], capture_output=True).returncode == 0
         assert subprocess.run([sys.executable, PACK_TOOL, 'unpack', package,
                                '--extract-bin', output, '--overwrite'], capture_output=True).returncode == 0

@@ -529,6 +529,19 @@ int main(void)
         assert(app.flash_drv.is_initialized == true);
         assert(app.flash_drv.is_invalidated == true);
 
+        /* 应用主动中止后，首次新的 WRQ 就必须成功。 */
+        bootloader_app_abort(&app);
+        assert(app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == 0);
+        for (uint32_t packet = 1; packet <= 3; packet++) {
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, packet,
+                                              &efw_200[(packet - 1U) * 116U], 116, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK && resp.packet_number == packet);
+        }
+        assert(app.core.session_active == true);
+
         /* 主站此时下发 ERR 报文主动中断当前升级 */
         assert(bootloader_master_send_err(&app, &s_foe_cfg, 0x8000) == 0);
 

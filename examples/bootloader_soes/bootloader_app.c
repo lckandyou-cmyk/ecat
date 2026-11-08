@@ -139,5 +139,8 @@ void bootloader_app_abort(bootloader_app_t *app)
 {
     if (app != NULL && app->is_initialized) {
         ecat_foe_core_on_abort(&app->core);
+        if (app->adapter.foe_reset_fn != NULL) {
+            app->adapter.foe_reset_fn();
+        }
     }
 }

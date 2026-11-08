@@ -50,6 +50,19 @@ with tempfile.TemporaryDirectory(prefix="ecat-release-test-") as directory:
     (root / "corrupt.efw").write_bytes(corrupt)
     run("inspect", "corrupt.efw", ok=False)
     run("info", "corrupt.efw", ok=False)
+    # Exercise signing and verification in the packaged executable itself.
+    (root / "seed.bin").write_bytes(bytes(range(32)))
+    run("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "MCU",
+        "-v", "1.0.0.0", "--signing-key", "seed.bin",
+        "--public-key-out", "public.bin", "-o", "signed.efw")
+    assert len((root / "public.bin").read_bytes()) == 32
+    verified = run("info", "signed.efw", "--public-key", "public.bin")
+    assert "Ed25519ph 已验证".encode("utf-8") in verified.stdout
+    signed = bytearray((root / "signed.efw").read_bytes())
+    signed[80] ^= 1  # Corrupt the signature, but keep the header CRC valid.
+    struct.pack_into("<I", signed, 144, binascii.crc32(signed[:144]) & 0xffffffff)
+    (root / "bad-signature.efw").write_bytes(signed)
+    run("info", "bad-signature.efw", "--public-key", "public.bin", ok=False)
     # Reject self-contradictory metadata at pack and inspect, before touching files.
     base = ("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "MCU", "-v", "1.0.0.0")
     run(*base, "--hw-ver-min", "9", "--hw-ver-max", "1", "-o", "bad-range.efw", ok=False)

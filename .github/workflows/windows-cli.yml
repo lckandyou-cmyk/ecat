@@ -37,6 +37,8 @@ jobs:
         run: make test CC=clang PYTHON=python
       - name: Run ASan and UBSan tests
         run: make test-asan CC=clang PYTHON=python
+      - name: Run isolated repository sentinel tests
+        run: make test-sentinels CC=clang PYTHON=python
       # SOES integration requires separately obtained, pinned external sources;
       # SSC and physical hardware integration are not covered by this job.
   build:
@@ -75,7 +77,7 @@ jobs:
           $metadata = "VERSION = '$version'`nBUILD_DATE = '$buildDate'`n"
           [IO.File]::WriteAllText($metadataPath, $metadata, [Text.UTF8Encoding]::new($false))
       - name: Build Windows console executable
-        run: python -m PyInstaller --onefile --console --clean --collect-all nacl --paths "$env:RUNNER_TEMP" --name ecat-efw tools/efw_pack.py
+        run: python -m PyInstaller --onefile --console --clean --collect-all nacl --hidden-import nacl.bindings --hidden-import _cffi_backend --paths "$env:RUNNER_TEMP" --name ecat-efw tools/efw_pack.py
       - name: Test packaged executable
         run: python tests/test_release_cli.py dist/ecat-efw.exe
       - name: Package and checksum
