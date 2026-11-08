@@ -587,6 +587,53 @@ int main(void)
         printf("  [PASS] SOES 包号错误及无响应时中止核心会话并允许重试\n");
     }
 
+    /* EOF before a complete header must never produce a success ACK. */
+    for (int partial = 0; partial <= 1; partial++) {
+        reset_test_env();
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        assert(bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, s_test_payload, sizeof(s_test_payload)) > 116U);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        if (partial) {
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U, s_test_efw_buf, 116U, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        }
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, partial ? 2U : 1U, NULL, 0U, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
+        assert(!app.core.session_active && !app.flash_drv.is_finalized);
+        assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+    }
+
+    /* Unsupported opcode and malformed FoE must not strand an active driver. */
+    for (int malformed = 0; malformed <= 1; malformed++) {
+        reset_test_env();
+        s_foe_cfg.buffer_size = 64U;
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        assert(bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, s_test_payload, sizeof(s_test_payload)) > 232U);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U, s_test_efw_buf, 116U, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2U, s_test_efw_buf + 116U, 116U, &resp) == 0);
+        assert(app.core.session_active && app.flash_drv.is_initialized);
+        memset(MBX, 0, 12U);
+        MBX[0] = malformed ? 2U : 6U;
+        MBX[5] = 4U;
+        MBX[6] = 0x7fU;
+        MBXcontrol[0].state = MBXstate_inclaim;
+        (void)bootloader_app_step(&app, &s_foe_cfg, MBX, malformed ? 8U : 12U, NULL, 0, NULL);
+        assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(!app.flash_drv.is_initialized && app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        assert(ecat_foe_core_upgrade_incomplete(&app.core));
+    }
+
     /* Zero-length EOF: the native stack ignores close failure, so post hook
      * must replace the false ACK while preserving successful EOF behavior. */
     for (int fail_finalize = 0; fail_finalize <= 1; fail_finalize++) {

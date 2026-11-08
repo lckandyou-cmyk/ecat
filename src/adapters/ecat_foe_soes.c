@@ -24,6 +24,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->buffer_size = buffer_size;
     adapter->al_error_fn = NULL;
     adapter->foe_reset_fn = NULL;
+    adapter->pending_other_foe = false;
+    adapter->write_callback_failed = false;
     adapter->pending_wrq_response = false;
     adapter->pending_data_response = false;
     adapter->pending_data_packet = 0U;
@@ -136,6 +138,7 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
 
     /* 安全防御：若存在尚未被后置钩子确认的暂存 WRQ，说明时序错乱或后置校验被绕过，拒绝写入并释放暂存 */
     if (adapter->has_staged_wrq) {
+        adapter->write_callback_failed = true;
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
@@ -145,6 +148,7 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
     /* 0 长度包结束路径 */
     if (length == 0) {
         if (ecat_foe_core_on_end(adapter->core) != 0) {
+            adapter->write_callback_failed = true;
             return 1U;
         }
         return 0U;
@@ -152,12 +156,14 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
 
     /* 写入数据块 */
     if (ecat_foe_core_on_data(adapter->core, data, length) != 0) {
+        adapter->write_callback_failed = true;
         return 1U;
     }
 
     /* 回调级结束判定: 当本次接收字节数小于 buffer_size 时判定为最后一包 (短包路径) */
     if (adapter->buffer_size > 0 && length < adapter->buffer_size) {
         if (ecat_foe_core_on_end(adapter->core) != 0) {
+            adapter->write_callback_failed = true;
             return 1U;
         }
     }
@@ -276,6 +282,8 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     adapter->mbx_ctx.newly_claimed_slot = -1;
     adapter->pending_data_response = false;
     adapter->pending_wrq_response = false;
+    adapter->pending_other_foe = false;
+    adapter->write_callback_failed = false;
     for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
         adapter->mbx_ctx.pre_states[i] = adapter->mbx_ctx.mbx_control_states[i];
     }
@@ -287,6 +295,11 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     /* 每次前置钩子启动时，恢复真实条目数 */
     if (adapter->original_n_files > 0) {
         foe_cfg->n_files = adapter->original_n_files;
+    }
+
+    /* 标记可识别的 FoE 输入，以跟踪协议栈对未知或畸形请求的中止。 */
+    if (mbx_buf_len >= ECAT_MBX_HDR_SIZE && (mbx_buf[5] & 0x0FU) == ECAT_MBX_TYPE_FOE) {
+        adapter->pending_other_foe = true;
     }
 
     /* 帧边界校验：最小必须包含 6 字节 Mailbox 头 + 6 字节 FoE 头 */
@@ -319,11 +332,13 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
      */
     uint8_t opcode = mbx_buf[ECAT_MBX_HDR_SIZE];
     if (opcode == ECAT_FOE_OP_DATA) {
+        adapter->pending_other_foe = false;
         adapter->pending_data_response = true;
         adapter->pending_data_packet = (uint32_t)mbx_buf[8] | ((uint32_t)mbx_buf[9] << 8) |
                                        ((uint32_t)mbx_buf[10] << 16) | ((uint32_t)mbx_buf[11] << 24);
     }
     if (opcode == ECAT_FOE_OP_ERR) {
+        adapter->pending_other_foe = false;
         /* 主站下发 FoE ERR 中止报文：
          * 1. 安全丢弃暂存 WRQ (若存在)；
          * 2. 若核心处于活跃会话中，通知核心状态机执行 abort，
@@ -343,6 +358,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         return 0; /* 非 WRQ 且非 ERR 请求直接放行 */
     }
 
+    adapter->pending_other_foe = false;
     adapter->pending_wrq_response = true;
 
     /* 提取动态文件名 */
@@ -421,6 +437,28 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         foe_cfg->n_files = adapter->original_n_files;
     }
 
+    if (adapter->pending_other_foe) {
+        unsigned claimed = 0U;
+        bool rejected = false;
+        adapter->pending_other_foe = false;
+        for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+            if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
+                adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
+                const uint8_t *slot = &adapter->mbx_ctx.mbx_buffers[i * adapter->mbx_ctx.buffer_size];
+                claimed++;
+                if (slot[0] >= ECAT_FOE_HDR_SIZE && slot[1] == 0U &&
+                    (slot[5] & 0x0FU) == ECAT_MBX_TYPE_FOE &&
+                    slot[6] == ECAT_FOE_OP_ERR && slot[7] == 0U) rejected = true;
+            }
+        }
+        if ((rejected || claimed == 0U) &&
+            (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+             adapter->core->state == ECAT_FOE_STATE_DATA)) {
+            ecat_foe_core_on_abort(adapter->core);
+            if (claimed == 0U && adapter->foe_reset_fn != NULL) adapter->foe_reset_fn();
+        }
+    }
+
     if (adapter->pending_wrq_response) {
         unsigned claimed = 0;
         bool protocol_aborted = false;
@@ -465,7 +503,8 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                     }
                 }
             }
-            if (claimed != 1U || !ack || adapter->core->state == ECAT_FOE_STATE_ERROR) {
+            if (claimed != 1U || !ack || adapter->write_callback_failed ||
+                adapter->core->state == ECAT_FOE_STATE_ERROR) {
                 for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
                     if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
                         adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
