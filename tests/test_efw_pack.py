@@ -55,6 +55,25 @@ def test_positive_cross_check():
         # 运行 inspect 验证
         res_insp = subprocess.run([sys.executable, PACK_TOOL, 'inspect', out_path], capture_output=True, text=True)
         assert res_insp.returncode == 0, f"inspect 验证失败: {res_insp.stderr}"
+        renamed_path = os.path.join(tmpdir, 'customer-file.bin')
+        os.rename(out_path, renamed_path)
+        res_info = subprocess.run(
+            [sys.executable, PACK_TOOL, 'info', renamed_path], capture_output=True, text=True)
+        assert res_info.returncode == 0, f"info 验证失败: {res_info.stderr}"
+        assert 'V1.2.3.4' in res_info.stdout
+        assert '0x10010001' in res_info.stdout
+        assert 'Header CRC32' in res_info.stdout and 'Payload CRC32' in res_info.stdout
+        assert '包内打包日期:     未提供' in res_info.stdout
+        assert '文件路径:' not in res_info.stdout, "info 应保持简洁，不应混入 inspect 详细报告"
+        corrupted_path = os.path.join(tmpdir, 'corrupt.anything')
+        with open(renamed_path, 'rb') as f:
+            corrupt_data = bytearray(f.read())
+        corrupt_data[-1] ^= 1
+        with open(corrupted_path, 'wb') as f:
+            f.write(corrupt_data)
+        res_bad_info = subprocess.run(
+            [sys.executable, PACK_TOOL, 'info', corrupted_path], capture_output=True, text=True)
+        assert res_bad_info.returncode != 0, "info 不应把 CRC 错误的固件包判为有效"
     print("  [PASS] Python 打包正例与规范 8.1 逐字节交叉比对")
 
 
@@ -184,6 +203,10 @@ def test_foe_packet_size_padding():
 
 if __name__ == '__main__':
     print("--- 运行 Python efw_pack 工具测试 ---")
+    version = subprocess.run([sys.executable, PACK_TOOL, '--version'], capture_output=True, text=True)
+    assert version.returncode == 0 and 'development' in version.stdout and 'unavailable' in version.stdout
+    help_result = subprocess.run([sys.executable, PACK_TOOL, '--help'], capture_output=True, text=True)
+    assert help_result.returncode == 0 and 'info' in help_result.stdout
     test_positive_cross_check()
     test_filename_generator()
     test_empty_payload_rejected_without_output()

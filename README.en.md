@@ -46,9 +46,11 @@ Run `ecat-efw` with Python 3 from the repository root:
   -p 0x10010001 -d 1 -t MCU -v 1.0.0.0
 
 ./ecat-efw inspect MY_PROJECT_MCU_V1.0.0.0.efw
+./ecat-efw info MY_PROJECT_MCU_V1.0.0.0.efw
+./ecat-efw --version
 ```
 
-`pack` wraps an existing `.bin` in an `.efw` package; it does not compile firmware. `inspect` checks the package structure and CRC. Project ID, hardware ID, target, and filename must match the device configuration. Existing output files are not overwritten by default. Run `./ecat-efw --help` for all options. CLI messages are currently in Chinese.
+`pack` wraps an existing `.bin` in an `.efw` package; it does not compile firmware. `inspect` prints detailed validation results, while `info` concisely shows the embedded firmware version, project and hardware IDs, target, payload size, and CRC results. Both identify packages by content, regardless of filename extension. The EFW format does not record a package build date; `--version` shows the CLI version and build date. Package validation does not establish device compatibility or bootability. Existing output files are not overwritten by default. Run `./ecat-efw --help` for all commands and options. CLI messages are currently in Chinese.
 
 ### Windows
 

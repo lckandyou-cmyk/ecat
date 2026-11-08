@@ -46,9 +46,11 @@ flowchart TD
   -p 0x10010001 -d 1 -t MCU -v 1.0.0.0
 
 ./ecat-efw inspect MY_PROJECT_MCU_V1.0.0.0.efw
+./ecat-efw info MY_PROJECT_MCU_V1.0.0.0.efw
+./ecat-efw --version
 ```
 
-`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`inspect` 检查包结构和 CRC。项目 ID、硬件 ID、目标和文件名必须与设备端配置相符。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部参数。
+`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`inspect` 输出详细校验信息，`info` 简洁显示包内版本、项目/硬件 ID、升级目标、固件大小和 CRC 结果。两者都按文件内容识别，不依赖扩展名。EFW 格式未记录打包日期；`--version` 显示 CLI 版本和构建日期。包校验不等同于目标设备兼容性或可启动性验证。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部命令和参数。
 
 ### Windows
 

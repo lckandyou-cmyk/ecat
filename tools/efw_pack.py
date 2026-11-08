@@ -17,6 +17,13 @@ import binascii
 import errno
 import stat
 
+try:
+    from ecat_build_info import BUILD_DATE, VERSION
+except ImportError:
+    # Source checkouts remain runnable without generated release metadata.
+    VERSION = "development"
+    BUILD_DATE = "unavailable"
+
 
 def safe_open_for_write(path: str, overwrite: bool = False, protected_paths=()):
     """Open a regular output without truncating protected or linked files."""
@@ -205,7 +212,8 @@ def pack_efw(
     return out_path
 
 
-def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False) -> bool:
+def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
+                summary: bool = False) -> bool:
     """
     解析并验证 .efw 文件
     """
@@ -288,19 +296,33 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False)
 
     target_name = TARGET_ID_TO_NAME.get(target_id, "未知")
 
-    print(f"=== .efw 结构、通用字段及 CRC 校验通过（设备兼容性未验证） ===")
-    print(f"  文件路径:          {efw_path}")
-    print(f"  文件总大小:        {file_size} 字节")
-    print(f"  头部长度:          {header_length} 字节")
-    print(f"  Header CRC32:      0x{expected_header_crc:08X} (校验通过)")
-    print(f"  Project ID:        0x{project_id:08X}")
-    print(f"  Hardware ID:       0x{hardware_id:08X}")
-    print(f"  支持硬件版本:      [{hw_ver_min}, {hw_ver_max}]")
-    print(f"  升级目标:          {target_id} ({target_name})")
-    print(f"  固件版本:          0x{fw_version:08X} (V{format_version_int(fw_version)})")
-    print(f"  允许运行下限:      0x{min_allow_version:08X} (V{format_version_int(min_allow_version)})")
-    print(f"  Payload 长度:      {payload_length} 字节")
-    print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
+    if summary:
+        print("EFW 包有效（结构和 CRC 校验通过；设备兼容性未验证）")
+        print(f"  EFW 格式版本:     {format_version}")
+        print(f"  固件版本:         V{format_version_int(fw_version)}")
+        print(f"  项目 ID:          0x{project_id:08X}")
+        print(f"  硬件 ID:          0x{hardware_id:08X}")
+        print(f"  硬件版本范围:     [{hw_ver_min}, {hw_ver_max}]")
+        print(f"  升级目标:         {target_name} (0x{target_id:04X})")
+        print(f"  最低允许版本:     V{format_version_int(min_allow_version)}")
+        print(f"  固件大小:         {payload_length} 字节")
+        print("  Header CRC32:     通过")
+        print("  Payload CRC32:    通过")
+        print("  包内打包日期:     未提供")
+    else:
+        print(f"=== .efw 结构、通用字段及 CRC 校验通过（设备兼容性未验证） ===")
+        print(f"  文件路径:          {efw_path}")
+        print(f"  文件总大小:        {file_size} 字节")
+        print(f"  头部长度:          {header_length} 字节")
+        print(f"  Header CRC32:      0x{expected_header_crc:08X} (校验通过)")
+        print(f"  Project ID:        0x{project_id:08X}")
+        print(f"  Hardware ID:       0x{hardware_id:08X}")
+        print(f"  支持硬件版本:      [{hw_ver_min}, {hw_ver_max}]")
+        print(f"  升级目标:          {target_id} ({target_name})")
+        print(f"  固件版本:          0x{fw_version:08X} (V{format_version_int(fw_version)})")
+        print(f"  允许运行下限:      0x{min_allow_version:08X} (V{format_version_int(min_allow_version)})")
+        print(f"  Payload 长度:      {payload_length} 字节")
+        print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
 
     if extract_bin:
         with safe_open_for_write(extract_bin, overwrite=overwrite, protected_paths=(efw_path,)) as f:
@@ -318,6 +340,11 @@ def main():
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="EtherCAT .efw 固件容器工具")
+    parser.add_argument(
+        "--version", action="version",
+        version=f"ecat-efw {VERSION} (built {BUILD_DATE})",
+        help="显示工具版本和构建日期并退出",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # pack 子命令
@@ -345,6 +372,9 @@ def main():
     unpack_p.add_argument("efw_file", help="待解包的 .efw 文件")
     unpack_p.add_argument("--extract-bin", default=None, help="提取 payload 至指定文件")
     unpack_p.add_argument("--overwrite", action="store_true", default=False, help="允许覆盖已有提取文件")
+
+    info_p = subparsers.add_parser("info", help="简洁显示并校验 .efw 固件包信息")
+    info_p.add_argument("efw_file", help="待检查的固件包（按内容识别，不依赖扩展名）")
 
     args = parser.parse_args()
 
@@ -378,6 +408,8 @@ def main():
     elif args.command in ("inspect", "unpack"):
         ok = inspect_efw(args.efw_file, extract_bin=args.extract_bin, overwrite=args.overwrite)
         sys.exit(0 if ok else 1)
+    elif args.command == "info":
+        sys.exit(0 if inspect_efw(args.efw_file, summary=True) else 1)
     else:
         parser.print_help()
         sys.exit(1)
