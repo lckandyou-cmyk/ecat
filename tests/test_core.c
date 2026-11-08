@@ -403,6 +403,48 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
 }
 
+static void test_soes_state_transition_aborts_active_session(void)
+{
+    static mock_driver_t mcu;
+    static mock_signature_verifier_t verifier;
+    mock_driver_init(&mcu);
+    memset(&verifier, 0, sizeof(verifier));
+    ecat_foe_core_t core;
+    setup_signature_core(&core, &mcu, &verifier);
+    uint8_t payload[16] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t n = build_signed_test_efw(efw, payload, sizeof(payload));
+    TEST_ASSERT(n > ECAT_FOE_EFW_HEADER_MIN_LEN, "签名固件含有效载荷");
+    TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "WRQ 接受");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "头部有效");
+    TEST_ASSERT(core.session_active && core.signature_active, "驱动和验签会话已启动");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "目标记录未完成");
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 64U);
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "未完成时阻止迁移");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "驱动恰好中止一次");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "验签器恰好中止一次");
+    TEST_ASSERT(!core.session_active && !core.signature_active, "活跃资源释放");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "中止后保留未完成标记");
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "重复请求仍拦截");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "重复请求不再次中止驱动");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "重复请求不再次中止验签器");
+    memset(&verifier, 0, sizeof(verifier));
+    memcpy(verifier.expected, efw, n);
+    verifier.expected_len = n;
+    TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "新 WRQ 恢复");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, n), 0, "恢复传输");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "恢复提交");
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "成功后清除未完成标记");
+    an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "成功后允许迁移");
+}
+
 static void test_optional_signature_policy_and_readback(void)
 {
     static mock_driver_t mcu;
@@ -2029,6 +2071,7 @@ static void test_mid_session_drop_same_core_recovery(void)
     TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "中断未完成状态下坚决拦截 BOOT->INIT");
     TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发注入的回调");
     TEST_ASSERT_EQ_INT(s_mock_al_error_val, ECAT_AL_STATUS_CODE_NO_VALID_FW, "向 al_error_fn 传入 0x0014");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "状态迁移时及时中止驱动");
 
     /* 严禁调用 setup_default_core / ecat_foe_core_init / memset(&core) !
      * 同一个 core 实例必须能够自愈残留驱动与状态 */
@@ -2040,7 +2083,7 @@ static void test_mid_session_drop_same_core_recovery(void)
     /* 会话 2: 在同一个 core 实例上直接发起新的合法 WRQ */
     int ret_wrq = ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT_EQ_INT(ret_wrq, 0, "同一个 core 实例上新会话 WRQ 必须成功受理");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "核心内部自动主动清理并释放上一个中断会话的驱动资源");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "新 WRQ 不重复中止已清理的驱动");
 
     /* 送入完整合法固件并结束升级 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
@@ -2980,6 +3023,7 @@ int main(void)
     RUN_TEST(test_zero_length_chunk_and_exact_division);
     RUN_TEST(test_header_rejections_driver_zero_calls);
     RUN_TEST(test_filename_rejection_driver_zero_calls);
+    RUN_TEST(test_soes_state_transition_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);
     RUN_TEST(test_stream_length_under_and_over_receive);

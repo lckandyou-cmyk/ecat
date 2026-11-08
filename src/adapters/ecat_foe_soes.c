@@ -203,6 +203,11 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
     }
 
     if (*as == ECAT_TRANSITION_BOOT_TO_INIT && should_block_init) {
+        /* 邮箱已停止：释放尚未结束的驱动/验签会话，未完成标记必须保留。 */
+        if (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+            adapter->core->state == ECAT_FOE_STATE_DATA || adapter->core->session_active) {
+            ecat_foe_core_on_abort(adapter->core);
+        }
         /* 改写目标状态为 BOOT + Error (0x03 | 0x10 = 0x13) */
         *an = ECAT_AL_STATUS_BOOT_ERROR;
         if (adapter->al_error_fn != NULL) {

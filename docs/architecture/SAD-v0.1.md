@@ -99,7 +99,7 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core);
     - **post 钩子（可改写最终结果，但邮箱已停）【待真机验证】**：
       `post_state_change_hook` 在 `switch` 完成之后调用，此时 `ESC_stopmbx()` 已执行。Hook 内修改 `*an` 与调用 `ESC_ALerror()` 的结果将在后续由 `ESC_ALstatus(an)` 写入 `0x130 AL Status`。拦截步骤：
       1. Hook 检测到 `*as == BOOT_TO_INIT`（`0x13`）且适配层拦截条件满足（如“最后提交失败”或会话未正常闭环）；
-      2. 改写目标状态：`*an = ESCboot | ESCerror;`（`ESCboot = 0x03`，`ESCerror = 0x10`）；
+      2. 邮箱停止后中止仍活跃的核心及验签会话，保留未完成标记；改写目标状态：`*an = ESCboot | ESCerror;`（`ESCboot = 0x03`，`ESCerror = 0x10`）；
       3. 调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE);`（`0x0014`），向 `0x134 AL Status Code` 写入固件无效错误码；
       4. SOES 因 `an & ESCerror` 置位跳过清错，通过 `ESC_ALstatus(an)` 将错误状态写入 `0x130`；
       5. **后果**：主站收到状态切换被拒绝，AL Status 停留在 BOOT+Error，AL Status Code 为 `0x0014`。**此时邮箱已停，主站只能看到错误码后重新走 INIT→BOOT 发起升级**（不能直接重试 WRQ）。
