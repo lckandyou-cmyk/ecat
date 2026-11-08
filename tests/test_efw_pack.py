@@ -8,9 +8,47 @@ import sys
 import tempfile
 import subprocess
 import binascii
+import signal
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK_TOOL = os.path.join(ROOT_DIR, 'tools', 'efw_pack.py')
+
+
+def test_overwrite_write_failure_preserves_output():
+    """A failed pack or extract must not truncate an existing output."""
+    if os.name != 'posix' or not hasattr(signal, 'SIGXFSZ'):
+        return
+    import resource
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source = os.path.join(tmpdir, 'input.bin')
+        package = os.path.join(tmpdir, 'source.efw')
+        output = os.path.join(tmpdir, 'output.bin')
+        with open(source, 'wb') as f:
+            f.write(b'A' * 4096)
+        pack = [sys.executable, PACK_TOOL, 'pack', '-i', source, '-p', '1', '-d', '1',
+                '-t', 'MCU', '-v', '1.0.0.0', '-o']
+        assert subprocess.run(pack + [package], capture_output=True).returncode == 0
+
+        def limit_output():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+
+        for args in (pack + [output, '--overwrite'],
+                     [sys.executable, PACK_TOOL, 'unpack', package,
+                      '--extract-bin', output, '--overwrite']):
+            with open(output, 'wb') as f:
+                f.write(b'original output')
+            result = subprocess.run(args, capture_output=True, preexec_fn=limit_output)
+            assert result.returncode != 0
+            with open(output, 'rb') as f:
+                assert f.read() == b'original output'
+            assert not any(name.startswith('.ecat-efw-') for name in os.listdir(tmpdir))
+        assert subprocess.run(pack + [output, '--overwrite'], capture_output=True).returncode == 0
+        assert subprocess.run([sys.executable, PACK_TOOL, 'unpack', package,
+                               '--extract-bin', output, '--overwrite'], capture_output=True).returncode == 0
+        with open(output, 'rb') as f:
+            assert f.read() == b'A' * 4096
+    print('  [PASS] pack/unpack 写入失败保留原输出，成功后原子替换')
 
 
 def test_positive_cross_check():
@@ -359,6 +397,7 @@ def test_signed_package_round_trip():
 
 if __name__ == '__main__':
     print("--- 运行 Python efw_pack 工具测试 ---")
+    test_overwrite_write_failure_preserves_output()
     version = subprocess.run([sys.executable, PACK_TOOL, '--version'], capture_output=True, text=True)
     assert version.returncode == 0 and 'development' in version.stdout and 'unavailable' in version.stdout
     help_result = subprocess.run([sys.executable, PACK_TOOL, '--help'], capture_output=True, text=True)

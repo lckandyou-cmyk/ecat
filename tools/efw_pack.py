@@ -16,6 +16,8 @@ import struct
 import binascii
 import errno
 import stat
+import tempfile
+from contextlib import contextmanager
 
 try:
     from ecat_build_info import BUILD_DATE, VERSION
@@ -67,6 +69,58 @@ def _remove_created_file(path: str, identity):
             os.unlink(path)
     except OSError:
         pass
+
+
+@contextmanager
+def safe_output_for_write(path: str, overwrite: bool = False, protected_paths=()):
+    """Write replacements beside the target and publish only after a successful close."""
+    if not overwrite:
+        with safe_open_for_write(path, protected_paths=protected_paths) as stream:
+            yield stream
+        return
+    if not hasattr(os, 'O_NOFOLLOW'):
+        raise ValueError('当前平台不支持安全覆盖；请选择不存在的输出路径')
+
+    original = None
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            original = os.fstat(fd)
+            if not stat.S_ISREG(original.st_mode) or original.st_nlink != 1:
+                raise ValueError('安全拒绝：输出不是普通文件或有多个硬链接')
+            for protected in protected_paths:
+                if os.path.samestat(original, os.stat(protected)):
+                    raise ValueError('安全拒绝：输出与输入是同一文件')
+        finally:
+            os.close(fd)
+
+    directory = os.path.dirname(os.path.abspath(path))
+    temp_fd, temp_path = tempfile.mkstemp(prefix='.ecat-efw-', dir=directory)
+    try:
+        if original is not None:
+            os.fchmod(temp_fd, stat.S_IMODE(original.st_mode))
+        with os.fdopen(temp_fd, 'wb') as stream:
+            temp_fd = -1
+            yield stream
+        if original is None:
+            # No-clobber publication if another file appeared during the write.
+            os.link(temp_path, path)
+            os.unlink(temp_path)
+        else:
+            current = os.lstat(path)
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or not os.path.samestat(original, current):
+                raise ValueError('安全拒绝：写入期间输出文件已改变')
+            os.replace(temp_path, path)
+    finally:
+        if temp_fd != -1:
+            os.close(temp_fd)
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
 
 
 # 格式规范常量
@@ -308,7 +362,7 @@ def pack_efw(
             raise
 
     try:
-        with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=package_protected) as f:
+        with safe_output_for_write(out_path, overwrite=overwrite, protected_paths=package_protected) as f:
             f.write(efw_data)
     except BaseException:
         if key_identity is not None:
@@ -474,7 +528,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
 
     if extract_bin:
         protected = tuple(path for path in (efw_path, public_key_path) if path)
-        with safe_open_for_write(extract_bin, overwrite=overwrite, protected_paths=protected) as f:
+        with safe_output_for_write(extract_bin, overwrite=overwrite, protected_paths=protected) as f:
             f.write(payload)
         print(f"  提取有效负载至:    {extract_bin}")
 
