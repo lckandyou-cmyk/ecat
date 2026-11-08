@@ -73,9 +73,11 @@ static uint32_t s_mock_version_floors[ECAT_FOE_TARGET_COUNT] = {0};
 static bool s_mock_get_floor_fail = false;
 static bool s_mock_commit_fail = false;
 static uint16_t s_mock_floor_fail_target_id = 0;
+static unsigned s_mock_get_floor_calls = 0;
 
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
 {
+    s_mock_get_floor_calls++;
     if (s_mock_get_floor_fail) {
         return -1;
     }
@@ -270,6 +272,7 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
 
     s_mock_get_floor_fail = false;
     s_mock_commit_fail = false;
+    s_mock_get_floor_calls = 0;
 
     int ret_init = ecat_foe_core_init(core, &cfg);
     (void)ret_init;
@@ -832,6 +835,52 @@ static void test_anti_rollback_full_behavior(void)
     port_get_version_floor(1, &floor_ver);
     TEST_ASSERT_EQ_INT(floor_ver, 0x01000000U, "事务失败后版本下限保持旧值");
     s_mock_commit_fail = false;
+}
+
+/* 防回滚 floor 回调只能收到已验证、启用且与 WRQ 一致的目标 ID。 */
+static void test_anti_rollback_rejects_target_before_floor_callback(void)
+{
+    static mock_driver_t mcu;
+    static mock_driver_t sii;
+    const uint16_t header_targets[] = {0U, ECAT_FOE_TARGET_COUNT + 1U, 2U, 3U, 1U};
+    const uint32_t header_versions[] = {
+        0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U
+    };
+    const ecat_foe_core_err_t expected_errors[] = {
+        ECAT_FOE_CORE_ERR_HDR_VERIFY,
+        ECAT_FOE_CORE_ERR_HDR_VERIFY,
+        ECAT_FOE_CORE_ERR_HDR_VERIFY,
+        ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH,
+        ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH
+    };
+    uint8_t payload[16] = {0};
+    uint8_t efw[256];
+
+    for (size_t i = 0; i < sizeof(header_targets) / sizeof(header_targets[0]); i++) {
+        mock_driver_init(&mcu);
+        mock_driver_init(&sii);
+        ecat_foe_core_t core;
+        setup_default_core(&core, &mcu, (header_targets[i] == 3U) ? &sii : NULL, NULL);
+        core.cfg.anti_rollback_enable = true;
+
+        size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U,
+                                        1U, 1U, header_targets[i], 0U,
+                                        header_versions[i], 0x01000000U,
+                                        payload, sizeof(payload));
+        TEST_ASSERT(efw_len >= ECAT_FOE_EFW_HEADER_MIN_LEN, "构造的 EFW 头部完整");
+        TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0,
+                           "先建立合法 MCU WRQ");
+        s_mock_get_floor_calls = 0;
+        int ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
+        TEST_ASSERT_EQ_INT(ret, -1, "非法、未启用或不匹配的头部目标必须拒绝");
+        TEST_ASSERT_EQ_INT(core.last_error, expected_errors[i], "错误类型与目标校验失败原因一致");
+        TEST_ASSERT_EQ_INT(s_mock_get_floor_calls, 0U,
+                           "目标校验失败时不得调用版本下限端口回调");
+        TEST_ASSERT_EQ_INT(mcu.count_init, 0, "拒绝目标头部时不得初始化目标驱动");
+        if (header_targets[i] == 3U) {
+            TEST_ASSERT_EQ_INT(sii.count_init, 0, "WRQ 不匹配时不得初始化其他目标驱动");
+        }
+    }
 }
 
 /* 17. SOES 适配层短包与 0 长度包及 post hook 状态拦截 */
@@ -2710,6 +2759,7 @@ int main(void)
     RUN_TEST(test_capacity_boundary_exact_and_plus_one);
     RUN_TEST(test_write_unit_8_and_256_residual_and_readback_crc_excludes_padding);
     RUN_TEST(test_anti_rollback_full_behavior);
+    RUN_TEST(test_anti_rollback_rejects_target_before_floor_callback);
     RUN_TEST(test_soes_adapter_short_packet_and_post_hook);
 
     /* 阶段 1 & 阶段 2 修复回归测试项 */

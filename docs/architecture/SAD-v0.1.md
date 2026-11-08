@@ -251,7 +251,12 @@ sequenceDiagram
     end
 
     Note over BL,Drv: 头部装配完整：执行“擦除前必须全过”检查清单
-    BL->>BL: 验 Magic, Version, Header Len, Header CRC, Flags, IDs, HW Ver, Target, 配额
+    BL->>BL: 先验 Target 范围、使能状态及与 WRQ 的 Target/Version 一致性
+    alt 防回滚开启且基础目标身份有效
+        BL->>Port: port_get_version_floor(validated_target_id)
+        Port-->>BL: 返回当前版本下限
+    end
+    BL->>BL: 完成其余阶段 3 校验: Magic, Version, Header Len, Header CRC, Flags, IDs, HW Ver, 配额及防回滚版本
     alt 校验不通过 (任意一项不符)
         BL-->>Stack: 返回非零 (SOES 数据阶段收敛回复 0x800B)
         Stack-->>Master: FoE ERR (不擦除，不触碰物理存储)
@@ -374,10 +379,11 @@ sequenceDiagram
 | `FOE_ERR_CHECKSUM` | `0x800C` | 校验和/CRC 不匹配 | `header_crc32` 校验不匹配；流 Payload CRC32 不匹配；物理回读比对 CRC32 不匹配。 | `0x800B` (数据阶段收敛) |
 
 * **防回滚持久化错误处理与时序规则【已确定】**：
-  1. **防回滚开启时获取失败**：若 `port_get_version_floor` 返回非零，核心机在阶段 3 直接拒绝升级（回复错误，驱动不调用 `init`/`erase_to`）；
-  2. **联合提交时机**：防回滚开启时，目标驱动必须提供 `finalize_with_version_floor`；核心在数据和回读校验通过后仅调用该回调，由板级实现以断电可恢复事务联合提交镜像激活与版本下限。不得以先后调用 `finalize()` 和 `port_set_version_floor()` 冒充事务；
-  3. **失败语义**：联合提交回调返回非零时，候选镜像不得激活、已提交下限不得改变，核心调用 `abort()` 并返回 `ANTI_ROLLBACK_UPDATE`。复位恢复时也不得出现“新镜像有效但仍使用旧下限”的状态。事务日志和启动恢复由板级实现负责，并需在目标硬件验证；
-  4. **版本语义**：联合提交实现必须再次核对当前持久化下限，拒绝低于该下限的候选版本，并以 `max(当前下限, 包头 min_allow_version)` 作为新下限，保证下限单调不减。
+  1. **目标身份先验**：调用 `port_get_version_floor` 前，核心必须验证包头 `target_id` 范围和本地使能状态，并确认包头 `target_id`、`fw_version` 与已解析的 WRQ 一致；无效目标信息不得传给端口回调；
+  2. **防回滚开启时获取失败**：若 `port_get_version_floor` 返回非零，核心机在阶段 3 直接拒绝升级（回复错误，驱动不调用 `init`/`erase_to`）；
+  3. **联合提交时机**：防回滚开启时，目标驱动必须提供 `finalize_with_version_floor`；核心在数据和回读校验通过后仅调用该回调，由板级实现以断电可恢复事务联合提交镜像激活与版本下限。不得以先后调用 `finalize()` 和 `port_set_version_floor()` 冒充事务；
+  4. **失败语义**：联合提交回调返回非零时，候选镜像不得激活、已提交下限不得改变，核心调用 `abort()` 并返回 `ANTI_ROLLBACK_UPDATE`。复位恢复时也不得出现“新镜像有效但仍使用旧下限”的状态。事务日志和启动恢复由板级实现负责，并需在目标硬件验证；
+  5. **版本语义**：联合提交实现必须再次核对当前持久化下限，拒绝低于该下限的候选版本，并以 `max(当前下限, 包头 min_allow_version)` 作为新下限，保证下限单调不减。
 
 > **SOES 协议栈限制依据【已核实】**：
 > 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。

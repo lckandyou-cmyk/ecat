@@ -616,6 +616,28 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             efw_cfg.targets[i].max_payload_size = core->cfg.targets[i].max_payload_size;
         }
 
+        /* 在调用板级防回滚接口之前，先验证包头目标可索引、已启用且与 WRQ 一致。 */
+        if (core->cfg.anti_rollback_enable) {
+            if (core->hdr.target_id < 1U || core->hdr.target_id > ECAT_FOE_TARGET_COUNT) {
+                core->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+            const ecat_foe_target_desc_t *requested_target =
+                &core->cfg.targets[core->hdr.target_id - 1U];
+            if (!requested_target->enabled) {
+                core->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+            if (core->hdr.target_id != core->req_target_id ||
+                core->hdr.fw_version != core->req_fw_version) {
+                core->last_error = ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH;
+                core->state = ECAT_FOE_STATE_ERROR;
+                return -1;
+            }
+        }
+
         /* 防回滚：仅读取当前待升级目标的版本下限 */
         if (core->cfg.anti_rollback_enable) {
             uint32_t floor_ver = 0;
