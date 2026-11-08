@@ -690,6 +690,42 @@ int main(void)
         assert(ecat_foe_core_upgrade_incomplete(&app.core));
     }
 
+    /* SOES counts the full EFW file; Flash capacity applies to payload only. */
+    for (unsigned oversized = 0; oversized <= 1U; oversized++) {
+        static uint8_t capacity_payload[APP_FLASH_MAX_SIZE + 1U];
+        static uint8_t capacity_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + APP_FLASH_MAX_SIZE + 1U];
+        reset_test_env();
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        assert(s_foe_files[0].max_data == APP_FLASH_MAX_SIZE + ECAT_FOE_EFW_HEADER_MIN_LEN);
+        size_t payload_len = APP_FLASH_MAX_SIZE + oversized;
+        for (size_t i = 0; i < payload_len; i++) capacity_payload[i] = (uint8_t)i;
+        size_t n = bootloader_master_build_efw(capacity_efw, sizeof(capacity_efw),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, capacity_payload, payload_len);
+        assert(n == ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        size_t pos = 0;
+        uint32_t packet = 1U;
+        while (pos < n) {
+            size_t chunk = (n - pos > 116U) ? 116U : n - pos;
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, packet++, capacity_efw + pos, chunk, &resp) == 0);
+            if (resp.opcode != BOOTLOADER_FOE_OP_ACK) break;
+            pos += chunk;
+        }
+        if (oversized) {
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
+            assert(!app.flash_drv.is_invalidated && app.flash_drv.written_bytes == 0U);
+        } else {
+            assert(pos == n && app.core.state == ECAT_FOE_STATE_SUCCESS);
+            assert(app.flash_drv.written_bytes == APP_FLASH_MAX_SIZE);
+            assert(memcmp(s_sim_flash, capacity_payload, APP_FLASH_MAX_SIZE) == 0);
+        }
+    }
+    printf("  [PASS] SOES 全容量升级及超限拒绝验证通过\n");
+
     /* ---------------------------------------------------------------------- */
     /* 场景 5: 写入物理基地址独家由本地配置裁决边界验证                       */
     /* ---------------------------------------------------------------------- */

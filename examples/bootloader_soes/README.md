@@ -52,7 +52,7 @@ examples/bootloader_soes/
 - `BOOTLOADER_PROJECT_NAME`: `"SERVO_DRV"`（工程字符串）
 - `BOOTLOADER_HARDWARE_ID`: `0x00000001U`（硬件板型码）
 - `APP_FLASH_BASE_ADDR`: `0x08020000U`（应用固件写入物理基地址）
-- `APP_FLASH_MAX_SIZE`: `256 * 1024`（应用分区 256 KB 容量上限）
+- `APP_FLASH_MAX_SIZE`: `256 * 1024`（应用分区 256 KB payload 容量上限）；SOES 文件表的 `max_data` 包含 EFW 头部与 payload，并在初始化时检查 32 位加法溢出。核心和驱动仍按 payload 容量限制存储。
 - `APP_FLASH_SECTOR_SIZE`: `4096`（Flash 扇区擦除粒度 4 KB）
 - `APP_FLASH_WRITE_UNIT`: `8`（Flash 最小对齐写入单位 8 字节）
 

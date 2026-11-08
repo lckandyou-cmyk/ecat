@@ -24,6 +24,12 @@ int bootloader_app_init(bootloader_app_t *app,
         return -1;
     }
 
+    /* SOES counts the complete EFW stream, while Flash holds payload only. */
+    const uint64_t max_foe_size = (uint64_t)APP_FLASH_MAX_SIZE + ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if (max_foe_size > UINT32_MAX) {
+        return -1;
+    }
+
     memset(app, 0, sizeof(*app));
 
     /* 1. 初始化板级 Flash 目标存储驱动 (严格限定本地基地址) */
@@ -71,7 +77,7 @@ int bootloader_app_init(bootloader_app_t *app,
     /* 6. 将板级 Target 1 映射至 SOES 文件表条目 0 */
     if (foe_cfg->n_files > 0 && foe_cfg->files != NULL) {
         foe_cfg->files[0].name = BOOTLOADER_TARGET_MCU_FILENAME;
-        foe_cfg->files[0].max_data = APP_FLASH_MAX_SIZE;
+        foe_cfg->files[0].max_data = (uint32_t)max_foe_size;
         foe_cfg->files[0].write_function = ecat_foe_soes_write_cb;
     }
     if (ecat_foe_soes_set_target_file_map(&app->adapter,
