@@ -72,8 +72,9 @@ typedef struct {
     uint16_t target_id;    /* 对应的 Target ID */
 } ecat_foe_target_map_t;
 
-/* 防回滚版本下限持久化存取接口要求 (当 ECAT_FOE_ANTI_ROLLBACK_ENABLE == 1 时由 Platform/Port 实现) */
+/* 防回滚版本下限读取接口 (启用时由 Platform/Port 实现)。 */
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver);
+/* 独立下限写入接口仅供平台管理使用；核心提交改由目标驱动联合事务完成。 */
 int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver);
 
 #ifdef __cplusplus

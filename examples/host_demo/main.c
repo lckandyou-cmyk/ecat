@@ -280,13 +280,15 @@ static void host_flash_abort(void *user_ctx)
 }
 
 static const ecat_foe_target_driver_t s_target_ops = {
-    host_flash_init,
-    host_flash_invalidate,
-    host_flash_erase_to,
-    host_flash_write,
-    host_flash_read,
-    host_flash_finalize,
-    host_flash_abort,
+    .init = host_flash_init,
+    .invalidate = host_flash_invalidate,
+    .erase_to = host_flash_erase_to,
+    .write = host_flash_write,
+    .read = host_flash_read,
+    .finalize = host_flash_finalize,
+    .abort = host_flash_abort,
+    /* 宿主演示关闭防回滚；此回调不是硬件事务实现。 */
+    .finalize_with_version_floor = NULL
 };
 
 /* 防回滚外部端口桩 */

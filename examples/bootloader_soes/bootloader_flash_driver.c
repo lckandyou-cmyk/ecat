@@ -219,7 +219,9 @@ static const ecat_foe_target_driver_t s_bootloader_flash_ops = {
     .write      = drv_cb_write,
     .read       = drv_cb_read,
     .finalize   = drv_cb_finalize,
-    .abort      = drv_cb_abort
+    .abort      = drv_cb_abort,
+    /* bootloader_app 当前关闭防回滚；开启前必须实现镜像/下限原子事务。 */
+    .finalize_with_version_floor = NULL
 };
 
 const ecat_foe_target_driver_t *bootloader_flash_driver_get_ops(void)

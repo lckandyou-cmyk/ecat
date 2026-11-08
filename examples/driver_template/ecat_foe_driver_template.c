@@ -162,13 +162,15 @@ static void template_drv_abort(void *user_ctx)
 }
 
 static const ecat_foe_target_driver_t s_template_driver = {
-    template_drv_init,
-    template_drv_invalidate,
-    template_drv_erase_to,
-    template_drv_write,
-    template_drv_read,
-    template_drv_finalize,
-    template_drv_abort
+    .init = template_drv_init,
+    .invalidate = template_drv_invalidate,
+    .erase_to = template_drv_erase_to,
+    .write = template_drv_write,
+    .read = template_drv_read,
+    .finalize = template_drv_finalize,
+    .abort = template_drv_abort,
+    /* 防回滚默认关闭；启用前必须实现断电安全的联合提交事务。 */
+    .finalize_with_version_floor = NULL
 };
 
 const ecat_foe_target_driver_t *ecat_foe_driver_template_get_ops(void)

@@ -11,11 +11,14 @@
  * 2. init 成功后异常清理责任: 一旦 init() 成功返回 0，驱动生命周期会话正式激活。此后发生的
  *    任何后续失败 (包括紧接着的 invalidate 失败、按需擦除失败、写入失败、流 CRC 不匹配、
  *    物理回读失败/CRC 不符、finalize 失败或外部中止)，核心机严格保证调用且仅调用一次 abort()。
- * 3. finalize 成功后互斥保护: finalize 成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话（核心会重置会话字段）。
+ * 3. 普通 finalize 成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话。
+ * 4. 启用防回滚时，核心只调用 finalize_with_version_floor。该回调必须把镜像激活与版本下限
+ *    持久化作为一个可恢复事务提交；禁止在其内部简单串行调用 finalize 和独立版本下限写入。
  *
  * 驱动调用时序 (在回调内部同步完成):
- * init -> invalidate -> [erase_to (按需) / write]* -> 流 CRC 比对 -> [core: read & crc32]* -> finalize()
- * 任何一步失败立即转向调用 abort()。finalize() 与 abort() 严格互斥。
+ * 普通模式: init -> invalidate -> write/erase -> CRC/readback -> finalize()
+ * 防回滚模式: init -> invalidate -> write/erase -> CRC/readback -> finalize_with_version_floor()
+ * 任一提交失败均转向 abort()；成功提交后不得再调用 abort()。
  */
 
 #ifndef ECAT_FOE_TARGET_H
@@ -100,6 +103,25 @@ typedef struct ecat_foe_target_driver {
      * @param user_ctx 用户自定义上下文指针
      */
     void (*abort)(void *user_ctx);
+
+    /**
+     * @brief 防回滚模式下原子提交固件与版本下限
+     * 触发时机: 仅在防回滚开启且数据流及物理回读校验全部通过后调用
+     * 职责: 按 target_id 的本地配置，校验并持久化防回滚下限，同时激活候选镜像。
+     *       必须提供断电恢复语义：重启后不得出现候选镜像有效但下限仍旧的状态。
+     *       下限必须单调不减；若固件版本低于当前下限，必须拒绝提交。
+     *       返回非 0 时不得激活候选镜像或改变已提交下限，之后核心会调用 abort。
+     *       具体硬件需通过启动恢复逻辑/事务日志实现此保证；简单地先后写两个标记不满足契约。
+     * @param target_id          本地配置中的目标 ID
+     * @param fw_version         候选固件版本
+     * @param min_allow_version  包头请求的最低允许版本；实现需与当前持久化下限取最大值
+     * @param user_ctx           用户自定义上下文指针
+     * @return 0 表示事务完整提交，非 0 表示未提交
+     */
+    int (*finalize_with_version_floor)(uint16_t target_id,
+                                       uint32_t fw_version,
+                                       uint32_t min_allow_version,
+                                       void *user_ctx);
 } ecat_foe_target_driver_t;
 
 #ifdef __cplusplus

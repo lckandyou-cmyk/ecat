@@ -140,6 +140,19 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor)
     return 0;
 }
 
+/* 仅供本 harness 满足配置校验；不模拟真实防回滚持久化事务。 */
+static int harness_finalize_with_version_floor(uint16_t target_id,
+                                                uint32_t fw_version,
+                                                uint32_t min_allow_version,
+                                                void *user_ctx)
+{
+    (void)target_id;
+    (void)fw_version;
+    (void)min_allow_version;
+    (void)user_ctx;
+    return -1;
+}
+
 /* 回调追踪与模拟变量 */
 static int g_mock_write_calls = 0;
 static size_t g_last_written_length = 0;
@@ -1185,6 +1198,7 @@ static void init_harness_cfg(ecat_foe_core_cfg_t *cfg, mock_driver_t *drv)
     cfg->targets[0].write_unit = 8U;
     cfg->targets[0].driver = &drv->driver;
     cfg->targets[0].user_ctx = drv;
+    drv->driver.finalize_with_version_floor = harness_finalize_with_version_floor;
     cfg->targets[1].target_id = 2;
     cfg->targets[1].enabled = true;
     cfg->targets[1].max_payload_size = 4096U;

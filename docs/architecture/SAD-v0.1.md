@@ -300,8 +300,12 @@ sequenceDiagram
             BL-->>Stack: 返回非零 -> SOES 触发 FOE_abort(0x800B)
         else 物理回读 CRC 完全一致
             Note over BL,Drv: 3. 成功提交
-            BL->>Drv: drv->finalize() (写入固件有效标记 / 切换活动分区)
-            Note over BL: 若开启防回滚，更新本地该 Target 的版本下限
+            alt 防回滚关闭
+                BL->>Drv: drv->finalize() (写入固件有效标记 / 切换活动分区)
+            else 防回滚开启
+                BL->>Drv: drv->finalize_with_version_floor(target, fw_version, min_allow_version)
+                Note over BL,Drv: 板级回调以可恢复事务联合提交镜像激活和版本下限
+            end
             BL-->>Stack: 回调返回 0 (成功)
             Note over Stack: SOES 收到 0: 发最终 ACK 并调用 FOE_init() 重置状态机
             Note over Stack: [注意] 若为 0 长度包分支，SOES 原生忽略 FOE_fclose 返回值 (见 1.2 节)
@@ -371,8 +375,9 @@ sequenceDiagram
 
 * **防回滚持久化错误处理与时序规则【已确定】**：
   1. **防回滚开启时获取失败**：若 `port_get_version_floor` 返回非零，核心机在阶段 3 直接拒绝升级（回复错误，驱动不调用 `init`/`erase_to`）；
-  2. **下限更新时机**：版本下限**仅在 `finalize()` 成功提交后**方可调用 `port_set_version_floor` 进行更新；
-  3. **持久化失败后果**：若 `finalize()` 已成功而 `port_set_version_floor` 返回非零，核心机向主站返回错误，但**固件保持物理有效状态，不得调用 `abort()`**（因为固件实体与元数据已写入且校验通过，固件可用）。
+  2. **联合提交时机**：防回滚开启时，目标驱动必须提供 `finalize_with_version_floor`；核心在数据和回读校验通过后仅调用该回调，由板级实现以断电可恢复事务联合提交镜像激活与版本下限。不得以先后调用 `finalize()` 和 `port_set_version_floor()` 冒充事务；
+  3. **失败语义**：联合提交回调返回非零时，候选镜像不得激活、已提交下限不得改变，核心调用 `abort()` 并返回 `ANTI_ROLLBACK_UPDATE`。复位恢复时也不得出现“新镜像有效但仍使用旧下限”的状态。事务日志和启动恢复由板级实现负责，并需在目标硬件验证；
+  4. **版本语义**：联合提交实现必须再次核对当前持久化下限，拒绝低于该下限的候选版本，并以 `max(当前下限, 包头 min_allow_version)` 作为新下限，保证下限单调不减。
 
 > **SOES 协议栈限制依据【已核实】**：
 > 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
@@ -461,8 +466,9 @@ static const ecat_foe_target_map_t g_target_name_map[] = {
     { NULL,     0x0000U }
 };
 
-/* 防回滚版本下限持久化存取接口要求 (当 ECAT_FOE_ANTI_ROLLBACK_ENABLE == 1 时由 Platform/Port 实现) */
+/* 防回滚版本下限读取接口 (启用时由 Platform/Port 实现)。 */
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver);
+/* 独立写入仅供平台管理；核心升级提交不调用此函数。 */
 int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver);
 
 #endif /* ECAT_FOE_CONF_H */
@@ -474,9 +480,9 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver);
 
 #### 1. 驱动生命周期调用时序
 驱动接口的调用严格遵循以下先后次序（全流程在回调内部同步完成）：
-$$\text{init} \longrightarrow \text{invalidate} \longrightarrow [\text{erase\_to (按需)} \ / \ \text{write}]^* \longrightarrow \text{流 CRC 比对} \longrightarrow [\text{core: read \& crc32}]^* \longrightarrow \text{finalize()}$$
+$$\text{init} \longrightarrow \text{invalidate} \longrightarrow [\text{erase\_to (按需)} \ / \ \text{write}]^* \longrightarrow \text{流 CRC 比对} \longrightarrow [\text{core: read \& crc32}]^* \longrightarrow \text{finalize 或联合提交}$$
 * **异常处理**：若上述任何一步返回失败、或传输超时、或主站中途断开，流程立即转向调用 `abort()`。
-* **互斥规则**：`finalize()` 与 `abort()` 严格互斥，一次升级会话必然且仅能执行其中之一。
+* **互斥规则**：普通模式的 `finalize()` 或防回滚模式的 `finalize_with_version_floor()` 与 `abort()` 严格互斥，一次升级会话必然且仅能执行其中之一。
 
 #### 2. 接口函数签名与规范约定
 
@@ -502,14 +508,20 @@ typedef struct ecat_foe_target_driver {
 
     /* 7. 中止清理 (失败、超时或断开时调用，锁定硬件、保持无效) */
     void (*abort)(void *user_ctx);
+
+    /* 8. 防回滚模式的断电可恢复镜像/版本下限联合提交 */
+    int (*finalize_with_version_floor)(uint16_t target_id,
+                                       uint32_t fw_version,
+                                       uint32_t min_allow_version,
+                                       void *user_ctx);
 } ecat_foe_target_driver_t;
 ```
 
 #### 3. 各接口具体职责与生命周期清理契约【已确定】
 * **驱动生命周期与清理契约 (核心严格保证)**：
   1. **`init` 失败清理责任**：若 `init()` 自身执行失败并返回非零，表示驱动初始化未完成，由驱动内部自行负责清理未完成的半成品资源；核心状态机不调用 `abort()`。
-  2. **`init` 成功后异常清理责任**：一旦 `init()` 成功返回 0，驱动生命周期会话正式激活。此后发生的任何后续失败（包括紧接着的 `invalidate` 失败、按需擦除失败、写入失败、流 CRC 不匹配、物理回读失败/CRC 不符、`finalize` 失败或协议栈/主站中途中止），核心机均严格保证调用且仅调用一次 `abort()` 以恢复硬件安全加锁状态。
-  3. **`finalize` 成功后互斥保护**：`finalize()` 执行成功后固件置为有效，核心状态机在当前会话内锁定不再调用 `abort()`；若后续收到新 WRQ 请求，可开启新会话重置状态机，而非整机锁定。
+  2. **`init` 成功后异常清理责任**：一旦 `init()` 成功返回 0，驱动生命周期会话正式激活。此后发生的任何后续失败（包括 `invalidate`、擦除、写入、校验、普通 `finalize` 或防回滚联合提交失败，以及协议栈/主站中途中止），核心机均保证调用且仅调用一次 `abort()`。
+  3. **提交成功后互斥保护**：`finalize()` 或 `finalize_with_version_floor()` 成功后，同一会话内不再调用 `abort()`；若后续收到新 WRQ 请求，可开启新会话。
 
 1. `init`：
    - 触发时机：头部装配完成且“擦除前必须全过”检查全部通过后调用；
@@ -532,10 +544,10 @@ typedef struct ecat_foe_target_driver {
 6. `finalize`：
    - 触发时机：流 CRC 与物理回读 CRC32 均比对成功后同步调用；
    - 职责：向非易失存储写入固件有效标记、更新向量跳转表、或切换 A/B 活动分区元数据。函数无参数，仅在完全成功时调用。返回 0 成功，非 0 失败；
-   - 互斥契约：finalize 成功后，同一会话内不再调用 `abort()`；新的 WRQ 开始新会话（核心会重置会话字段）。
+   - 互斥契约：`finalize()` 成功后，同一会话内不再调用 `abort()`；防回滚模式改走 `finalize_with_version_floor()`，成功后同样进入已提交状态。
 7. `abort`：
    - 触发时机：`init()` 成功后发生的任何元数据核验失败、驱动任一接口返回错误、FoE 传输超时、主站中途断开连接时调用；
-   - 职责：锁定存储控制器、释放外设总线、清除临时写入数据，确保目标物理状态处于明确的“无效状态”。与 `finalize()` 严格互斥，且一次会话至多执行 1 次。
+   - 职责：锁定存储控制器、释放外设总线、清除临时写入数据，确保候选镜像处于明确的“无效状态”。与成功提交回调严格互斥，且一次会话至多执行 1 次。
 
 ### 4.3 ESC SII EEPROM 专项设计规范
 
@@ -626,7 +638,7 @@ typedef struct ecat_foe_target_driver {
 12. **【已确定，已核实】SOES 错误码处理策略**：
     选定候选 A：接受原生 SOES 数据阶段只回 `FOE_ERR_PROGERROR` (`0x800B`) 的行为，不要求用户给 SOES 打补丁。核心内部保留细分错误枚举供本地诊断，适配层在数据阶段统一返回非零由 SOES 下发 `0x800B`。
 13. **【已确定】物理回读校验（Readback）执行时机**：
-    最终确定采用“最后一次回调内同步完成”方案。在最后一次数据写入完成后，首先比对流 CRC32 确认传输无误；通过后同步调用 `drv->read` 逐块回读物理介质并计算 Readback CRC32，比对全部无误后调用 `drv->finalize()` 标记有效并返回 0，协议栈随后向主站回复最终 FoE ACK；若任何步骤校验失败直接返回非零向主站报错。
+    最终确定采用“最后一次回调内同步完成”方案。在最后一次数据写入完成后，首先比对流 CRC32；通过后同步调用 `drv->read` 逐块回读并计算 Readback CRC32。两种提交路径为：普通模式调用 `drv->finalize()`；防回滚模式调用 `drv->finalize_with_version_floor()` 联合提交并返回 0。协议栈随后回复最终 FoE ACK；若任一步骤失败则返回非零。
 14. **【已确定】环形缓冲队列解耦方案范围界定**：
     v1 架构确定**不引入环形缓冲队列**。原因：绝大多数 MCU 片内 Flash 擦写时会导致 CPU 总线挂起（Stall），软件队列无法解耦总线冻结；且 FoE 为单包停等流控，大容量队列所需 RAM 内存过大。本项移出 SAD 决策清单，收纳至 `open-issues.md` 作为后续特定硬件平台（如非阻塞 SPI Flash 独立总线）的可选增强方案跟踪。
 15. **【已确定】0 长度包分支忽略 `FOE_fclose` 返回值处理策略**：

@@ -61,7 +61,7 @@ typedef enum {
 
     /* 1.1 防回滚错误 */
     ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET,       /**< 获取版本下限失败拒绝升级 */
-    ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE,    /**< finalize 成功后更新版本下限失败 (固件保持有效) */
+    ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE,    /**< 镜像与版本下限事务提交失败，候选镜像不得激活 */
 
     /* 2. 头部装配与核验错误 */
     ECAT_FOE_CORE_ERR_HDR_PROBE,               /**< 阶段 1 探测失败 (魔数/版本/长度) */

@@ -277,7 +277,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         return -1;
     }
 
-    /* 3. 校验所有已启用的目标描述符及其驱动全部回调函数指针 */
+    /* 3. 校验必需驱动回调；防回滚模式另需镜像/下限联合提交回调 */
     for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
         const ecat_foe_target_desc_t *t = &local_cfg.targets[i];
         if (t->enabled) {
@@ -288,7 +288,9 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
                 t->driver->write == NULL ||
                 t->driver->read == NULL ||
                 t->driver->finalize == NULL ||
-                t->driver->abort == NULL) {
+                t->driver->abort == NULL ||
+                (local_cfg.anti_rollback_enable &&
+                 t->driver->finalize_with_version_floor == NULL)) {
                 memset(core, 0, sizeof(*core));
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->is_configured = false;
@@ -830,17 +832,30 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         return -1;
     }
 
-    /* 5. 驱动 finalize() 提交 */
-    if (drv != NULL && drv->finalize != NULL) {
-        if (drv->finalize(ctx) != 0) {
+    /* 5. 提交候选镜像；防回滚模式必须由驱动原子提交镜像与版本下限。 */
+    if (drv != NULL) {
+        int finalize_ret;
+        if (core->cfg.anti_rollback_enable) {
+            finalize_ret = (drv->finalize_with_version_floor != NULL)
+                ? drv->finalize_with_version_floor(core->hdr.target_id,
+                                                    core->hdr.fw_version,
+                                                    core->hdr.min_allow_version,
+                                                    ctx)
+                : -1;
+        } else {
+            finalize_ret = (drv->finalize != NULL) ? drv->finalize(ctx) : -1;
+        }
+        if (finalize_ret != 0) {
             core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
-            core->last_error = ECAT_FOE_CORE_ERR_DRV_FINALIZE;
+            core->last_error = core->cfg.anti_rollback_enable
+                ? ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE
+                : ECAT_FOE_CORE_ERR_DRV_FINALIZE;
             return -1;
         }
     }
 
-    /* finalize 成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话（核心会重置会话字段） */
+    /* 提交成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话。 */
     /* 仅清除当前目标自身的未完成标志，其余目标的未完成状态严格保留 */
     if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
         core->target_incomplete_mask &= ~(1U << (core->req_target_id - 1));
@@ -848,22 +863,6 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     core->driver_finalized = true;
     core->driver_invalidated = false;
     core->session_active = false;
-
-    /* 6. 防回滚更新: finalize 成功后持久化版本下限 (失败时不调 abort，固件保持有效) */
-    if (core->cfg.anti_rollback_enable) {
-        uint32_t old_floor = 0;
-        if (port_get_version_floor(core->hdr.target_id, &old_floor) != 0) {
-            core->state = ECAT_FOE_STATE_ERROR;
-            core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE;
-            return -1;
-        }
-        uint32_t new_floor = (old_floor > core->hdr.min_allow_version) ? old_floor : core->hdr.min_allow_version;
-        if (port_set_version_floor(core->hdr.target_id, new_floor) != 0) {
-            core->state = ECAT_FOE_STATE_ERROR;
-            core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE;
-            return -1;
-        }
-    }
 
     core->state = ECAT_FOE_STATE_SUCCESS;
     core->last_error = ECAT_FOE_CORE_OK;
@@ -951,7 +950,7 @@ const char *ecat_foe_core_err_to_str(ecat_foe_core_err_t err)
     case ECAT_FOE_CORE_ERR_CFG_HEADER_BUF: return "Invalid max_header_size in config";
     case ECAT_FOE_CORE_ERR_CFG_TARGET: return "Invalid target descriptor or driver callbacks";
     case ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET: return "Anti-rollback get floor failed";
-    case ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE: return "Anti-rollback set floor failed";
+    case ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE: return "Anti-rollback transaction commit failed";
     case ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME: return "Invalid filename format";
     case ECAT_FOE_CORE_ERR_WRQ_PROJECT_MISMATCH: return "Project name mismatch";
     case ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN: return "Unknown target";

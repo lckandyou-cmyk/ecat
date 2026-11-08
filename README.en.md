@@ -87,6 +87,7 @@ Passing host tests does not establish hardware or full protocol-stack validation
 ## Security boundaries
 
 - CRC32 in `.efw` detects accidental corruption; it does not authenticate firmware. Project and hardware IDs are not authentication credentials. Products requiring protection against malicious firmware must implement signature verification and a trust chain.
+- Anti-rollback mode requires the target driver to implement `finalize_with_version_floor` as a power-fail-recoverable transaction that commits image activation and the version floor together. The core rejects configurations without this callback. Host mocks do not prove a board-specific transaction is power-fail safe.
 - The SSC adapter checks the FoE access password. Its expected value defaults to `0`; configure a nonzero value before accepting WRQ requests when required. A FoE password is not cryptographic authentication.
 - In the tested SOES version, the zero-length final-packet path may ignore a close-callback error. A final ACK alone is not evidence that the image was committed; integrators should provide an independent upgrade-result status.
 - Native SOES filename matching has short-prefix and empty-name edge cases. If FoE read support is not needed, leave `FOE_READ_SUPPORTED` undefined; do not define it as `0`. See the [SOES integration analysis](docs/architecture/soes-integration-options.md).

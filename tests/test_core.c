@@ -71,7 +71,7 @@ static bool g_current_test_failed = false;
 /* -------------------------------------------------------------------------- */
 static uint32_t s_mock_version_floors[ECAT_FOE_TARGET_COUNT] = {0};
 static bool s_mock_get_floor_fail = false;
-static bool s_mock_set_floor_fail = false;
+static bool s_mock_commit_fail = false;
 static uint16_t s_mock_floor_fail_target_id = 0;
 
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
@@ -93,7 +93,7 @@ int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
 
 int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
 {
-    if (s_mock_set_floor_fail) {
+    if (s_mock_commit_fail) {
         return -1;
     }
     if (target_id >= 1 && target_id <= ECAT_FOE_TARGET_COUNT) {
@@ -101,6 +101,34 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
         return 0;
     }
     return -1;
+}
+
+/* 模拟平台的单一原子提交边界：失败时不改变镜像有效标志或持久化下限。 */
+static int mock_finalize_with_version_floor(uint16_t target_id,
+                                             uint32_t fw_version,
+                                             uint32_t min_allow_version,
+                                             void *user_ctx)
+{
+    mock_driver_t *mock = (mock_driver_t *)user_ctx;
+    if (mock == NULL || target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT ||
+        s_mock_commit_fail || mock->inject_fail_finalize) {
+        return -1;
+    }
+
+    uint32_t current_floor = s_mock_version_floors[target_id - 1U];
+    uint32_t committed_floor = (current_floor > min_allow_version)
+        ? current_floor : min_allow_version;
+    if (fw_version < current_floor || fw_version < committed_floor) {
+        return -1;
+    }
+
+    mock->count_finalize++;
+    if (mock->op_count < (sizeof(mock->op_history) / sizeof(mock->op_history[0]))) {
+        mock->op_history[mock->op_count++] = MOCK_OP_FINALIZE;
+    }
+    s_mock_version_floors[target_id - 1U] = committed_floor;
+    mock->valid_flag = true;
+    return 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -210,6 +238,9 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
     cfg.targets[0].write_unit = 8U;
     cfg.targets[0].driver = (mock_mcu != NULL) ? &mock_mcu->driver : NULL;
     cfg.targets[0].user_ctx = mock_mcu;
+    if (mock_mcu != NULL) {
+        mock_mcu->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    }
 
     /* Target 2: FPGA (禁用) */
     cfg.targets[1].target_id = 2;
@@ -222,6 +253,9 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
     cfg.targets[2].write_unit = 2U;
     cfg.targets[2].driver = (mock_sii != NULL) ? &mock_sii->driver : NULL;
     cfg.targets[2].user_ctx = mock_sii;
+    if (mock_sii != NULL) {
+        mock_sii->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    }
 
     /* Target 4: EEPROM */
     cfg.targets[3].target_id = 4;
@@ -230,9 +264,12 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
     cfg.targets[3].write_unit = 4U;
     cfg.targets[3].driver = (mock_eeprom != NULL) ? &mock_eeprom->driver : NULL;
     cfg.targets[3].user_ctx = mock_eeprom;
+    if (mock_eeprom != NULL) {
+        mock_eeprom->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    }
 
     s_mock_get_floor_fail = false;
-    s_mock_set_floor_fail = false;
+    s_mock_commit_fail = false;
 
     int ret_init = ecat_foe_core_init(core, &cfg);
     (void)ret_init;
@@ -763,7 +800,7 @@ static void test_anti_rollback_full_behavior(void)
     TEST_ASSERT(ret != 0, "降级必须被拦截");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_HDR_VERIFY, "报 HDR_VERIFY");
 
-    /* C. 正常升级成功后持久化更新下限 */
+    /* C. 正常升级通过单一事务同时激活镜像并更新版本下限 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     core.cfg.anti_rollback_enable = true;
@@ -777,22 +814,24 @@ static void test_anti_rollback_full_behavior(void)
     port_get_version_floor(1, &floor_ver);
     TEST_ASSERT_EQ_INT(floor_ver, 0x01080000U, "版本下限成功更新为 0x01080000");
 
-    /* D. finalize 成功后 port_set_version_floor 失败 -> 返回错误，固件保持有效，不调 abort */
+    /* D. 原子提交失败 -> 候选镜像无效且版本下限保持旧值 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     core.cfg.anti_rollback_enable = true;
     port_set_version_floor(1, 0x01000000U);
-    s_mock_set_floor_fail = true; /* 注入更新失败 */
+    s_mock_commit_fail = true; /* 注入联合事务提交失败 */
 
     len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x02000000U, 0x01080000U, payload, 16);
     test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
     feed_stream_chunks(&core, efw, len, 64, false);
     ret = ecat_foe_core_on_end(&core);
-    TEST_ASSERT(ret != 0, "更新下限失败必须向主站返回错误");
+    TEST_ASSERT(ret != 0, "联合事务提交失败必须向主站返回错误");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE, "报 ANTI_ROLLBACK_UPDATE");
-    TEST_ASSERT(mcu.valid_flag, "固件已 finalize 提交，必须保持物理有效状态");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "固件保持有效，不调 abort");
-    s_mock_set_floor_fail = false;
+    TEST_ASSERT(!mcu.valid_flag, "事务失败不得激活候选固件");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "事务失败后清理驱动会话");
+    port_get_version_floor(1, &floor_ver);
+    TEST_ASSERT_EQ_INT(floor_ver, 0x01000000U, "事务失败后版本下限保持旧值");
+    s_mock_commit_fail = false;
 }
 
 /* 17. SOES 适配层短包与 0 长度包及 post hook 状态拦截 */
@@ -1101,6 +1140,14 @@ static void test_config_validation_rules(void)
     bad_drv = mcu.driver; bad_drv.abort = NULL; cfg.targets[0].driver = &bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 abort 回调必须报错");
 
+    bad_drv = mcu.driver;
+    bad_drv.finalize_with_version_floor = NULL;
+    cfg.targets[0].driver = &bad_drv;
+    cfg.anti_rollback_enable = true;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0,
+                "启用防回滚但缺少原子提交回调必须拒绝配置");
+    cfg.anti_rollback_enable = false;
+
     cfg.targets[0].driver = &mcu.driver;
 
     /* E. write_unit 边界 */
@@ -1215,8 +1262,8 @@ static void test_no_duplicate_abort_on_new_wrq(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "新 WRQ 不重复调用 abort (保持为 1)");
 }
 
-/* 测项 22: 成功 finalize 后不再调用 abort (即便后续更新下限失败) */
-static void test_no_abort_after_finalize_success(void)
+/* 测项 22: 防回滚事务失败不会留下已激活镜像 */
+static void test_anti_rollback_transaction_failure_aborts(void)
 {
     static mock_driver_t mcu;
     mock_driver_init(&mcu);
@@ -1224,8 +1271,8 @@ static void test_no_abort_after_finalize_success(void)
     setup_default_core(&core, &mcu, NULL, NULL);
     core.cfg.anti_rollback_enable = true;
 
-    /* 模拟持久化下限失败 */
-    s_mock_set_floor_fail = true;
+    /* 模拟镜像/版本下限联合事务提交失败 */
+    s_mock_commit_fail = true;
 
     uint8_t payload[16] = {1, 2, 3};
     uint8_t efw[256];
@@ -1234,18 +1281,17 @@ static void test_no_abort_after_finalize_success(void)
     test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
     feed_stream_chunks(&core, efw, efw_len, 64, false);
     int ret = ecat_foe_core_on_end(&core);
-    TEST_ASSERT(ret != 0, "更新下限失败返回错误");
+    TEST_ASSERT(ret != 0, "联合事务提交失败返回错误");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE, "报 ANTI_ROLLBACK_UPDATE");
 
-    /* 固件已经成功 finalize，有效标记保持，不可调 abort */
-    TEST_ASSERT(mcu.valid_flag, "固件必须保持有效状态");
-    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "finalize 已执行成功");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "成功 finalize 后不得调用 abort");
+    TEST_ASSERT(!mcu.valid_flag, "原子提交失败时候选固件必须保持无效");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "失败事务不得记录成功提交");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "失败事务应清理驱动会话");
 
     /* 随后来新的 WRQ，也不得调用 abort */
     test_wrq(&core, "SERVO_DRV_MCU_V2.0.0.0.efw");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "后续新 WRQ 也不得调用 abort");
-    s_mock_set_floor_fail = false;
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "后续新 WRQ 不重复清理已结束会话");
+    s_mock_commit_fail = false;
 }
 
 /* 测项 23: 防回滚阶段 3 仅读取当前待升级目标 */
@@ -2117,8 +2163,8 @@ static void test_hook_invalidate_ok_stream_stops_blocked(void)
     TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "触发 al_error_fn 注入回调");
 }
 
-/* P3-e. finalize 成功后 set_floor 失败 → 不拦 */
-static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
+/* P3-e. 防回滚事务失败 -> 保持 BOOT 错误态，不允许启动未闭环镜像 */
+static void test_hook_anti_rollback_commit_failure_blocked(void)
 {
     static mock_driver_t mcu;
     mock_driver_init(&mcu);
@@ -2133,7 +2179,7 @@ static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
 
-    s_mock_set_floor_fail = true;
+    s_mock_commit_fail = true;
 
     uint8_t payload[16] = {1, 2, 3};
     uint8_t efw[256];
@@ -2145,17 +2191,17 @@ static void test_hook_finalize_ok_set_floor_failed_not_blocked(void)
     int ret_data = ecat_foe_core_on_data(&core, efw, efw_len);
     TEST_ASSERT_EQ_INT(ret_data, 0, "数据流写入返回 0");
     int ret_end = ecat_foe_core_on_end(&core);
-    TEST_ASSERT_EQ_INT(ret_end, -1, "set_floor 失败导致 on_end 返回 -1");
-    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "驱动 finalize 已成功调用");
-    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "finalize 成功后 upgrade_incomplete 必须为 false");
+    TEST_ASSERT_EQ_INT(ret_end, -1, "原子事务失败导致 on_end 返回 -1");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "事务失败时没有完成提交");
+    TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "事务失败后升级仍为未闭环状态");
 
     uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT;
     uint8_t an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "finalize 成功后 set_floor 失败不拦截 BOOT->INIT (an 保持 INIT)");
-    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 0, "不调用 al_error_fn");
+    TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "事务失败必须拦截 BOOT->INIT");
+    TEST_ASSERT_EQ_INT(s_mock_al_error_calls, 1, "事务失败上报 AL 错误");
 
-    s_mock_set_floor_fail = false;
+    s_mock_commit_fail = false;
 }
 
 /* P3-f. 成功升级 → 不拦 */
@@ -2671,7 +2717,7 @@ int main(void)
     RUN_TEST(test_bounded_wrq_parsing);
     RUN_TEST(test_strict_case_sensitivity);
     RUN_TEST(test_no_duplicate_abort_on_new_wrq);
-    RUN_TEST(test_no_abort_after_finalize_success);
+    RUN_TEST(test_anti_rollback_transaction_failure_aborts);
     RUN_TEST(test_anti_rollback_only_reads_current_target);
     RUN_TEST(test_same_block_header_over_receive_protects_valid_flag);
     RUN_TEST(test_driver_lifecycle_init_invalidate_abort_retry);
@@ -2692,7 +2738,7 @@ int main(void)
     RUN_TEST(test_hook_header_invalid_not_blocked);
     RUN_TEST(test_hook_init_ok_invalidate_failed_blocked);
     RUN_TEST(test_hook_invalidate_ok_stream_stops_blocked);
-    RUN_TEST(test_hook_finalize_ok_set_floor_failed_not_blocked);
+    RUN_TEST(test_hook_anti_rollback_commit_failure_blocked);
     RUN_TEST(test_hook_upgrade_success_not_blocked);
     RUN_TEST(test_hook_stream_stops_then_new_upgrade_success_not_blocked);
     RUN_TEST(test_reproduce_cross_target_incomplete_upgrade_leak);
