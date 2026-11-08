@@ -86,6 +86,10 @@ def safe_output_for_write(path: str, overwrite: bool = False, protected_paths=()
         fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
     except FileNotFoundError:
         pass
+    except OSError as e:
+        if e.errno == errno.ELOOP or (hasattr(errno, 'EMLINK') and e.errno == errno.EMLINK):
+            raise ValueError(f"安全拒绝：目标路径为符号链接: {path}") from e
+        raise
     else:
         try:
             original = os.fstat(fd)

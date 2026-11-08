@@ -51,6 +51,38 @@ def test_overwrite_write_failure_preserves_output():
     print('  [PASS] pack/unpack 写入失败保留原输出，成功后原子替换')
 
 
+def test_overwrite_symlink_rejection():
+    """Pack and unpack report symlinks without changing their targets."""
+    if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'symlink'):
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source = os.path.join(tmpdir, 'input.bin')
+        package = os.path.join(tmpdir, 'source.efw')
+        target = os.path.join(tmpdir, 'target.bin')
+        link = os.path.join(tmpdir, 'output')
+        with open(source, 'wb') as f:
+            f.write(b'payload')
+        with open(target, 'wb') as f:
+            f.write(b'preserve target')
+        pack = [sys.executable, PACK_TOOL, 'pack', '-i', source, '-p', '1', '-d', '1',
+                '-t', 'MCU', '-v', '1.0.0.0', '-o']
+        assert subprocess.run(pack + [package], capture_output=True).returncode == 0
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            return  # Platform or account does not permit creating symlinks.
+        for command in (pack + [link, '--overwrite'],
+                        [sys.executable, PACK_TOOL, 'unpack', package,
+                         '--extract-bin', link, '--overwrite']):
+            result = subprocess.run(command, capture_output=True, text=True)
+            assert result.returncode != 0 and '符号链接' in result.stderr
+            assert os.path.islink(link)
+            with open(target, 'rb') as f:
+                assert f.read() == b'preserve target'
+            assert not any(name.startswith('.ecat-efw-') for name in os.listdir(tmpdir))
+    print('  [PASS] pack/unpack 明确拒绝覆盖符号链接并保留目标')
+
+
 def test_positive_cross_check():
     """验证 Python 打包输出与 efw-format 8.1 规范转储逐字节一致"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -407,6 +439,7 @@ def test_signed_package_round_trip():
 if __name__ == '__main__':
     print("--- 运行 Python efw_pack 工具测试 ---")
     test_overwrite_write_failure_preserves_output()
+    test_overwrite_symlink_rejection()
     version = subprocess.run([sys.executable, PACK_TOOL, '--version'], capture_output=True, text=True)
     assert version.returncode == 0 and 'development' in version.stdout and 'unavailable' in version.stdout
     help_result = subprocess.run([sys.executable, PACK_TOOL, '--help'], capture_output=True, text=True)
