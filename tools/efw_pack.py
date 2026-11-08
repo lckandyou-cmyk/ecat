@@ -59,6 +59,16 @@ def safe_open_for_write(path: str, overwrite: bool = False, protected_paths=()):
         raise
 
 
+def _remove_created_file(path: str, identity):
+    """Best-effort cleanup only if the path still names the file we created."""
+    try:
+        current = os.lstat(path)
+        if stat.S_ISREG(current.st_mode) and os.path.samestat(identity, current):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 # 格式规范常量
 EFW_MAGIC = 0x57464345  # 'ECFW' little-endian
 EFW_FORMAT_VERSION = 2
@@ -281,15 +291,29 @@ def pack_efw(
         if not public_key_out or os.path.normcase(os.path.abspath(p)) !=
         os.path.normcase(os.path.abspath(public_key_out))
     )
-    with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=package_protected) as f:
-        f.write(efw_data)
-
+    key_identity = None
     if public_key_out:
         key_protected = tuple(p for p in (protected_paths) if p and
                               os.path.normcase(os.path.abspath(p)) !=
                               os.path.normcase(os.path.abspath(public_key_out)))
-        with safe_open_for_write(public_key_out, protected_paths=key_protected) as key_file:
-            key_file.write(public_key_bytes)
+        # Create the optional public key first. If it cannot be written, the
+        # firmware output (including an existing --overwrite target) is untouched.
+        key_file = safe_open_for_write(public_key_out, protected_paths=key_protected)
+        key_identity = os.fstat(key_file.fileno())
+        try:
+            with key_file:
+                key_file.write(public_key_bytes)
+        except BaseException:
+            _remove_created_file(public_key_out, key_identity)
+            raise
+
+    try:
+        with safe_open_for_write(out_path, overwrite=overwrite, protected_paths=package_protected) as f:
+            f.write(efw_data)
+    except BaseException:
+        if key_identity is not None:
+            _remove_created_file(public_key_out, key_identity)
+        raise
 
     return out_path
 
@@ -449,7 +473,8 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print(f"  Payload CRC32:     0x{payload_crc:08X} (校验通过)")
 
     if extract_bin:
-        with safe_open_for_write(extract_bin, overwrite=overwrite, protected_paths=(efw_path,)) as f:
+        protected = tuple(path for path in (efw_path, public_key_path) if path)
+        with safe_open_for_write(extract_bin, overwrite=overwrite, protected_paths=protected) as f:
             f.write(payload)
         print(f"  提取有效负载至:    {extract_bin}")
 

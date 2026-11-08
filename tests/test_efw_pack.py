@@ -265,6 +265,51 @@ def test_signed_package_round_trip():
                                    '--public-key', pub_path], capture_output=True, text=True)
         assert verified.returncode == 0, verified.stderr
         assert 'Ed25519ph 已验证' in verified.stdout
+        original_public_key = open(pub_path, 'rb').read()
+        if hasattr(os, 'O_NOFOLLOW'):
+            for output_path in (pub_path, os.path.join(tmpdir, 'public-hardlink')):
+                if output_path != pub_path:
+                    try:
+                        os.link(pub_path, output_path)
+                    except OSError:
+                        continue
+                attempted = subprocess.run(
+                    [sys.executable, PACK_TOOL, 'unpack', signed_path,
+                     '--public-key', pub_path, '--extract-bin', output_path, '--overwrite'],
+                    capture_output=True, text=True)
+                assert attempted.returncode != 0, '提取不得覆盖验签公钥或其硬链接'
+                assert open(pub_path, 'rb').read() == original_public_key
+                if output_path != pub_path:
+                    os.unlink(output_path)
+
+        # A public-key output failure must not create or overwrite the package.
+        failed_package = os.path.join(tmpdir, 'failed-package.efw')
+        missing_pub = os.path.join(tmpdir, 'missing-directory', 'public.bin')
+        fail_cmd = cmd.copy()
+        fail_cmd[fail_cmd.index(pub_path)] = missing_pub
+        fail_cmd[fail_cmd.index(signed_path)] = failed_package
+        failed = subprocess.run(fail_cmd, capture_output=True, text=True)
+        assert failed.returncode != 0 and not os.path.exists(failed_package)
+        existing_package = os.path.join(tmpdir, 'existing-package.efw')
+        with open(existing_package, 'wb') as f:
+            f.write(b'original package')
+        if hasattr(os, 'O_NOFOLLOW'):
+            overwrite_cmd = fail_cmd.copy()
+            overwrite_cmd[overwrite_cmd.index(failed_package)] = existing_package
+            overwrite_cmd.append('--overwrite')
+            failed = subprocess.run(overwrite_cmd, capture_output=True, text=True)
+            assert failed.returncode != 0
+            assert open(existing_package, 'rb').read() == b'original package'
+        os.mkdir(os.path.dirname(missing_pub))
+        retried = subprocess.run(fail_cmd, capture_output=True, text=True)
+        assert retried.returncode == 0, retried.stderr
+
+        # If package creation fails, remove only the public key created by this call.
+        orphan_pub = os.path.join(tmpdir, 'must-not-remain.pub')
+        fail_cmd[fail_cmd.index(missing_pub)] = orphan_pub
+        fail_cmd[fail_cmd.index(failed_package)] = signed_path
+        failed = subprocess.run(fail_cmd, capture_output=True, text=True)
+        assert failed.returncode != 0 and not os.path.exists(orphan_pub)
         wrong_pub, _ = bindings.crypto_sign_seed_keypair(wrong_seed)
         wrong_pub_path = os.path.join(tmpdir, 'wrong-public.bin')
         with open(wrong_pub_path, 'wb') as f:
