@@ -587,6 +587,62 @@ int main(void)
         printf("  [PASS] SOES 包号错误及无响应时中止核心会话并允许重试\n");
     }
 
+    /* Zero-length EOF: the native stack ignores close failure, so post hook
+     * must replace the false ACK while preserving successful EOF behavior. */
+    for (int fail_finalize = 0; fail_finalize <= 1; fail_finalize++) {
+        reset_test_env();
+        s_foe_cfg.buffer_size = 64U;
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        uint8_t payload[200] = {0};
+        size_t n = bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, payload, sizeof(payload));
+        assert(n == 3U * 116U);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        for (uint32_t i = 0; i < 3U; i++) {
+            assert(bootloader_master_send_data(&app, &s_foe_cfg, i + 1U, s_test_efw_buf + i * 116U, 116U, &resp) == 0);
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        }
+        app.flash_drv.inject_finalize_err = (fail_finalize != 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 4U, NULL, 0U, &resp) == 0);
+        if (fail_finalize) {
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ERR);
+            assert(app.core.state == ECAT_FOE_STATE_ERROR);
+            assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        } else {
+            assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+            assert(app.core.state == ECAT_FOE_STATE_SUCCESS);
+            assert(app.flash_drv.valid_flag == APP_FLASH_VALID_MAGIC);
+        }
+    }
+
+    /* A new WRQ while native SOES is receiving aborts the old session. */
+    for (int invalid_name = 0; invalid_name <= 1; invalid_name++) {
+        reset_test_env();
+        s_foe_cfg.buffer_size = 64U;
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        size_t n = bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, s_test_payload, sizeof(s_test_payload));
+        assert(n > 232U);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, s_test_efw_buf, 116, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, s_test_efw_buf + 116, 116, &resp) == 0);
+        assert(app.core.session_active);
+        const char *name = invalid_name ? "BAD_MCU_V1.0.0.0.efw" : "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, name, 0, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ERR && resp.error_code == 0x8004U);
+        assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(!app.flash_drv.is_initialized && app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        assert(ecat_foe_core_upgrade_incomplete(&app.core));
+    }
+
     /* ---------------------------------------------------------------------- */
     /* 场景 5: 写入物理基地址独家由本地配置裁决边界验证                       */
     /* ---------------------------------------------------------------------- */

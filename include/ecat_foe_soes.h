@@ -91,6 +91,7 @@ typedef struct {
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
     ecat_foe_reset_fn_t     foe_reset_fn;       /**< 协议栈状态机复位回调 (如真实环境接入 FOE_init，可为 NULL) */
+    bool                    pending_wrq_response; /**< 本轮处理的输入为 FoE WRQ */
     bool                    pending_data_response; /**< 本轮处理的输入为 FoE DATA */
     uint32_t                pending_data_packet; /**< 本轮 DATA 包号 */
     bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
@@ -243,7 +244,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
  *      若 core_on_wrq 激活失败，则将该槽位就地改写为 FOE_OP_ERR (0x8000)，确保主站可观察到明确失败，返回非 0；
  *    - 若核验未通过或发生异常 (包括槽地址不匹配、多槽竞态违约、非法报文等)：
  *      若检测到待发槽位中包含未经激活的 ACK(0)，自动将其改写为 FOE_OP_ERR (0x8000)，防止主站误收假 ACK；
- *      安全丢弃暂存 WRQ，绝不打断核心旧会话，并返回非 0；
+ *      安全丢弃暂存 WRQ；原生 SOES 已中止旧会话时同步清理核心，并返回非 0；
  *    - 若原生 SOES 返回原生 FOE_OP_ERR：
  *      保留原生错误响应，安全丢弃暂存 WRQ，返回 0。
  *

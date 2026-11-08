@@ -24,6 +24,7 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->buffer_size = buffer_size;
     adapter->al_error_fn = NULL;
     adapter->foe_reset_fn = NULL;
+    adapter->pending_wrq_response = false;
     adapter->pending_data_response = false;
     adapter->pending_data_packet = 0U;
     adapter->has_staged_wrq = false;
@@ -274,6 +275,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     /* 对所有输出邮箱槽位状态进行只读快照 (不向 SOES 写入任何数据，绝不篡改 SOES 内存) */
     adapter->mbx_ctx.newly_claimed_slot = -1;
     adapter->pending_data_response = false;
+    adapter->pending_wrq_response = false;
     for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
         adapter->mbx_ctx.pre_states[i] = adapter->mbx_ctx.mbx_control_states[i];
     }
@@ -341,6 +343,8 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         return 0; /* 非 WRQ 且非 ERR 请求直接放行 */
     }
 
+    adapter->pending_wrq_response = true;
+
     /* 提取动态文件名 */
     uint16_t name_len = mbx_payload_len - (uint16_t)ECAT_FOE_HDR_SIZE;
     if (name_len == 0 || name_len > FOE_FN_MAX) {
@@ -372,8 +376,8 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     if (vrc != 0) {
         /* 核心机校验失败 (项目不符、短前缀、非法格式等)：
          * 关键安全防御：将 foe_cfg->n_files 置 0，切断原生 SOES 命中旧缓存或短前缀的路径！
-         * 原生 SOES 将直接回复 FOE_ERR_NOTFOUND (0x8001)；
-         * 绝不调用 core_on_wrq，已有活跃会话完好无损。
+         * 原生 SOES 空闲时回复 FOE_ERR_NOTFOUND (0x8001)；
+         * 活跃传输时原生 SOES 会拒绝并中止旧会话，后置钩子负责同步清理。
          */
         foe_cfg->n_files = 0;
         adapter->has_staged_wrq = false;
@@ -417,6 +421,31 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         foe_cfg->n_files = adapter->original_n_files;
     }
 
+    if (adapter->pending_wrq_response) {
+        unsigned claimed = 0;
+        bool protocol_aborted = false;
+        adapter->pending_wrq_response = false;
+        for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+            if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
+                adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
+                const uint8_t *slot = &adapter->mbx_ctx.mbx_buffers[i * adapter->mbx_ctx.buffer_size];
+                claimed++;
+                if (slot[0] == ECAT_FOE_HDR_SIZE && slot[1] == 0U &&
+                    (slot[5] & 0x0FU) == ECAT_MBX_TYPE_FOE &&
+                    slot[6] == ECAT_FOE_OP_ERR && slot[7] == 0U &&
+                    slot[8] == 0x04U && slot[9] == 0x80U && slot[10] == 0U && slot[11] == 0U) {
+                    protocol_aborted = true; /* SOES rejects WRQ while not READY. */
+                }
+            }
+        }
+        if ((protocol_aborted &&
+             (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+              adapter->core->state == ECAT_FOE_STATE_DATA)) ||
+            (claimed == 0U && adapter->core->session_active)) {
+            ecat_foe_core_on_abort(adapter->core);
+        }
+    }
+
     if (!adapter->has_staged_wrq) {
         if (adapter->pending_data_response) {
             bool ack = false;
@@ -436,7 +465,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                     }
                 }
             }
-            if (claimed != 1U || !ack) {
+            if (claimed != 1U || !ack || adapter->core->state == ECAT_FOE_STATE_ERROR) {
                 for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
                     if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
                         adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
@@ -567,7 +596,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         return 0;
     } else if (opcode == ECAT_FOE_OP_ERR) {
         /* SOES 拒绝了 WRQ (如 FOE_OP_ERR 0x800A 密码错误，或 0x8008 非 BOOT 态)：
-         * 安全丢弃暂存 WRQ，核心维持原有会话状态不变，且保留 FOE_OP_ERR 以供发给主站 */
+         * 安全丢弃暂存 WRQ 并保留 FOE_OP_ERR；协议栈中止旧会话时已同步清理 */
         adapter->has_staged_wrq = false;
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;

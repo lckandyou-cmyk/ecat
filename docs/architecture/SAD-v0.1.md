@@ -78,7 +78,7 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core);
   - **源码出处与事实**：查阅 `soes/esc_foe.c` 0 长度包结束分支逻辑（详见 `soes-integration-options.md` 中已登记引文 Q2_ESC_FOE_ZERO_LEN_CLOSE）：
     在该分支中，SOES 执行 `FOE_fclose()`、`res = FOE_send_ack()` 与 `FOE_init()`，但 `FOE_fclose()` 的返回值（即 `write_function` 回调的返回值）被**完全忽略**，SOES 未对返回值做任何检查，直接执行 `FOE_send_ack()` 向主站回复成功 ACK 并通过 `FOE_init()` 重置状态机（对比短包分支中明确检查了返回值 `if ((ncopied != data_len) || FOE_fclose ())`）。
   - **空包路径出现条件**：独立 0 长度包只在传输总字节数（`header_length + payload_length`）**恰好等于底层 FoE 数据包单包容量（`ESC_FOE_DATA_SIZE`）的整数倍时才会出现**；这纯粹属于以太网 FoE 协议层分包规则，**与应用层配置的 `foe_cfg->buffer_size` 缓冲大小完全无关**。（注：TwinCAT 等主流主站在整倍数时实际下发 0 长度包的行为标记为 **【未核实】**）。
-  - **架构决策【已确定】**：v1 架构确定**完全接受此限制，不给 SOES 打源码补丁**。
+  - **当前实现【宿主已验证，真机待验证】**：不修改 SOES 源码；后置邮箱钩子在核心结束失败时将排队的 ACK 改写为 FoE 错误（0x8000）。
   - **安全性保证（防变砖）**：
     由于架构在首包解析通过后已强制调用目标驱动的 `drv->invalidate()`，固件就绪/有效标记已提前被清除。即使最后一次回调内的校验或提交失败、且主站误收到了成功 ACK，底层介质中依然处于无效标记状态。设备后续软复位或冷启动时，Bootloader 启动检查判定固件无效并拒绝引导，设备常驻在 Bootloader 中等待重新升级，降低变砖风险（前提为底层存储擦写具备掉电原子性且 Bootloader 引导前置有效性校验完整）。
   - **缓解措施 1（主机打包端避开空包路径）**：
@@ -388,13 +388,13 @@ sequenceDiagram
   5. **版本语义**：联合提交实现必须再次核对当前持久化下限，拒绝低于该下限的候选版本，并以 `max(当前下限, 包头 min_allow_version)` 作为新下限，保证下限单调不减。
 
 > **SOES 协议栈限制依据【已核实】**：
-> 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层接受此限制，细分错误通过从站本地日志/串口记录。
+> 查阅 SOES 源码 `esc_foe.c`，在数据写入与结束阶段，只要 `write_function` 返回非零，SOES 内部固定调用 `FOE_abort (FOE_ERR_PROGERROR)`。因此在原生 SOES 环境下，从站无法向主站区分并回复 `0x800C`、`0x8003`、`0x8002` 或 `0x8004`，只能回复单一的 `0x800B`。适配层通常保留该错误码；零长度结束失败的假 ACK 由后置钩子改写为 0x8000，细分错误通过从站本地日志/串口记录。
 >
 > **原生 SOES WRQ 限制及本项目处理【宿主 harness 已验证，真机待验证】**：
 > 原生 SOES 的 `FOE_write()` 没有应用层 WRQ 回调：仅使用原生文件回调时，应用层拒绝可能延迟到数据阶段。本项目通过前置邮箱钩子只读预检并暂存 WRQ，再由 SOES 检查密码和 BOOT 状态；后置钩子在 ACK(0) 排队后激活核心会话，必要时改写待发送响应。该方案已在真实 SOES 源码的宿主测试中验证，真实设备和主站仍需联调；具体行为见 [SOES 接入分析](soes-integration-options.md)。
 >
 > **0 长度包分支返回值忽略限制与拦截策略【已确定】**：
-> 查阅 SOES 源码 `esc_foe.c` 0 长度包分支，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），从站无法通过 FoE 回调向主站回复 `0x800B`。v1 架构确定接受此限制，依靠 `invalidate()` 保证不引导破损固件，并通过打包端末尾填充避开空包，以及在适配层通过 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`（详见第 1.2 节）。
+> 查阅 SOES 源码 `esc_foe.c` 0 长度包分支，当传输结束由独立 0 长度包触发时，SOES 调用 `FOE_fclose()` 后根本未检查其返回值，直接回复 `FOE_send_ack()`。因此，若升级失败发生在 0 长度包触发的最后一次回调中（如 Stream CRC 或 Readback CRC 不符），原生 SOES 无法通过该回调向主站回复 `0x800B`。本项目后置邮箱钩子将失败时排队的 ACK 改写为 FoE 错误 `0x8000`；有效标记、打包填充和状态迁移拦截仍为额外防线，实机效果待验证。
 
 ### 3.3 FOE_OP_BUSY 机制与阻塞模型语境说明
 
@@ -650,7 +650,7 @@ typedef struct ecat_foe_target_driver {
 14. **【已确定】环形缓冲队列解耦方案范围界定**：
     v1 架构确定**不引入环形缓冲队列**。原因：绝大多数 MCU 片内 Flash 擦写时会导致 CPU 总线挂起（Stall），软件队列无法解耦总线冻结；且 FoE 为单包停等流控，大容量队列所需 RAM 内存过大。本项移出 SAD 决策清单，收纳至 `open-issues.md` 作为后续特定硬件平台（如非阻塞 SPI Flash 独立总线）的可选增强方案跟踪。
 15. **【已确定】0 长度包分支忽略 `FOE_fclose` 返回值处理策略**：
-    v1 架构确定完全接受原生 SOES 限制，不打源码补丁。通过 `drv->invalidate()` 提前清除固件有效标记提供防变砖安全兜底；通过打包工具 `--foe-packet-size N` 尾部填充 0xFF 尽力而为规避空包路径；通过适配层 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`。
+    不打 SOES 源码补丁；后置邮箱钩子将核心结束失败时排队的 ACK 改写为 FoE 错误 `0x8000`（宿主已验证，真机待验证）。通过 `drv->invalidate()` 提前清除固件有效标记提供防变砖安全兜底；通过打包工具 `--foe-packet-size N` 尾部填充 0xFF 尽力而为规避空包路径；通过适配层 `post_state_change_hook` 在主站发起 `BOOT -> INIT` 状态切换时拦截并设置 AL Status Code `0x0014 (ALERR_NOVALIDFIRMWARE)`。
 
 ### 5.2 待决策清单
 

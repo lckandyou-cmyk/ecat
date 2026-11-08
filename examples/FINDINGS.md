@@ -28,7 +28,7 @@
 - **宿主观察现象**：
   在原生 SOES（`esc_foe.c`）中，当传输数据总长恰好是邮箱载荷整数倍时，传输以零长度数据包结束。在此路径下，SOES 调用 `FOE_fclose` 后未检查其返回值，直接回复 FoE ACK。
 - **保护效果**：
-  在核心机层面，若底层 `finalize` 失败，`ecat_foe_core_on_end` 正确返回 -1 并转入 `ECAT_FOE_STATE_ERROR`，底层介质上无有效标记。因此 Bootloader 启动检测时不会引导损坏固件。但在通信层，主站不会收到 0x800B 报错。该协议栈现象已在 `tests/test_soes_real_harness.c` 中通过真实 `esc_foe.c` 独立验证。
+  在核心机层面，若底层 `finalize` 失败，`ecat_foe_core_on_end` 正确返回 -1 并转入 `ECAT_FOE_STATE_ERROR`，底层介质上无有效标记。因此 Bootloader 启动检测时不会引导损坏固件。原生 SOES 仍会排队 ACK；本项目后置钩子在核心失败时将该 ACK 改为 FoE 错误（0x8000）。原生行为和完整钩子链路均已做宿主测试，真机仍需验证。
 - **规避方案**：
   工具端使用 `efw_pack.py --foe-packet-size N` 在尾部按目标追加 `0xFF`，尽力规避整数倍结束包；实际分包和主站可观察结果仍需实测。场景 7 在宿主验证打包文件与核心接收。
 
