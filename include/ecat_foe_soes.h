@@ -91,6 +91,8 @@ typedef struct {
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
     ecat_foe_reset_fn_t     foe_reset_fn;       /**< 协议栈状态机复位回调 (如真实环境接入 FOE_init，可为 NULL) */
+    bool                    pending_data_response; /**< 本轮处理的输入为 FoE DATA */
+    uint32_t                pending_data_packet; /**< 本轮 DATA 包号 */
     bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
     char                    staged_filename[FOE_FN_MAX + 1]; /**< 暂存的 WRQ 文件名 */
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
@@ -234,7 +236,8 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
  *
  * 在 PDI 主循环调用 ESC_foeprocess() 之后调用本函数。
  * 1. 恢复 foe_cfg->n_files 为真实原始条目数；
- * 2. 若存在暂存的 WRQ：
+ * 2. DATA 响应缺失或非匹配 ACK 时，中止活跃核心会话；
+ * 3. 若存在暂存的 WRQ：
  *    - 严格核验从站发送邮箱是否为有效 FoE ACK(0) 报文 (mbxtype == 0x04, length == 6, opcode == 0x04, packetnumber == 0)；
  *    - 若核验通过：确认原生 SOES 已通过密码/BOOT等全部检查并正式接受 WRQ，正式调用 core_on_wrq 激活新会话；
  *      若 core_on_wrq 激活失败，则将该槽位就地改写为 FOE_OP_ERR (0x8000)，确保主站可观察到明确失败，返回非 0；

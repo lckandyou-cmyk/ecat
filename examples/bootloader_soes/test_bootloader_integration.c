@@ -552,6 +552,41 @@ int main(void)
         printf("  [PASS] 场景 4 验证通过: 主站 ERR 即时触发一次且仅一次驱动中止、保留介质无效并支持后续自愈重试闭环\n");
     }
 
+    /* Native SOES rejects an out-of-order DATA without calling write_cb. */
+    {
+        reset_test_env();
+        s_foe_cfg.buffer_size = 64U;
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        size_t n = bootloader_master_build_efw(s_test_efw_buf, sizeof(s_test_efw_buf),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, s_test_payload, sizeof(s_test_payload));
+        assert(n > 232U);
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, s_test_efw_buf, 116, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, s_test_efw_buf + 116, 116, &resp) == 0);
+        assert(app.core.session_active && app.core.state == ECAT_FOE_STATE_DATA);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 4, s_test_efw_buf + 232, 1, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ERR && resp.error_code == 0x8005U);
+        assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        assert(ecat_foe_core_upgrade_incomplete(&app.core));
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1, s_test_efw_buf, 116, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2, s_test_efw_buf + 116, 116, &resp) == 0);
+        assert(app.core.session_active);
+        /* Simulate a processing cycle unable to claim any response slot. */
+        uint8_t data_frame[12] = {6, 0, 0, 0, 0, 4, 3, 0, 3, 0, 0, 0};
+        assert(ecat_foe_soes_pre_process_hook(&app.adapter, &s_foe_cfg, data_frame, sizeof(data_frame)) == 0);
+        assert(ecat_foe_soes_post_process_hook(&app.adapter, &s_foe_cfg, NULL, 0) != 0);
+        assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(ecat_foe_core_upgrade_incomplete(&app.core));
+        printf("  [PASS] SOES 包号错误及无响应时中止核心会话并允许重试\n");
+    }
+
     /* ---------------------------------------------------------------------- */
     /* 场景 5: 写入物理基地址独家由本地配置裁决边界验证                       */
     /* ---------------------------------------------------------------------- */

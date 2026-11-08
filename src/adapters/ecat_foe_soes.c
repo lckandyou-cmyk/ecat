@@ -24,6 +24,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->buffer_size = buffer_size;
     adapter->al_error_fn = NULL;
     adapter->foe_reset_fn = NULL;
+    adapter->pending_data_response = false;
+    adapter->pending_data_packet = 0U;
     adapter->has_staged_wrq = false;
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
@@ -204,6 +206,7 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
 
 #define ECAT_MBX_TYPE_FOE 0x04U
 #define ECAT_FOE_OP_WRQ   0x02U
+#define ECAT_FOE_OP_DATA  0x03U
 #define ECAT_FOE_OP_ACK   0x04U
 #define ECAT_FOE_OP_ERR   0x05U
 #define ECAT_MBX_HDR_SIZE 6U
@@ -270,6 +273,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
 
     /* 对所有输出邮箱槽位状态进行只读快照 (不向 SOES 写入任何数据，绝不篡改 SOES 内存) */
     adapter->mbx_ctx.newly_claimed_slot = -1;
+    adapter->pending_data_response = false;
     for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
         adapter->mbx_ctx.pre_states[i] = adapter->mbx_ctx.mbx_control_states[i];
     }
@@ -312,6 +316,11 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
      * 字节 6: opcode (0x02 为 WRQ, 0x05 为 ERR)
      */
     uint8_t opcode = mbx_buf[ECAT_MBX_HDR_SIZE];
+    if (opcode == ECAT_FOE_OP_DATA) {
+        adapter->pending_data_response = true;
+        adapter->pending_data_packet = (uint32_t)mbx_buf[8] | ((uint32_t)mbx_buf[9] << 8) |
+                                       ((uint32_t)mbx_buf[10] << 16) | ((uint32_t)mbx_buf[11] << 24);
+    }
     if (opcode == ECAT_FOE_OP_ERR) {
         /* 主站下发 FoE ERR 中止报文：
          * 1. 安全丢弃暂存 WRQ (若存在)；
@@ -409,6 +418,40 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
     }
 
     if (!adapter->has_staged_wrq) {
+        if (adapter->pending_data_response) {
+            bool ack = false;
+            unsigned claimed = 0;
+            adapter->pending_data_response = false;
+            for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+                if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
+                    adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
+                    const uint8_t *slot = &adapter->mbx_ctx.mbx_buffers[i * adapter->mbx_ctx.buffer_size];
+                    claimed++;
+                    if (slot[0] == ECAT_FOE_HDR_SIZE && slot[1] == 0U &&
+                        (slot[5] & 0x0FU) == ECAT_MBX_TYPE_FOE &&
+                        slot[ECAT_MBX_HDR_SIZE] == ECAT_FOE_OP_ACK && slot[7] == 0U &&
+                        ((uint32_t)slot[8] | ((uint32_t)slot[9] << 8) |
+                         ((uint32_t)slot[10] << 16) | ((uint32_t)slot[11] << 24)) == adapter->pending_data_packet) {
+                        ack = true;
+                    }
+                }
+            }
+            if (claimed != 1U || !ack) {
+                for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
+                    if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
+                        adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {
+                        foe_neutralize_slot_if_ack(&adapter->mbx_ctx.mbx_buffers[i * adapter->mbx_ctx.buffer_size],
+                                                   adapter->mbx_ctx.buffer_size);
+                    }
+                }
+                if (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+                    adapter->core->state == ECAT_FOE_STATE_DATA) {
+                    ecat_foe_core_on_abort(adapter->core);
+                }
+                if (adapter->foe_reset_fn != NULL) adapter->foe_reset_fn();
+                return -1;
+            }
+        }
         return 0;
     }
 
