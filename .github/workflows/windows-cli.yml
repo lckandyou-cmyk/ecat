@@ -23,6 +23,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang poppler-utils
           python -m pip install pynacl==1.6.2
+      - name: Fetch and verify Monocypher 4.0.3
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://monocypher.org/download/monocypher-4.0.3.tar.gz -o monocypher-4.0.3.tar.gz
+          echo '8cc9bc341a66249016db9bd70e9142d8d0aef9945973744b1ac05dbc55d8ee66  monocypher-4.0.3.tar.gz' | sha256sum -c -
+          tar -xzf monocypher-4.0.3.tar.gz
+      - name: Test CLI and Monocypher core interoperability
+        run: make test-monocypher CC=clang PYTHON=python MONOCYPHER_DIR="$RUNNER_TEMP/monocypher-4.0.3/src"
       - name: Run core, adapters, and CLI tests
         run: make test CC=clang PYTHON=python
       - name: Run ASan and UBSan tests

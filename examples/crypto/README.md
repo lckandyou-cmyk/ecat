@@ -28,6 +28,18 @@ Assign the callbacks before `ecat_foe_core_init()`. The key table and verifier s
 
 The example intentionally does not ship a trusted production key, connect itself to the example board app, or include Monocypher source. A device enabling `ECAT_FOE_SIGNATURE_VERIFY_ENABLE` must supply callbacks and provision the public key through its own trusted build/configuration process; merely setting the macro makes core initialization fail closed until wiring is complete.
 
+## Host interoperability test
+
+The CI job downloads the [upstream 4.0.3 archive](https://monocypher.org/download/monocypher-4.0.3.tar.gz) and checks SHA-256 `8cc9bc341a66249016db9bd70e9142d8d0aef9945973744b1ac05dbc55d8ee66` before compiling it outside the repository. The test signs a package with the CLI/PyNaCl, then feeds it through the core and the real Monocypher verifier over a mock storage driver. It also checks rejection of unsigned packages, unknown key IDs, modified signatures, altered metadata and payload with recomputed CRCs, and corrupted storage readback.
+
+To run the same test locally, obtain and verify Monocypher 4.0.3 separately, install PyNaCl into the Python environment, then run:
+
+```sh
+make test-monocypher MONOCYPHER_DIR=/path/to/monocypher-4.0.3/src PYTHON=/path/to/python
+```
+
+The target fails if the source files or signing dependency are unavailable. This is a host test; it does not verify a board, key provisioning, secure boot, or power-loss behavior.
+
 ## Resource measurement
 
 No target MCU is specified, and no Flash/RAM/time measurements are claimed. For a real port, record the exact MCU, Monocypher source checksum, compiler/version, optimization/LTO/section-GC flags, and link map. Compare verifier-disabled and verifier-enabled `.text`/`.rodata`; include `ecat_foe_monocypher_verifier_t`, SHA-512 state and `ecat_foe_core_t` in static RAM; measure stack high-water; and time the full readback plus final verification over several payload sizes using a cycle counter or GPIO. Host timing is not MCU evidence. The signature adapter uses bounded incremental hashing and the core reads flash in 64-byte chunks, but this alone does not establish an MCU's stack or latency budget.

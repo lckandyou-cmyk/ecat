@@ -32,10 +32,11 @@ TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 BUILD_DIR ?= build
 OVERWRITE ?= 0
 SOES_DIR ?= /tmp/soes_src/soes
+MONOCYPHER_DIR ?=
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all build clean test test-asan test-soes test-examples test-ssc-async test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all build clean test test-asan test-soes test-monocypher test-examples test-ssc-async test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -107,6 +108,19 @@ test: test-examples test-ssc-async test-target-async
 	echo "  [PASS] 普通 test_runner_efw 在 8MB 与 1MB 栈下运行正常" && \
 	$(PYTHON) tests/test_verify_quotes.py && \
 	$(PYTHON) tests/test_verify_pdf_quotes.py
+
+# Optional upstream dependency; CI downloads and verifies the pinned release.
+test-monocypher:
+	@if [ -z "$(MONOCYPHER_DIR)" ] || [ ! -f "$(MONOCYPHER_DIR)/monocypher.c" ] || [ ! -f "$(MONOCYPHER_DIR)/monocypher.h" ] || [ ! -f "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.c" ] || [ ! -f "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.h" ]; then \
+		echo "错误: 请通过 MONOCYPHER_DIR 指定仓库外 Monocypher 4.0.3 的 src 目录"; exit 1; \
+	fi
+	@TMP_MONOCYPHER_DIR=$$(mktemp -d /tmp/ecat_monocypher_test_XXXXXX) && \
+	trap 'rm -rf "$$TMP_MONOCYPHER_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -Iexamples/crypto -I"$(MONOCYPHER_DIR)" -I"$(MONOCYPHER_DIR)/optional" \
+		-o "$$TMP_MONOCYPHER_DIR/interop" src/ecat_foe_efw.c src/ecat_foe_core.c \
+		examples/crypto/ecat_foe_monocypher_verifier.c tests/mock_driver.c tests/test_monocypher_interop.c \
+		"$(MONOCYPHER_DIR)/monocypher.c" "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.c" && \
+	$(PYTHON) tests/test_monocypher_interop.py "$$TMP_MONOCYPHER_DIR/interop"
 
 test-ssc-async:
 	@TMP_ASYNC_DIR=$$(mktemp -d /tmp/foe_ssc_async_XXXXXX) && \

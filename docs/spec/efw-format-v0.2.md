@@ -109,6 +109,6 @@ ecat-efw info app.efw --public-key device-trust-key.bin
 
 ## 算法选择与资源测量
 
-本项目提供可替换的 Ed25519ph 后端接口和可选 Monocypher 适配示例，不在仓库内复制第三方密码学实现。Monocypher 4.0.3 提供可选 SHA-512/Ed25519 源文件；项目没有集成或编译该依赖。具体 MCU 的 Flash、峰值 RAM、栈和验签耗时依目标、编译器、优化选项和所选库而异，本仓库没有硬件测量数据，均标为**未验证**。
+本项目提供可替换的 Ed25519ph 后端接口和可选 Monocypher 适配示例，不在仓库内复制第三方密码学实现。Monocypher 4.0.3 提供可选 SHA-512/Ed25519 源文件；项目不随仓库分发该依赖；CI 获取固定版本并在宿主互通测试中编译，具体步骤见 `examples/crypto/README.md`。具体 MCU 的 Flash、峰值 RAM、栈和验签耗时依目标、编译器、优化选项和所选库而异，本仓库没有硬件测量数据，均标为**未验证**。
 
 移植时可在相同编译设置下对比 `ECAT_FOE_SIGNATURE_VERIFY_ENABLE=0/1` 的链接 map（启用 section GC），报告 `.text/.rodata` 差值；记录 verifier 上下文、SHA-512 上下文和核心实例的静态 RAM；用栈填充水位/RTOS stack high-water mark 测峰值栈；用目标 cycle counter/GPIO 包围完整回读验签路径并报告 payload 大小、频率、编译参数、读取时间和 Ed25519ph 完成时间。宿主模拟、代码体积估算或理论周期数不得写成 MCU 实测。
