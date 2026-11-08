@@ -42,6 +42,12 @@ static void test_post_state_hook(uint8_t *as, uint8_t *an)
     ecat_foe_soes_post_state_hook(&s_state_hook_app->adapter, as, an);
 }
 
+static unsigned s_rejected_dispatch_calls;
+static void rejected_dispatch_probe(void)
+{
+    s_rejected_dispatch_calls++;
+}
+
 /* 宿主模拟 ESC 物理硬件端口 */
 static uint8_t s_hw_sm1_buf[128];
 static uint16_t s_hw_sm1_len = 0;
@@ -800,6 +806,76 @@ int main(void)
         }
         printf("  [PASS] SOES 非法 BOOT 状态迁移清理和恢复验证通过\n");
     }
+
+    /* Reject malformed or unassociated input before calling SOES. */
+    for (unsigned variant = 0; variant < 8U; variant++) {
+        static uint8_t large_image[ECAT_FOE_EFW_HEADER_MIN_LEN + 8192U];
+        static uint8_t large_payload[8192U];
+        uint8_t other[12] = {6U, 0U, 0U, 0U, 0U, 4U, 3U, 0U, 3U, 0U, 0U, 0U};
+        reset_test_env();
+        s_foe_cfg.buffer_size = 64U;
+        assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                                   s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+        assert(bootloader_master_build_efw(large_image, sizeof(large_image),
+            BOOTLOADER_PROJECT_ID, BOOTLOADER_PROJECT_NAME, BOOTLOADER_HARDWARE_ID,
+            BOOTLOADER_HW_VER_MIN, BOOTLOADER_HW_VER_MAX, BOOTLOADER_TARGET_MCU_ID,
+            0x01000000U, large_payload, sizeof(large_payload)) == sizeof(large_image));
+        master_foe_response_t resp;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0U, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U, large_image, 116U, &resp) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 2U, large_image + 116U, 116U, &resp) == 0);
+        assert(app.core.session_active && app.flash_drv.is_initialized);
+
+        memset(MBX, 0, ESC_MBXSIZE);
+        MBX[0] = 6U; MBX[5] = 4U; MBX[6] = 3U; MBX[8] = 3U;
+        MBXcontrol[0].state = MBXstate_inclaim;
+        const uint8_t *rx = MBX;
+        size_t rx_len = 12U;
+        if (variant == 0U) { /* Original ASan trigger: claimed length exceeds the received slot. */
+            const uint16_t claim = 6006U;
+            MBX[0] = (uint8_t)claim; MBX[1] = (uint8_t)(claim >> 8);
+            memcpy(MBX + 12U, large_image + 232U, 116U);
+            rx_len = ESC_MBXSIZE;
+        } else if (variant == 1U) {
+            MBX[0] = 7U; /* Header declares one byte more than received. */
+        } else if (variant == 2U) {
+            MBX[0] = 123U; rx_len = sizeof(MBX); /* Larger than one slot. */
+        } else if (variant == 3U) {
+            rx_len = 5U; /* Truncated mailbox header. */
+        } else if (variant == 4U) {
+            rx = other; /* Checked bytes are not the actual SOES input slot. */
+        } else if (variant == 5U) {
+            rx = NULL; rx_len = 0U; /* Claimed input cannot be skipped. */
+        } else if (variant == 6U) {
+            rx = NULL; rx_len = 12U;
+        } else {
+            rx_len = 0U;
+        }
+        s_rejected_dispatch_calls = 0U;
+        /* Variant zero uses the real stack; others instrument dispatcher calls. */
+        int rc = bootloader_app_step(&app, &s_foe_cfg, rx, rx_len, NULL, 0,
+                                     variant == 0U ? NULL : rejected_dispatch_probe);
+        assert(rc == -1 && s_rejected_dispatch_calls == 0U);
+        assert(!app.core.session_active && app.core.state == ECAT_FOE_STATE_IDLE);
+        assert(!app.flash_drv.is_initialized && app.flash_drv.valid_flag == APP_FLASH_INVALID_MAGIC);
+        assert(ecat_foe_core_upgrade_incomplete(&app.core));
+        assert(MBXcontrol[0].state == MBXstate_inclaim); /* Mailbox owner retains ownership. */
+        MBXcontrol[0].state = MBXstate_idle; /* Model the owner's drop. */
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "SERVO_DRV_MCU_V1.0.0.0.efw", 0U, &resp) == 0);
+        assert(resp.opcode == BOOTLOADER_FOE_OP_ACK);
+    }
+    /* An empty idle poll is valid but must not dispatch stale mailbox data. */
+    reset_test_env();
+    assert(bootloader_app_init(&app, &s_foe_cfg, MBXcontrol, MBX, MBXBUFFERS, ESC_MBXSIZE,
+                               s_sim_flash, sizeof(s_sim_flash), FOE_init, NULL) == 0);
+    s_rejected_dispatch_calls = 0U;
+    assert(bootloader_app_step(&app, &s_foe_cfg, NULL, 0U, NULL, 0U, rejected_dispatch_probe) == 0);
+    assert(s_rejected_dispatch_calls == 0U);
+    /* A well-formed WRQ with a bad project must still reach SOES for 0x8001. */
+    master_foe_response_t rejected_wrq;
+    assert(bootloader_master_send_wrq(&app, &s_foe_cfg, "BAD_MCU_V1.0.0.0.efw", 0U, &rejected_wrq) == 0);
+    assert(rejected_wrq.opcode == BOOTLOADER_FOE_OP_ERR && rejected_wrq.error_code == 0x8001U);
+    printf("  [PASS] 畸形邮箱输入在 SOES 分发前拒绝并安全清理\n");
 
     /* SOES counts the full EFW file; Flash capacity applies to payload only. */
     for (unsigned oversized = 0; oversized <= 1U; oversized++) {

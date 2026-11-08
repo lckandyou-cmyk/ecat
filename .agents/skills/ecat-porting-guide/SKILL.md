@@ -164,6 +164,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
   1. `ecat_foe_soes_pre_process_hook`：在 SOES 协议栈处理前嗅探接收邮箱中的 WRQ，并对核心状态与驱动无副作用地预检文件名和元数据；钩子会暂存 WRQ，并临时调整 SOES 文件表条目/计数以路由请求，随后由后置流程恢复文件计数；
   2. `ESC_foeprocess()`：SOES 原生进程处理，校验密码与 BOOT 态并排队响应；
   3. `ecat_foe_soes_post_process_hook`：检查输出槽位，若核心机激活失败或检测到槽位异常，就地改写为标准 0x8000 错误码并注入复位函数（`FOE_init`）自愈，规避原生 SOES 无 WRQ 回调的缺陷。
+- **输入帧安全边界**：传给前置钩子的必须是 SOES 实际读取的输入槽位和真实接收长度；若返回 `ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH`，不得调用 `ESC_foeprocess`，应中止活跃会话、按配置复位 FoE，由邮箱所有者丢弃输入并按设备策略恢复。其他 WRQ 预检拒绝仍交给 SOES 返回协议错误；不得假设上游邮箱长度校验已经执行。
 - **调度要求**：SOES 协议栈及其前后置钩子非多线程安全，**必须在同一执行流或关中断临界区中串行原子执行**，严禁多任务并发调用。
 
 ### 5.2 Beckhoff Slave Stack Code (SSC) 接入规范

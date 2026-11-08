@@ -98,13 +98,30 @@ int bootloader_app_step(bootloader_app_t *app,
                         size_t tx_len,
                         void (*foeprocess_fn)(void))
 {
-    if (app == NULL || !app->is_initialized || foe_cfg == NULL) {
+    if (app == NULL || !app->is_initialized || foe_cfg == NULL ||
+        app->adapter.core != &app->core || app->adapter.mbx_ctx.mbx_control_states == NULL ||
+        app->adapter.mbx_ctx.mbx_buffers == NULL || app->adapter.mbx_ctx.num_buffers < 2U) {
         return -1;
     }
 
-    /* 阶段 1: 前置嗅探钩子 (只读解析文件名，暂存 WRQ 并做安全预检) */
-    if (rx_buf != NULL && rx_len > 0) {
-        (void)ecat_foe_soes_pre_process_hook(&app->adapter, foe_cfg, rx_buf, rx_len);
+    /* SOES consumes input slot 0. A missing or different buffer cannot
+     * establish the bounds of the bytes the protocol stack will actually read. */
+    if (rx_buf == NULL && rx_len == 0U &&
+        app->adapter.mbx_ctx.mbx_control_states[0] != MBXstate_inclaim) {
+        return 0; /* No input: there is nothing to dispatch. */
+    }
+    int pre_rc = ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH;
+    if (rx_buf == app->adapter.mbx_ctx.mbx_buffers && rx_len > 0U) {
+        pre_rc = ecat_foe_soes_pre_process_hook(&app->adapter, foe_cfg, rx_buf, rx_len);
+    }
+    if (pre_rc == ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH) {
+        /* The mailbox owner must discard slot 0 after this error. */
+        if (app->core.state == ECAT_FOE_STATE_WRQ_ACKED ||
+            app->core.state == ECAT_FOE_STATE_DATA || app->core.session_active) {
+            ecat_foe_core_on_abort(&app->core);
+        }
+        if (app->adapter.foe_reset_fn != NULL) app->adapter.foe_reset_fn();
+        return -1;
     }
 
     /* 阶段 2: SOES 原生处理 (执行密码校验、BOOT 态校验并排队响应) */

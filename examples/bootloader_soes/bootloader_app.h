@@ -73,12 +73,13 @@ int bootloader_app_init(bootloader_app_t *app,
  *
  * @param app             Bootloader 上下文指针
  * @param foe_cfg         SOES 的 foe_cfg 配置结构体指针
- * @param rx_buf          当前接收到的邮箱报文首地址
- * @param rx_len          接收报文总字节数
+ * @param rx_buf          SOES 输入邮箱槽位 0 首地址；无输入时传 NULL
+ * @param rx_len          已实际接收的报文总字节数；无输入时传 0
  * @param tx_buf          待发送或已排队的邮箱报文首地址 (可为 NULL 由后置钩子通过槽位自动识别)
  * @param tx_len          待发送报文长度
  * @param foeprocess_fn   SOES 协议机主处理函数指针 (可为 NULL 默认调用 ESC_foeprocess)
- * @return 0 正常流转，-1 发生异常且已就地转换为错误响应
+ * @return 0 正常流转；-1 失败。结构错误时不调用 SOES 或生成响应，
+ *         邮箱所有者必须丢弃输入槽位，再依设备策略恢复。
  */
 int bootloader_app_step(bootloader_app_t *app,
                         foe_cfg_t *foe_cfg,

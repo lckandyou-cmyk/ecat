@@ -1273,7 +1273,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         trunc_buf[0] = 20; trunc_buf[1] = 0;
         trunc_buf[5] = MBXFOE;
         trunc_buf[6] = FOE_OP_WRQ;
-        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, trunc_buf, 14) == 0);
+        assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, trunc_buf, 14) == ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH);
 
         /* Case 1D: 超长文件名 (> FOE_FN_MAX=31 字节，例如 32 字节) */
         MBXcontrol[0].state = MBXstate_inclaim;
@@ -1291,7 +1291,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(res_mbx->foeheader.errorcode == 0x8001);
         ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)res_mbx, sizeof(_MBXh) + sizeof(_FOEh));
         mock_master_read_outbox();
-        printf("  [PASS] 维度 1 (帧边界): 畸形短帧、截断帧与超长文件名安全放行，原生 SOES 返回 0x8001\n");
+        printf("  [PASS] 维度 1 (帧边界): 截断帧在分发前拒绝，超长文件名由 SOES 返回 0x8001\n");
     }
 
     /* 2. 维度 2: 密码验证时序与权限保持 (Password Verification Timing) */
@@ -1888,7 +1888,7 @@ int main(void)
             /* Case 1F: 邮箱上下文未配置时，pre_hook 与 post_hook 严格失败关闭 */
             ecat_foe_soes_adapter_t unreg_adapter;
             ecat_foe_soes_init(&unreg_adapter, &core, 128);
-            assert(ecat_foe_soes_pre_process_hook(&unreg_adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2)) == -1);
+            assert(ecat_foe_soes_pre_process_hook(&unreg_adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn2)) == ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH);
             unreg_adapter.has_staged_wrq = true;
             assert(ecat_foe_soes_post_process_hook(&unreg_adapter, &s_foe_cfg, NULL, 0) == -1);
             assert(unreg_adapter.has_staged_wrq == false);

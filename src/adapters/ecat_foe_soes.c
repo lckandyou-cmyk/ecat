@@ -266,14 +266,27 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
                                    size_t mbx_buf_len)
 {
     if (adapter == NULL || adapter->core == NULL || foe_cfg == NULL || mbx_buf == NULL) {
-        return -1;
+        return ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH;
     }
 
-    /* 必须配置邮箱上下文以保证新鲜度与状态关联；未配置时无法确保响应关联，严格拒绝 */
+    /* 必须配置邮箱上下文以保证新鲜度与状态关联；未配置时禁止分发。 */
     if (adapter->mbx_ctx.mbx_control_states == NULL ||
         adapter->mbx_ctx.mbx_buffers == NULL ||
-        adapter->mbx_ctx.num_buffers < 2) {
-        return -1;
+        adapter->mbx_ctx.num_buffers < 2U ||
+        adapter->mbx_ctx.num_buffers > ECAT_FOE_SOES_MAX_MBX_BUFFERS ||
+        adapter->mbx_ctx.buffer_size < ECAT_MBX_HDR_SIZE + ECAT_FOE_HDR_SIZE) {
+        return ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH;
+    }
+
+    /* SOES consumes the declared mailbox length, not mbx_buf_len.  Reject
+     * truncation and lengths beyond a single configured slot before dispatch. */
+    if (mbx_buf_len < ECAT_MBX_HDR_SIZE) {
+        return ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH;
+    }
+    size_t declared_len = (size_t)mbx_buf[0] | ((size_t)mbx_buf[1] << 8);
+    if (declared_len > mbx_buf_len - ECAT_MBX_HDR_SIZE ||
+        declared_len > (size_t)adapter->mbx_ctx.buffer_size - ECAT_MBX_HDR_SIZE) {
+        return ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH;
     }
 
     /* 对所有输出邮箱槽位状态进行只读快照 (不向 SOES 写入任何数据，绝不篡改 SOES 内存) */
@@ -317,11 +330,6 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     }
 
     if (mbx_payload_len < ECAT_FOE_HDR_SIZE) {
-        return 0;
-    }
-
-    /* 防止声明的 payload 长度越过传入缓冲区的实际边界 */
-    if (mbx_buf_len < (size_t)ECAT_MBX_HDR_SIZE + mbx_payload_len) {
         return 0;
     }
 

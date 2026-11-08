@@ -34,6 +34,8 @@ extern "C" {
 #define ECAT_FOE_SOES_MAX_FILES         4U
 #endif
 
+#define ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH (-2) /**< 输入帧或钩子上下文不安全，禁止调用 SOES */
+
 #define ECAT_MBX_HDR_SIZE               6U
 #define ECAT_FOE_HDR_SIZE               6U
 
@@ -221,6 +223,9 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
  * @brief SOES 邮箱前置嗅探与动态文件名同步钩子 (Mailbox Sniffer Hook)
  *
  * 在 PDI 主循环调用 ESC_foeprocess() 之前调用本函数。
+ * 调用者必须保证被检查的缓冲就是 SOES 将消费的输入邮箱槽位，且长度是有效接收字节数。
+ * 返回 ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH 时禁止调用 ESC_foeprocess；应由邮箱所有者丢弃该输入，
+ * 并中止活跃核心会话、按需要复位 SOES。普通 WRQ 预检拒绝可继续交给 SOES 生成错误响应。
  * 若检测到主站下发 FOE_OP_WRQ：
  * 1. 严格核验 EtherCAT 邮箱帧边界 (mbx_buf_len >= 12 字节，包含 6 字节 Mailbox 头与 6 字节 FoE 头)；
  * 2. 提取动态文件名，调用核心只读预检函数 ecat_foe_core_validate_wrq 校验项目名、格式与目标使能状态 (防回滚在后续数据头校验)；
@@ -232,7 +237,8 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
  * @param foe_cfg     SOES 的 foe_cfg 配置结构体指针
  * @param mbx_buf     从站 SM2 接收邮箱缓冲区首地址 (通常为 &MBX[0])
  * @param mbx_buf_len 接收邮箱有效数据长度
- * @return 0 成功处理或无需拦截；非 0 表示核心机检验拒绝
+ * @return 0 成功或无需拦截；ECAT_FOE_SOES_ERR_UNSAFE_DISPATCH 表示禁止分发的结构或上下文错误；
+ *         其他非 0 表示 WRQ 预检拒绝，调用者可继续交给 SOES 生成错误响应。
  */
 int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
                                    foe_cfg_t *foe_cfg,
