@@ -50,7 +50,19 @@ flowchart TD
 ./ecat-efw --version
 ```
 
-`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`inspect` 输出详细校验信息，`info` 简洁显示包内版本、项目/硬件 ID、升级目标、固件大小和 CRC 结果。两者都按文件内容识别，不依赖扩展名。EFW 格式未记录打包日期；`--version` 显示 CLI 版本和构建日期。包校验不等同于目标设备兼容性或可启动性验证。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部命令和参数。
+`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`inspect` 输出详细校验信息，`info` 简洁显示包内版本、项目/硬件 ID、升级目标、签名状态、Key ID、固件大小和 CRC 结果。带 `--public-key` 时还会验证签名；否则只报告签名存在但未验证。命令按文件内容识别，不依赖扩展名。EFW 格式未记录打包日期；`--version` 显示 CLI 版本和构建日期。包校验不等同于目标设备兼容性或可启动性验证。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部命令和参数。
+
+### 可选签名
+
+默认仍生成未签名包。需要签名时，在可信打包环境准备 32 字节 Ed25519 私钥种子文件，并显式传入 `--signing-key`；签名/验签需要 PyNaCl 与 libsodium。CLI 不会把私钥写进 EFW，`--public-key-out` 可导出设备信任配置所需公钥。检查已签名包时，`info` 不带公钥只会显示“存在，未验证”；带 `--public-key` 才验证签名。Windows 发布 CLI 包含签名运行依赖。设备端验签接口默认关闭；启用时必须接入受保护公钥和验签后端，否则初始化失败，不会回退到未验证模式。
+
+```sh
+./ecat-efw pack -i app.bin -p 0x10010001 -d 1 -t MCU -v 1.2.3.4 \
+  --signing-key signing-seed.bin --public-key-out trusted-key.bin -o app.efw
+./ecat-efw info app.efw --public-key trusted-key.bin
+```
+
+不要提交、分发或记录私钥。签名功能默认关闭；设备要强制验签，必须在本地启用 `ECAT_FOE_SIGNATURE_VERIFY_ENABLE` 并接入受保护公钥及密码学后端。验签失败会拒绝升级，不会降级到未验证模式。当前解析器仅接受统一格式；旧格式固件需要重新打包。旧设备可能忽略未知扩展，不能靠签名包强制旧设备验签。
 
 ### Windows
 
@@ -86,7 +98,8 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 
 ## 安全边界
 
-- `.efw` 中的 CRC32 用于检测意外损坏，不提供固件来源认证。项目 ID 和硬件 ID 也不是认证凭据；产品如需防恶意固件，必须另行实现签名验证和信任链。
+- `.efw` 中的 CRC32 用于检测意外损坏，不提供固件来源认证。项目 ID 和硬件 ID 也不是认证凭据。当前 EFW v2 提供默认关闭的 Ed25519ph 签名选项，准确覆盖范围见[格式规范](docs/spec/efw-format-v0.2.md)。
+- 设备端验签只在本地显式启用并配置受信公钥及密码学后端时强制执行；签名错误、未签名包、算法或密钥不可用均拒绝，不降级。验签与防回滚独立，是否接受旧版本由本地防回滚策略决定。签名不能替代安全启动和镜像结构检查；单分区升级在最终验签前可能已擦除旧镜像，验签本身不保证断电恢复或设备可用。
 - 启用防回滚时，目标驱动必须实现 `finalize_with_version_floor`，以断电可恢复事务联合提交镜像激活和版本下限；核心会拒绝缺少此回调的配置。宿主模拟不能证明具体板级事务的掉电安全。
 - SSC 适配器会校验 FoE 访问密码。默认预期值为 `0`；如使用非零密码，须在接受 WRQ 前配置。FoE 密码不等同于密码学认证。
 - 已测试的 SOES 版本在零长度结束包路径上可能忽略关闭回调错误，因此主站最终 ACK 不能单独作为镜像提交成功的证据。集成端应提供独立的升级结果状态。
@@ -94,7 +107,9 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 
 ## 规范与反馈
 
-- [EFW 固件包格式](docs/spec/efw-format-v0.1.md)
+- [EFW 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
+- [旧 EFW v1 格式说明（历史）](docs/spec/efw-format-v0.1.md)
+- [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)
 - [系统架构说明](docs/architecture/SAD-v0.1.md)
 - [SOES 接入分析](docs/architecture/soes-integration-options.md)
 - [SSC 异步阶段说明](docs/architecture/ssc-async-stage1.md)

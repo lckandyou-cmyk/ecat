@@ -52,6 +52,18 @@ Run `ecat-efw` with Python 3 from the repository root:
 
 `pack` wraps an existing `.bin` in an `.efw` package; it does not compile firmware. `inspect` prints detailed validation results, while `info` concisely shows the embedded firmware version, project and hardware IDs, target, payload size, and CRC results. Both identify packages by content, regardless of filename extension. The EFW format does not record a package build date; `--version` shows the CLI version and build date. Package validation does not establish device compatibility or bootability. Existing output files are not overwritten by default. Run `./ecat-efw --help` for all commands and options. CLI messages are currently in Chinese.
 
+### Optional firmware signatures
+
+Unsigned v2 packages remain the default. To sign, provide a 32-byte Ed25519 seed file in a trusted build environment; signing and verification require optional PyNaCl/libsodium. Export only the matching public key to provision on devices:
+
+```sh
+./ecat-efw pack -i app.bin -p 0x10010001 -d 1 -t MCU -v 1.2.3.4 \
+  --signing-key signing-seed.bin --public-key-out trusted-key.bin -o app.efw
+./ecat-efw info app.efw --public-key trusted-key.bin
+```
+
+Without a public key, `info` reports a signature as present but unverified. The device-side verifier is opt-in and fail-closed; enabling it requires a maintained crypto backend and a public key provisioned in trusted local configuration. Do not commit, distribute, log, or put a private key in firmware. The current parser accepts only the unified format; legacy packages must be repackaged. Old devices may ignore unknown extensions, so a signed package cannot force legacy devices to verify it. See the [v2 format/signature specification](docs/spec/efw-format-v0.2.md) and the [optional Monocypher adapter](examples/crypto/README.md).
+
 ### Windows
 
 The project builds a standalone Windows x64 CLI. Download the workflow artifact from [GitHub Actions](https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml); tested prerelease tags such as `v0.1.0-alpha.N` publish a [prerelease](https://github.com/lckandyou-cmyk/ecat/releases). Python is not required on the target computer.
@@ -86,7 +98,8 @@ Passing host tests does not establish hardware or full protocol-stack validation
 
 ## Security boundaries
 
-- CRC32 in `.efw` detects accidental corruption; it does not authenticate firmware. Project and hardware IDs are not authentication credentials. Products requiring protection against malicious firmware must implement signature verification and a trust chain.
+- CRC32 in `.efw` detects accidental corruption; it does not authenticate firmware. Project and hardware IDs are not authentication credentials. Optional v2 Ed25519ph verification authenticates the package only when explicitly enabled and correctly provisioned; see the [security and format limits](docs/spec/efw-format-v0.2.md).
+- Signature verification checks the payload read back from target storage before commit. On a single-partition device, the old image may already have been erased before final verification; signatures do not guarantee availability, power-fail recovery, or bootability. Anti-rollback remains separately controlled by the local anti-rollback policy.
 - Anti-rollback mode requires the target driver to implement `finalize_with_version_floor` as a power-fail-recoverable transaction that commits image activation and the version floor together. The core rejects configurations without this callback. Host mocks do not prove a board-specific transaction is power-fail safe.
 - The SSC adapter checks the FoE access password. Its expected value defaults to `0`; configure a nonzero value before accepting WRQ requests when required. A FoE password is not cryptographic authentication.
 - In the tested SOES version, the zero-length final-packet path may ignore a close-callback error. A final ACK alone is not evidence that the image was committed; integrators should provide an independent upgrade-result status.
@@ -94,7 +107,8 @@ Passing host tests does not establish hardware or full protocol-stack validation
 
 ## Documentation and feedback
 
-- [EFW package format](docs/spec/efw-format-v0.1.md)
+- [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
+- [Historical EFW v1 specification](docs/spec/efw-format-v0.1.md)
 - [System architecture](docs/architecture/SAD-v0.1.md)
 - [SOES integration analysis](docs/architecture/soes-integration-options.md)
 - [SSC asynchronous stage note](docs/architecture/ssc-async-stage1.md)

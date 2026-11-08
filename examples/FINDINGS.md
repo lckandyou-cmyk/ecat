@@ -9,7 +9,7 @@
 - **现有 API 完备可用**：
   - `ecat_foe_core_init`：负责校验全局配置（项目 ID、硬件 ID、版本下限防回滚设置、目标驱动表）并初始化内部状态；支持用户注册多目标（如 Target 1 板载 Flash，Target 2 外部 SPI Flash 可选目标）；
   - `ecat_foe_core_on_wrq`：完成文件名解析、项目名称匹配、目标定位及防回滚版本检查；
-  - `ecat_foe_core_on_data`：完成 64 字节头部装配校验（魔数、CRC、全量元数据）、驱动初始化（`init`、`invalidate`、`erase_to`）、分块写入与逐块回读校验；
+  - `ecat_foe_core_on_data`：完成固定 148 字节 v2 头部装配校验（魔数、CRC、全量元数据）、驱动初始化（`init`、`invalidate`、`erase_to`）、分块写入与逐块回读校验；启用验签时，提交前还会对存储回读载荷验签；
   - `ecat_foe_core_on_end`：完成实际接收长度校验、驱动落盘收尾（`finalize`）与版本下限持久化；
   - `ecat_foe_core_on_abort`：完成故障中止时的驱动清理回调调用，并将核心状态恢复为 `ECAT_FOE_STATE_IDLE`，支持在同一个 core 实例上接收新会话重试。
 - **驱动契约与防变砖安全机制**：
