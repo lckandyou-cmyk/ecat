@@ -196,7 +196,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 - **FoE 密码**：SSC 适配器检查本地预期密码，默认值为 0；如需非零密码，须在接收 WRQ 前配置并在目标 SSC 与 TwinCAT 上联调。FoE 密码不是密码学固件认证。
 - **运行模式**：
   1. **同步模式**：当前已接入核心的路径由 `ecat_foe_ssc_init` 与 `ecat_foe_ssc_on_data` 调用同步核心和目标驱动。是否能满足响应时限，应测量目标驱动最坏耗时及主站/协议栈限制；不能仅按“片内 Flash”假定耗时足够短；
-  2. **异步门控原语（尚非端到端异步升级）**：`ecat_foe_ssc_init_async` 与 `ecat_foe_ssc_on_data_following` 提供单包 BUSY/重试门控，但尚未与 `ecat_foe_core` 和完整异步存储状态机接通。适配器会在异步门控尝试确认末包时失败关闭，避免将单包操作完成误报为固件升级成功。单独使用这些接口不能完成异步 FoE 升级。
+  2. **异步核心路径**：对异步 target 设置 `asynchronous=true` 并提供 `async_ops`；用 `ecat_foe_core_async_init` 建立静态缓冲会话，再用 `ecat_foe_core_async_ssc_ops()` 作为 SSC gate 回调。SSC DATA handler 必须传入真实 `bDataFollowing`，主循环周期调用 `ecat_foe_ssc_on_main_loop`。pending 包只在相同包重试时确认；结束包须等回读 CRC 与 finalize 成功。该路径有宿主契约测试，真实 SSC 与板侧行为仍需实测。
 
 ### 5.3 ESC 芯片与 Mailbox SyncManager 配置生命周期管理
 1. **按状态核实 Mailbox/SyncManager 配置**：
@@ -216,12 +216,12 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 
 **TwinCAT 实机观测（用户报告，特定测试环境）**：一次真实升级中，从站对数据包返回 `BUSY` 后，TwinCAT 约 200 ms 再次发送当前包；这一过程反复发生，整次升级耗时接近 40 秒。这里的 200 ms 是该环境观测到的 TwinCAT 重试间隔，近 40 秒是整次升级耗时，不代表单包超时或所有 TwinCAT 版本/配置的固定行为；具体版本和配置尚未记录。
 
-**与当前仓库代码的关系**：SSC 异步门控在匹配包仍处于 pending 时立即返回初始化时配置的 `busy_foe_code`；它不负责等待 200 ms，重发时序由主站控制。`timeout_ticks` 是单个 pending 操作的超时，不是整次升级的总时限。当前仓库没有把这个门控接入完整 FoE 核心升级流程，异步初始化/调用只出现在 Mock 测试中；现有 Bootloader 示例走同步 SOES 路径。因此上述实机现象是用户测试记录，不能仅凭当前仓库证明具体是哪一个回调或超时配置造成。要复现归因，还需记录实际回调接线、BUSY 码、`timeout_ticks`、poll 结果、主站版本和抓包时间戳。
+**与当前仓库代码的关系**：SSC 异步门控在匹配包仍处于 pending 时立即返回初始化时配置的 `busy_foe_code`；它不负责等待 200 ms，重发时序由主站控制。`timeout_ticks` 是单个 pending 操作的超时，不是整次升级的总时限。异步核心状态机可配合 SSC gate 使用；现有 Bootloader 示例仍走同步 SOES 路径。上述实机现象仍是特定用户环境的记录，不能据此推断当前 SSC 回调、BUSY 配置或板级异步行为。
 
 **为什么单片机会陷入无脑回 BUSY 的死锁？**
 1. 若已实现并接入异步核心，漏调主循环 poll 会让 pending 操作无法推进；
 2. 驱动若持续报告 pending，适配层会继续返回配置的 BUSY，直到完成或超时；
-3. 当前仓库的 SSC 门控和异步目标操作层尚未接入异步 `ecat_foe_core` 升级状态机。仅初始化门控不等于异步 Flash 升级。
+3. SSC gate、异步核心和目标操作 runner 必须全部接通；只初始化其中一个组件不能完成异步 Flash 升级。
 
 **工程解决建议**：
 - 对同步驱动使用同步核心路径，并测量回调最长耗时是否符合主站和协议栈时限；不要仅凭“片内 Flash”推断时长。
@@ -304,7 +304,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 
 | 故障现象 | 根本原因分析 | 工程处置措施 |
 | :--- | :--- | :--- |
-| **TwinCAT 发送 DATA 后持续重试或超时** | 可能是主站与从站 BUSY/ACK 时序不匹配、异步 poll 未推进、操作耗时过长或 FoE 文件包不匹配 | 记录主站版本、实际 FoE 响应与时间戳；当前异步门控尚未接入完整核心，先用已接入的同步路径，或由移植者自行实现并验证完整异步核心 |
+| **TwinCAT 发送 DATA 后持续重试或超时** | 可能是主站与从站 BUSY/ACK 时序不匹配、异步 poll 未推进、操作超时或 FoE 文件包不匹配 | 记录主站版本、实际 FoE 响应与时间戳、gate 超时及 poll 返回；确认真实主循环持续调用 poll，并验证 SSC 的 BUSY 值与重试行为 |
 | **WRQ 阶段直接返回 0x8001 (Not Found)** | 请求文件名中的工程名/目标/版本/扩展名与本地规则不匹配，或目标未启用 | 核对请求文件名是否与打包器输出文件名一致；用 `--project-name` 设置文件名前缀，`--project-id` 是独立的数值型固件元数据，不控制 WRQ 文件名匹配 |
 | **数据接收阶段首包返回 0x800B (Program Error)** | 固件头 `hardware_id` 不符、魔数错误、或 Flash `init`/`invalidate` 失败 | 检查硬件板型 ID 配置以及 Flash 存储驱动初始化与擦写函数返回值 |
 | **升级提交后设备重启无法运行新 APP (HardFault)** | 可能涉及镜像/分区错误、MSP/Reset_Handler 无效、启动桩或向量表配置不匹配 | 检查本地分区映射、向量内容和目标启动流程；若需重定位 VTOR，应在启动代码启用中断前设置 |

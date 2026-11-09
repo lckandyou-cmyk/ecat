@@ -44,4 +44,12 @@ make test-ssc-async CC=clang
 make test-target-async CC=clang
 ```
 
-异步示例接入真实项目时，应提供静态 runner storage、异步驱动 `start/poll/abort`、SSC DATA callback 与应用主循环 poll；必须确认 `bDataFollowing`、BUSY 码和回调串行关系来自实际协议栈版本。当前门控/runner 契约用例不构成完整异步核心升级验收。在完整核心异步会话实现前，不能将上述示例称为可直接运行的异步 FoE 移植。
+完整异步核心契约测试可运行：
+
+```sh
+make test-core-async CC=clang
+```
+
+在应用中为异步 target 配置 `asynchronous=true`、`async_ops` 和 `async_user_ctx`，创建静态 `ecat_foe_core_async_t`、packet buffer 与至少 64 字节的 operation buffer；将 `ecat_foe_core_async_ssc_ops()` 传给 SSC gate，并在 `pAPPL_FoeWriteData(..., bDataFollowing)` 中转发该标志。每次 `pAPPL_MainLoop()` 调用 `ecat_foe_ssc_on_main_loop()`。同步目标仍使用既有 `driver` 和同步核心 API。
+
+该宿主测试覆盖分包头、BUSY/同包重试、异步擦除/写入/回读与 finalize。接入真实项目时还必须核实实际 SSC BUSY 值、回调串行关系和主站重试行为；宿主测试不能替代 Beckhoff SSC、TwinCAT 或 MCU 实板验收。
