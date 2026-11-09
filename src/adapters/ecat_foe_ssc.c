@@ -62,8 +62,12 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
     }
     adapter->async_final_acked = false;
 
-    if (adapter->async_gate != NULL &&
-        (adapter->async_gate->pending || adapter->async_gate->completed)) {
+    if (adapter->async_gate != NULL && adapter->session_active) {
+        ecat_foe_ssc_async_abort_session(adapter->async_gate);
+        ecat_foe_core_on_abort(adapter->core);
+        adapter->session_active = false;
+    } else if (adapter->async_gate != NULL &&
+               (adapter->async_gate->pending || adapter->async_gate->completed)) {
         ecat_foe_ssc_async_abort(adapter->async_gate);
     }
     /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
@@ -82,6 +86,9 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
 {
     if (adapter == NULL || adapter->core == NULL) {
         return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+    if (adapter->async_gate != NULL) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
 
     /* 0 长度包处理：
@@ -175,15 +182,15 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
         return result;
     }
     if (!data_following) {
-        /* The gate only completes its callback operation. It does not run the
-         * EFW/core end-of-transfer checks, so it must never ACK a final DATA
-         * packet as a completed firmware update. Until a core async session is
-         * attached, fail closed rather than report a false successful FoE. */
-        ecat_foe_ssc_async_abort(adapter->async_gate);
-        ecat_foe_core_on_abort(adapter->core);
+        if (adapter->core->state != ECAT_FOE_STATE_SUCCESS) {
+            ecat_foe_ssc_async_abort(adapter->async_gate);
+            ecat_foe_core_on_abort(adapter->core);
+            adapter->session_active = false;
+            adapter->async_final_acked = false;
+            return ECAT_FOE_SSC_ERR_PROGERROR;
+        }
         adapter->session_active = false;
-        adapter->async_final_acked = false;
-        return ECAT_FOE_SSC_ERR_PROGERROR;
+        adapter->async_final_acked = true;
     }
     return 0U;
 }
@@ -194,13 +201,33 @@ uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
     if (adapter == NULL || adapter->async_gate == NULL) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
-    return ecat_foe_ssc_async_poll(adapter->async_gate, now_ticks);
+    uint16_t result = ecat_foe_ssc_async_poll(adapter->async_gate, now_ticks);
+    if (result == adapter->async_gate->operation_error_foe_code &&
+        adapter->async_gate->completed && adapter->async_gate->operation_failed &&
+        adapter->core != NULL) {
+        /* Timeout and driver failures happen in the main loop, outside DATA
+         * callback routing. Close verifier/core state here; preserve the gate's
+         * completed packet so SSC's retransmission receives the configured error. */
+        ecat_foe_core_on_abort(adapter->core);
+        adapter->session_active = true;
+        adapter->async_final_acked = false;
+    }
+    return result;
 }
 
 uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 {
     if (adapter == NULL || adapter->core == NULL) {
         return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
+
+    if (adapter->async_gate != NULL) {
+        if (!adapter->session_active &&
+            (adapter->core->state == ECAT_FOE_STATE_SUCCESS || adapter->async_final_acked)) {
+            return 0U;
+        }
+        return adapter->async_gate->pending
+            ? adapter->async_gate->busy_foe_code : ECAT_FOE_SSC_ERR_ILLEGAL;
     }
 
     /* 若会话已通过短包正常结束并达成 SUCCESS，返回成功 */
@@ -230,8 +257,10 @@ void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
         return;
     }
 
-    if (adapter->async_gate != NULL) {
-        ecat_foe_ssc_async_abort(adapter->async_gate);
+    if (adapter->async_gate != NULL &&
+        (adapter->session_active || adapter->async_gate->pending ||
+         adapter->async_gate->completed)) {
+        ecat_foe_ssc_async_abort_session(adapter->async_gate);
     }
     ecat_foe_core_on_abort(adapter->core);
     adapter->session_active = false;

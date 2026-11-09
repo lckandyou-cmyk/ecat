@@ -164,3 +164,15 @@ void ecat_foe_ssc_async_abort(ecat_foe_ssc_async_t *a)
     }
     clear_packet(a);
 }
+
+void ecat_foe_ssc_async_abort_session(ecat_foe_ssc_async_t *a)
+{
+    if (a == NULL || a->ops == NULL) {
+        return;
+    }
+    /* No DATA operation may be pending even though the overall target session
+     * remains active after earlier packets were ACKed. Delegate lifecycle
+     * idempotence to the session callback. */
+    a->ops->abort(a->ops_ctx);
+    clear_packet(a);
+}

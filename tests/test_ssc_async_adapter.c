@@ -87,7 +87,9 @@ int main(void)
     CHECK(ecat_foe_ssc_on_write(&adapter, filename, (uint16_t)(sizeof(filename) - 1U), 0U) == 0U);
 
     const uint8_t first[] = {1U, 2U, 3U};
+    CHECK(ecat_foe_ssc_on_data(&adapter, first, sizeof(first)) == ECAT_FOE_SSC_ERR_ILLEGAL);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, first, sizeof(first), true, 10U) == 0x800AU);
+    CHECK(ecat_foe_ssc_on_end(&adapter) == 0x800AU);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, (uint8_t[]){9U, 2U, 3U}, sizeof(first), true, 10U) == ECAT_FOE_SSC_ERR_PACKETNO);
     CHECK(!gate.pending && !gate.completed && !adapter.session_active && async.aborts == 1U);
     CHECK(core.state == ECAT_FOE_STATE_IDLE);

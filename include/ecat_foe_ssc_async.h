@@ -77,6 +77,9 @@ uint16_t ecat_foe_ssc_async_poll(ecat_foe_ssc_async_t *adapter,
 /* Cancel a pending operation and release its packet state. */
 void ecat_foe_ssc_async_abort(ecat_foe_ssc_async_t *adapter);
 
+/* Abort the active async core/target session even when no packet is pending. */
+void ecat_foe_ssc_async_abort_session(ecat_foe_ssc_async_t *adapter);
+
 #ifdef __cplusplus
 }
 #endif
