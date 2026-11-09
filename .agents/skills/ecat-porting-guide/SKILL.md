@@ -194,9 +194,9 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 ### 5.2 Beckhoff Slave Stack Code (SSC) 接入规范
 - **适配层源码**：`src/adapters/ecat_foe_ssc.c` 与 `include/ecat_foe_ssc.h`；
 - **FoE 密码**：SSC 适配器检查本地预期密码，默认值为 0；如需非零密码，须在接收 WRQ 前配置并在目标 SSC 与 TwinCAT 上联调。FoE 密码不是密码学固件认证。
-- **两种运行模式**：
+- **运行模式**：
   1. **同步模式**：当前已接入核心的路径由 `ecat_foe_ssc_init` 与 `ecat_foe_ssc_on_data` 调用同步核心和目标驱动。是否能满足响应时限，应测量目标驱动最坏耗时及主站/协议栈限制；不能仅按“片内 Flash”假定耗时足够短；
-  2. **异步门控原语（尚非端到端异步升级）**：`ecat_foe_ssc_init_async` 与 `ecat_foe_ssc_on_data_following` 提供单包 BUSY/重试门控，但仓库当前未将其与 `ecat_foe_core` 和完整异步存储状态机接通。单独使用这些接口不能完成库的异步 FoE 升级。完整核心接入前，移植者若自行实现异步处理，必须自行承担状态机、数据校验及最终 ACK 的正确性。
+  2. **异步门控原语（尚非端到端异步升级）**：`ecat_foe_ssc_init_async` 与 `ecat_foe_ssc_on_data_following` 提供单包 BUSY/重试门控，但尚未与 `ecat_foe_core` 和完整异步存储状态机接通。适配器会在异步门控尝试确认末包时失败关闭，避免将单包操作完成误报为固件升级成功。单独使用这些接口不能完成异步 FoE 升级。
 
 ### 5.3 ESC 芯片与 Mailbox SyncManager 配置生命周期管理
 1. **按状态核实 Mailbox/SyncManager 配置**：
