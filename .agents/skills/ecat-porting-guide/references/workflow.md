@@ -50,6 +50,40 @@ make test-target-async CC=clang
 make test-core-async CC=clang
 ```
 
-在应用中为异步 target 配置 `asynchronous=true`、`async_ops` 和 `async_user_ctx`，创建静态 `ecat_foe_core_async_t`、packet buffer 与至少 64 字节的 operation buffer；将 `ecat_foe_core_async_ssc_ops()` 传给 SSC gate，并在 `pAPPL_FoeWriteData(..., bDataFollowing)` 中转发该标志。每次 `pAPPL_MainLoop()` 调用 `ecat_foe_ssc_on_main_loop()`。同步目标仍使用既有 `driver` 和同步核心 API。
+在应用中为异步 target 配置 `asynchronous=true`、`async_ops` 和 `async_user_ctx`，创建静态 `ecat_foe_core_async_t`、packet buffer 与 operation buffer；operation buffer 容量至少为 `max(64, 所有启用异步目标的 write_unit)`。gate packet buffer、核心 packet buffer 与 operation buffer 各自独立且不得重叠；两个 packet buffer 均须容纳 SSC DATA 的最大载荷。将 `ecat_foe_core_async_ssc_ops()` 传给 SSC gate，并在 `pAPPL_FoeWriteData(..., bDataFollowing)` 中转发该标志。每次 `pAPPL_MainLoop()` 调用 `ecat_foe_ssc_on_main_loop()`。同步目标仍使用既有 `driver` 和同步核心 API。
 
 该宿主测试覆盖分包头、BUSY/同包重试、异步擦除/写入/回读与 finalize。接入真实项目时还必须核实实际 SSC BUSY 值、回调串行关系和主站重试行为；宿主测试不能替代 Beckhoff SSC、TwinCAT 或 MCU 实板验收。
+
+## SSC 现有工程接线
+
+输入是可恢复的原 Boot/App 工程、实际 SSC 生成文件及本地分区表。将 `src/ecat_foe_efw.c`、`src/ecat_foe_core.c`、`src/ecat_foe_target_async.c`、`src/ecat_foe_core_async.c`、`src/adapters/ecat_foe_ssc_async.c`、`src/adapters/ecat_foe_ssc.c` 和目标驱动加入 Boot 构建，并把本库 `include/` 加入 include path；确认工程中只存在一个 main。同步路径使用 `ecat_foe_efw.c`、`ecat_foe_core.c` 和 `ecat_foe_ssc.c`，同时链接 SSC adapter 所需的 `ecat_foe_ssc_async.c`。工程文件或 IDE group 的具体位置由现有构建系统决定。
+
+目标 descriptor 的 project ID、project name、hardware ID、硬件版本、目标 ID、容量及写入单位来自板级配置；异步 target 的 `async_ops` 实现 `start/poll/abort/abort_session`。操作可即时完成或 pending；仅在完成时输出擦除水位或读回数据，启用防回滚时 FINALIZE 必须原子提交镜像与版本下限。依次调用 `ecat_foe_core_init`、`ecat_foe_core_async_init`、`ecat_foe_ssc_async_init`（传 `ecat_foe_core_async_ssc_ops()` 与会话指针），再调用 `ecat_foe_ssc_init_async`。检查每个初始化返回值；BUSY 和错误值从实际 SSC 头文件核对，tick 必须单调且与 timeout 单位一致。
+
+在 SSC 生成的实际声明处注册 WRQ、DATA、错误回调：WRQ 转发至 `ecat_foe_ssc_on_write`，DATA 转发至 `ecat_foe_ssc_on_data_following`，错误/中止转发至 `ecat_foe_ssc_on_abort`；`pAPPL_MainLoop` 调用 `ecat_foe_ssc_on_main_loop`。函数参数类型、内存限定符、字节长度及运行上下文以目标 SSC 头文件核对；回调与 poll 须串行。不要在异步模式调用同步 `ecat_foe_ssc_on_data`。可运行的初始化与模拟驱动参考 `tests/test_core_async.c`，它不包含可烧录的 SSC 或板级 Flash 驱动。
+
+构建后在 map 中核对上述对象文件已链接、Boot/App 地址及容量符合本地分区、需要在 SRAM 执行的代码和向量满足芯片约束。检查失败先核对工程 group、include path、链接脚本和实际 SSC 回调声明；不得仅凭宿主测试声称实板通过。
+
+## 生成和检查 EFW
+
+将示例值替换为本地配置，输入是已从正确 App 链接地址生成的 `app.bin`；输出路径须不存在：
+
+```sh
+python3 tools/efw_pack.py pack --bin app.bin --project-id 0x10010001 --project-name SERVO_DRV --hardware-id 0x00000001 --hw-ver-min 1 --hw-ver-max 1 --target MCU --fw-version 1.0.0.0 --out SERVO_DRV_MCU_V1.0.0.0.efw
+python3 tools/efw_pack.py inspect SERVO_DRV_MCU_V1.0.0.0.efw --extract-bin verified-app.bin
+cmp app.bin verified-app.bin
+shasum -a 256 SERVO_DRV_MCU_V1.0.0.0.efw
+```
+
+检查 inspect 输出中的格式 2、头长 148、目标、版本、payload 长度与 CRC；设备 SDO 版本、WRQ 文件名和包版本须匹配。上述示例未启用签名或 `--foe-packet-size` 填充；启用签名时按设备信任配置使用公钥检查，启用填充时提取内容可能包含填充，按工具输出及目标版本规则核对。线上 FoE 请求名与操作系统文件路径分别确认。
+
+## ET9300 GUI 后备操作
+
+菜单名称因 ET9300 版本而异；以本机工具帮助和实际界面为准。先记录已安装工具版本、授权和官方模板路径，备份现有 ESP、Excel 对象字典及手写文件；复制工程到独立输出目录。
+
+1. 启动已授权的 SSC Tool。现有工程从备份副本打开 ESP 并保留原设置；新建工程选择与目标 ESC/PDI 匹配的官方模板。导入既有对象字典或使用正式模板，不凭固定 Excel 行号生成对象。
+2. 在设备、硬件、邮箱和应用配置页面分别检查 CPU/ESC 访问宽度、PDI、轮询/DC/中断、常规与 Bootstrap 邮箱地址和大小、身份以及 Boot/App 的 FoE、Bootstrap、CoE/PDO 和默认 main 选项。实际字段名称、可选值以该版本界面与生成宏为准。
+3. 运行工具的配置检查或冲突检查，保存 ESP 后在隔离目录生成源码及设备描述。核对实际生成的宏、FoE 源文件、回调声明、PDO 长度、邮箱配置和 ESI 身份；记录冲突日志。将产物与原工程 diff，手动迁移经确认的映射、ESM 和硬件适配，禁止盲目覆盖。
+4. 将审查过的产物加入工程，执行上述构建、map 与 EFW 检查。ESI 文件复制、ESC EEPROM/SII 写入及 MCU FoE 下载是独立操作；仅在确需更新 SII 且已备份恢复数据时执行 EEPROM 写入。
+
+若 GUI 或生成器不能加载旧工程、读回配置或生成一致产物，保留输入与日志并停止替换原工程；先核对工具版本、模板、授权和字段，再选择可验证的操作。尚未在目标 ET9300/工程组合执行的步骤标为待验证。
