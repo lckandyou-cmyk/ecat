@@ -28,3 +28,20 @@ ET9300 自动化是可选路径。先发现已授权安装的工具和版本，�
 ## 示例与实测边界
 
 仓库的宿主测试仅验证公开 API 契约。不能据此声明 Beckhoff SSC 实栈、TwinCAT 主站或 MCU Flash 已通过。针对 STM32F407/FCE1353 的专用 HBI、分区和启动适配仅对该板有效。每次交付都列出实际执行的构建、包检查与板测步骤及未验证项。
+
+## 可执行的最小宿主示例
+
+从仓库根目录构建现有 host demo：
+
+```sh
+make build
+```
+
+该目标编译 EFW parser 与同步核心 runner，结果放在 `build/` 并由 `tools/safe_build.py` 登记。它验证宿主编译路径，不代表协议栈或目标 Flash 已接通。SSC adapter 契约与异步 target runner 可分别运行：
+
+```sh
+make test-ssc-async CC=clang
+make test-target-async CC=clang
+```
+
+异步示例接入真实项目时，应提供静态 runner storage、异步驱动 `start/poll/abort`、SSC DATA callback 与应用主循环 poll；必须确认 `bDataFollowing`、BUSY 码和回调串行关系来自实际协议栈版本。当前门控/runner 契约用例不构成完整异步核心升级验收。在完整核心异步会话实现前，不能将上述示例称为可直接运行的异步 FoE 移植。
