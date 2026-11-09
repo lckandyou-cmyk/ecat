@@ -36,7 +36,7 @@ MONOCYPHER_DIR ?=
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
 
-.PHONY: all build clean test test-asan test-soes test-monocypher test-examples test-ssc-async test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
+.PHONY: all build clean test test-asan test-soes test-monocypher test-examples test-ssc-async test-target-async test-core-async test-sentinels vectors check-quotes check-pdf-quotes gen-pdf-table
 
 all: test
 
@@ -81,7 +81,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async
+test: test-examples test-ssc-async test-target-async test-core-async
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -138,6 +138,15 @@ test-target-async:
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_target_async" \
 		src/ecat_foe_target_async.c tests/test_target_async.c && \
 	"$$TMP_ASYNC_DIR/test_target_async"
+
+test-core-async:
+	@TMP_ASYNC_DIR=$$(mktemp -d /tmp/foe_core_async_XXXXXX) && \
+	trap 'rm -rf "$$TMP_ASYNC_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_core_async" \
+		src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c \
+		src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c \
+		src/adapters/ecat_foe_ssc.c tests/test_core_async.c && \
+	"$$TMP_ASYNC_DIR/test_core_async"
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
@@ -238,6 +247,7 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_adapter" $(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_target_async" src/ecat_foe_target_async.c tests/test_target_async.c && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c tests/test_core_async.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
@@ -246,6 +256,7 @@ test-asan:
 	"$$TMP_ASAN_DIR/test_ssc_async_gate" && \
 	"$$TMP_ASAN_DIR/test_ssc_async_adapter" && \
 	"$$TMP_ASAN_DIR/test_target_async" && \
+	"$$TMP_ASAN_DIR/test_core_async" && \
 	echo "--- 运行 ASan 受限栈回归核验 (8MB 与 1MB 栈) ---" && \
 	(ulimit -s 8192 && "$$TMP_ASAN_DIR/test_runner_core" >/dev/null) && \
 	echo "  [PASS] ASan 二进制在 ulimit -s 8192 (8MB 栈) 下直接运行正常退出 (rc=0)" && \

@@ -11,6 +11,10 @@ static void clear_operation(ecat_foe_target_async_t *runner)
     runner->op.erased_end = 0U;
     runner->op.length = 0U;
     runner->op.data = NULL;
+    runner->op.target_id = 0U;
+    runner->op.fw_version = 0U;
+    runner->op.min_allow_version = 0U;
+    runner->op.anti_rollback = false;
     runner->read_destination = NULL;
     runner->erased_end_destination = NULL;
 }
@@ -86,10 +90,16 @@ ecat_foe_target_async_result_t ecat_foe_target_async_start(
     runner->op.need_end = need_end;
     runner->op.erased_end = 0U;
     runner->op.length = length;
+    runner->op.target_id = 0U;
+    runner->op.fw_version = 0U;
+    runner->op.min_allow_version = 0U;
+    runner->op.anti_rollback = false;
     runner->read_destination = read_destination;
     runner->erased_end_destination = erased_end_destination;
     if (kind == ECAT_FOE_TARGET_OP_WRITE) {
-        memcpy(runner->storage, data, length);
+        if (runner->storage != data) {
+            memcpy(runner->storage, data, length);
+        }
         runner->op.data = runner->storage;
     } else if (kind == ECAT_FOE_TARGET_OP_READ) {
         runner->op.data = runner->storage;
@@ -120,6 +130,31 @@ ecat_foe_target_async_result_t ecat_foe_target_async_poll(
     return result;
 }
 
+ecat_foe_target_async_result_t ecat_foe_target_async_start_finalize(
+    ecat_foe_target_async_t *runner,
+    uint16_t target_id,
+    uint32_t fw_version,
+    uint32_t min_allow_version,
+    bool anti_rollback)
+{
+    if (runner == NULL || runner->ops == NULL || runner->pending || runner->failed ||
+        target_id == 0U) {
+        return ECAT_FOE_TARGET_ASYNC_FAILED;
+    }
+    memset(&runner->op, 0, sizeof(runner->op));
+    runner->op.kind = ECAT_FOE_TARGET_OP_FINALIZE;
+    runner->op.target_id = target_id;
+    runner->op.fw_version = fw_version;
+    runner->op.min_allow_version = min_allow_version;
+    runner->op.anti_rollback = anti_rollback;
+    ecat_foe_target_async_result_t result = runner->ops->start(runner->ctx, &runner->op);
+    runner->pending = result == ECAT_FOE_TARGET_ASYNC_PENDING;
+    if (!runner->pending) {
+        finish_operation(runner, result);
+    }
+    return result;
+}
+
 void ecat_foe_target_async_abort(ecat_foe_target_async_t *runner)
 {
     if (runner == NULL || runner->ops == NULL || !runner->pending) {
@@ -127,6 +162,21 @@ void ecat_foe_target_async_abort(ecat_foe_target_async_t *runner)
     }
     runner->ops->abort(runner->ctx);
     clear_operation(runner);
+    runner->failed = true;
+}
+
+void ecat_foe_target_async_abort_session(ecat_foe_target_async_t *runner)
+{
+    if (runner == NULL || runner->ops == NULL) {
+        return;
+    }
+    if (runner->pending) {
+        runner->ops->abort(runner->ctx);
+        clear_operation(runner);
+    }
+    if (runner->ops->abort_session != NULL) {
+        runner->ops->abort_session(runner->ctx);
+    }
     runner->failed = true;
 }
 

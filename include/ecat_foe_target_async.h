@@ -3,8 +3,7 @@
  * @brief Allocation-free single-operation async target-driver runner.
  *
  * This is the non-blocking target-operation primitive used by the async core
- * integration. It is a building block, not yet wired into ecat_foe_core(). It
- * is additive: the existing synchronous target-driver API is
+ * integration. It is additive: the existing synchronous target-driver API is
  * unchanged. The runner owns one fixed-size staging buffer and never queues a
  * second operation while one is pending.
  */
@@ -42,14 +41,20 @@ typedef struct {
     uint32_t erased_end; /* Driver writes this for ERASE_TO. */
     uint32_t length;
     uint8_t *data;       /* WRITE input or READ output staging buffer. */
+    uint16_t target_id;  /* FINALIZE metadata; ignored for other operations. */
+    uint32_t fw_version;
+    uint32_t min_allow_version;
+    bool anti_rollback;
 } ecat_foe_target_async_op_t;
 
-typedef struct {
+typedef struct ecat_foe_target_async_ops {
     ecat_foe_target_async_result_t (*start)(void *ctx,
                                             ecat_foe_target_async_op_t *op);
     ecat_foe_target_async_result_t (*poll)(void *ctx,
                                            ecat_foe_target_async_op_t *op);
     void (*abort)(void *ctx);
+    /* Release the active target session after an operation or protocol error. */
+    void (*abort_session)(void *ctx);
 } ecat_foe_target_async_ops_t;
 
 typedef struct {
@@ -83,11 +88,21 @@ ecat_foe_target_async_result_t ecat_foe_target_async_start(
     uint8_t *read_destination,
     uint32_t *erased_end_destination);
 
+ecat_foe_target_async_result_t ecat_foe_target_async_start_finalize(
+    ecat_foe_target_async_t *runner,
+    uint16_t target_id,
+    uint32_t fw_version,
+    uint32_t min_allow_version,
+    bool anti_rollback);
+
 ecat_foe_target_async_result_t ecat_foe_target_async_poll(
     ecat_foe_target_async_t *runner);
 
 /* Cancel a pending operation at most once; completed operations are untouched. */
 void ecat_foe_target_async_abort(ecat_foe_target_async_t *runner);
+
+/* Abort the current operation if pending and release its target session. */
+void ecat_foe_target_async_abort_session(ecat_foe_target_async_t *runner);
 
 /* Prepare a failed/aborted runner for a new session. Pending work must first
  * be cancelled; reset never silently abandons an in-flight driver operation.

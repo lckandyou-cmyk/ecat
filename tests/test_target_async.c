@@ -11,6 +11,10 @@ typedef struct {
     ecat_foe_target_op_kind_t kind;
     uint8_t observed[16];
     uint32_t observed_len;
+    uint16_t observed_target;
+    uint32_t observed_version;
+    uint32_t observed_floor;
+    bool observed_anti_rollback;
 } mock_t;
 
 static ecat_foe_target_async_result_t mock_start(void *ctx,
@@ -20,6 +24,10 @@ static ecat_foe_target_async_result_t mock_start(void *ctx,
     m->starts++;
     m->polls = 0U;
     m->kind = op->kind;
+    m->observed_target = op->target_id;
+    m->observed_version = op->fw_version;
+    m->observed_floor = op->min_allow_version;
+    m->observed_anti_rollback = op->anti_rollback;
     m->observed_len = op->length;
     if (op->kind == ECAT_FOE_TARGET_OP_WRITE && op->length <= sizeof(m->observed)) {
         memcpy(m->observed, op->data, op->length);
@@ -56,7 +64,7 @@ static void mock_abort(void *ctx)
 
 int main(void)
 {
-    const ecat_foe_target_async_ops_t ops = { mock_start, mock_poll, mock_abort };
+    const ecat_foe_target_async_ops_t ops = { mock_start, mock_poll, mock_abort, NULL };
     ecat_foe_target_async_t runner;
     mock_t mock;
     uint8_t scratch[16];
@@ -101,6 +109,11 @@ int main(void)
     mock.pending_polls = 0U;
     CHECK(ecat_foe_target_async_start(&runner, ECAT_FOE_TARGET_OP_INIT,
           0U, 0U, NULL, 0U, NULL, NULL) == ECAT_FOE_TARGET_ASYNC_COMPLETE);
+    CHECK(ecat_foe_target_async_start_finalize(&runner, 1U, 0x01020304U,
+          0x01000000U, true) == ECAT_FOE_TARGET_ASYNC_COMPLETE);
+    CHECK(mock.kind == ECAT_FOE_TARGET_OP_FINALIZE && mock.observed_target == 1U &&
+          mock.observed_version == 0x01020304U && mock.observed_floor == 0x01000000U &&
+          mock.observed_anti_rollback);
 
     puts("PASS: async target op runner stages WRITE, polls READ/ERASE and cancels once");
     return 0;

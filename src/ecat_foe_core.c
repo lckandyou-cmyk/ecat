@@ -217,6 +217,9 @@ int ecat_foe_core_deinit(ecat_foe_core_t *core)
         return 0;
     }
 
+    if (core->async_abort_hook != NULL) {
+        core->async_abort_hook(core->async_abort_ctx);
+    }
     /* 若存在活跃会话且驱动未完成 finalize，调用驱动 abort 回调安全中止并释放底层硬件资源 */
     core_abort_driver(core);
 
@@ -297,7 +300,17 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
         const ecat_foe_target_desc_t *t = &local_cfg.targets[i];
         if (t->enabled) {
-            if (t->driver == NULL ||
+            if (t->asynchronous) {
+                if (t->async_ops == NULL || t->async_ops->start == NULL ||
+                    t->async_ops->poll == NULL || t->async_ops->abort == NULL ||
+                    t->async_ops->abort_session == NULL) {
+                    memset(core, 0, sizeof(*core));
+                    core->state = ECAT_FOE_STATE_ERROR;
+                    core->is_configured = false;
+                    core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
+                    return -1;
+                }
+            } else if (t->driver == NULL ||
                 t->driver->init == NULL ||
                 t->driver->invalidate == NULL ||
                 t->driver->erase_to == NULL ||
@@ -395,6 +408,9 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
 
     /* 新会话自愈规则: 若上一个会话残留未闭环 (且未执行过 abort/finalize)，先调驱动 abort() */
     if (core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
+        if (core->async_abort_hook != NULL) {
+            core->async_abort_hook(core->async_abort_ctx);
+        }
         core_abort_driver(core);
     }
     /* 每次新 WRQ 必须重置会话级运行字段，完整保留核心配置与驱动生命周期 */
@@ -960,6 +976,9 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core)
 {
     if (core == NULL) {
         return;
+    }
+    if (core->async_abort_hook != NULL) {
+        core->async_abort_hook(core->async_abort_ctx);
     }
     core_abort_driver(core);
     core_reset_session(core);

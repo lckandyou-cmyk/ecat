@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include "ecat_foe_efw.h"
 #include "ecat_foe_target.h"
+#include "ecat_foe_target_async.h"
 #include "ecat_foe_conf_template.h"
 
 #ifdef __cplusplus
@@ -133,6 +134,9 @@ typedef struct {
     uint32_t write_unit;                       /**< 驱动物理写入对齐单位 (如 8, 256) */
     const ecat_foe_target_driver_t *driver;    /**< 驱动操作集 */
     void    *user_ctx;                         /**< 驱动自定义上下文 */
+    const ecat_foe_target_async_ops_t *async_ops; /**< 可选非阻塞驱动操作集 */
+    void *async_user_ctx;                      /**< 异步驱动上下文 */
+    bool asynchronous;                         /**< 该目标只通过异步 API 接入 */
 } ecat_foe_target_desc_t;
 
 /**
@@ -165,7 +169,8 @@ typedef struct {
  * 【内存布局与复制契约 (Lifecycle & Copy Contract)】：
  * - 内部项目名通过 local_project_name 静态数组持久化存储，消除了结构体内部的自身指针自引用；
  * - 【非活跃状态 (IDLE) 浅拷贝限制】：
- *   在尚未开启升级会话的状态下，结构体不含悬垂自指针，支持按值复制/赋值；
+ *   未绑定异步会话时，在尚未开启升级会话的状态下支持按值复制/赋值；异步核心初始化后，abort hook 指向绑定会话，
+ *   在解除异步绑定或 deinit 前也不得复制或移动；
  *   【重要警告】：浅拷贝仅复制标量配置，targets[i].driver 与 targets[i].user_ctx 仍为共享指针！
  *   若多实例浅拷贝自同一模板，除非为各实例显式替换独立的 user_ctx 上下文，否则严禁并发操作！
  * - 【活动会话状态 (WRQ_ACKED / DATA / 升级进行中)】：
@@ -185,6 +190,8 @@ typedef struct {
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
     bool                driver_invalidated;    /**< 底层驱动 invalidate() 是否已成功执行 (固件有效标记已失效) */
     bool                signature_active;      /**< 验签会话已 begin，尚未 finish/abort */
+    void              (*async_abort_hook)(void *ctx); /**< 异步会话清理钩子，由异步核心注册 */
+    void               *async_abort_ctx;
 
     /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
     char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];
