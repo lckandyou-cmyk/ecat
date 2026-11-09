@@ -175,8 +175,15 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
         return result;
     }
     if (!data_following) {
+        /* The gate only completes its callback operation. It does not run the
+         * EFW/core end-of-transfer checks, so it must never ACK a final DATA
+         * packet as a completed firmware update. Until a core async session is
+         * attached, fail closed rather than report a false successful FoE. */
+        ecat_foe_ssc_async_abort(adapter->async_gate);
+        ecat_foe_core_on_abort(adapter->core);
         adapter->session_active = false;
-        adapter->async_final_acked = true;
+        adapter->async_final_acked = false;
+        return ECAT_FOE_SSC_ERR_PROGERROR;
     }
     return 0U;
 }

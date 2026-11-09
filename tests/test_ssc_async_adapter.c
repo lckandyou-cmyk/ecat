@@ -108,9 +108,9 @@ int main(void)
     CHECK(ecat_foe_ssc_on_data_following(&adapter, final, sizeof(final), false, 20U) == 0x800AU);
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, 21U) == 0x800AU);
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, 22U) == 0U);
-    CHECK(ecat_foe_ssc_on_data_following(&adapter, final, sizeof(final), false, 23U) == 0U);
-    CHECK(!adapter.session_active && adapter.async_final_acked);
-    CHECK(ecat_foe_ssc_on_data_following(&adapter, NULL, 0U, false, 24U) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, final, sizeof(final), false, 23U) == ECAT_FOE_SSC_ERR_PROGERROR);
+    CHECK(!adapter.session_active && !adapter.async_final_acked);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, NULL, 0U, false, 24U) == ECAT_FOE_SSC_ERR_ILLEGAL);
     CHECK(async.starts == 3U && async.aborts == 1U);
 
     /* Invalid input while work is pending also cancels it exactly once. */
