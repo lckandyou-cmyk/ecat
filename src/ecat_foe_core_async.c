@@ -402,7 +402,7 @@ static int pump_payload(ecat_foe_core_async_t *s)
                 memcpy(s->operation_storage, c->residual_buf, unit);
                 c->residual_len = 0U;
                 int r = start_aligned_write(s, s->operation_storage, unit);
-                return r;
+                if (r != 0) return r;
             }
         } else if (remaining >= unit) {
             uint32_t n = (uint32_t)(remaining - (remaining % unit));
@@ -415,7 +415,8 @@ static int pump_payload(ecat_foe_core_async_t *s)
             }
             const uint8_t *p = s->packet + s->packet_cursor;
             s->packet_cursor += n;
-            return start_aligned_write(s, p, n);
+            int r = start_aligned_write(s, p, n);
+            if (r != 0) return r;
         } else {
             memcpy(c->residual_buf, s->packet + s->packet_cursor, remaining);
             c->residual_len = (uint32_t)remaining;
@@ -526,6 +527,10 @@ static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s)
             return ECAT_FOE_SSC_ASYNC_COMPLETE;
         }
         if (validate_header(s) != 0) return fail_session(s, c->last_error);
+        if (s->packet_length - s->packet_cursor > c->hdr.payload_length) {
+            c->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
+            return fail_session(s, c->last_error);
+        }
         int r = begin_operation(s, ECAT_FOE_TARGET_OP_INIT, 0U, 0U,
                                 NULL, 0U, NULL, NULL);
         if (r < 0) return fail_session(s, ECAT_FOE_CORE_ERR_DRV_INIT);

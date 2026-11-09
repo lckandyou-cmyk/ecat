@@ -15,7 +15,10 @@ typedef struct {
     unsigned starts;
     unsigned polls;
     unsigned aborts;
+    bool immediate;
 } async_flash_t;
+
+static ecat_foe_target_async_result_t flash_poll(void *ctx, ecat_foe_target_async_op_t *op);
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -59,7 +62,7 @@ static ecat_foe_target_async_result_t flash_start(void *ctx,
     async_flash_t *f = (async_flash_t *)ctx;
     f->starts++;
     f->pending = true;
-    (void)op;
+    if (f->immediate) return flash_poll(ctx, op);
     return ECAT_FOE_TARGET_ASYNC_PENDING;
 }
 
@@ -233,6 +236,29 @@ int main(void)
     CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 20U, true, 131U) == 0U);
     ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_PACKETNO);
     CHECK(flash.aborts == 1U && !flash.valid && core.state == ECAT_FOE_STATE_IDLE);
+
+    /* A header-crossing packet with too much payload must not touch the old image. */
+    flash.valid = true;
+    unsigned before = flash.starts;
+    size_t short_total = make_efw(efw, payload, 6U);
+    efw[short_total] = 0xEEU;
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
+    memcpy(packet_storage, efw, 128U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 128U, true, 140U) == 0U);
+    memcpy(packet_storage, efw + 128U, short_total + 1U - 128U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage,
+          (uint16_t)(short_total + 1U - 128U), false, 141U) == ECAT_FOE_SSC_ERR_PROGERROR);
+    CHECK(flash.valid && flash.starts == before);
+
+    /* An immediately completed normal write should ACK without a poll/retry. */
+    flash.immediate = true;
+    (void)make_efw(efw, payload, sizeof(payload));
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
+    memcpy(packet_storage, efw, 128U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 128U, true, 150U) == 0U);
+    memcpy(packet_storage, efw + 128U, 100U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 100U, true, 151U) == 0U);
+    CHECK(!gate.pending && core.payload_rx_bytes == 80U && core.written_offset == 80U);
 
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;
