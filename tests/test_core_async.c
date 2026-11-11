@@ -260,6 +260,25 @@ int main(void)
     CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 100U, true, 151U) == 0U);
     CHECK(!gate.pending && core.payload_rx_bytes == 80U && core.written_offset == 80U);
 
+    /* A valid header with an undersized operation buffer cannot invalidate. */
+    CHECK(ecat_foe_core_deinit(&core) == 0);
+    cfg.targets[0].write_unit = 256U;
+    CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+    CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
+          sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
+    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
+          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
+          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    flash.valid = true;
+    before = flash.starts;
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
+    memcpy(packet_storage, efw, 128U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 128U, true, 160U) == 0U);
+    memcpy(packet_storage, efw + 128U, 20U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 20U, true, 161U) == ECAT_FOE_SSC_ERR_PROGERROR);
+    CHECK(flash.valid && flash.starts == before);
+
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;
 }

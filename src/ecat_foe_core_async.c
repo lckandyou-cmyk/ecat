@@ -241,6 +241,10 @@ static int validate_header(ecat_foe_core_async_t *s)
         c->last_error = ECAT_FOE_CORE_ERR_DRV_NOT_REGISTERED;
         return -1;
     }
+    if (target->write_unit > s->operation_capacity) {
+        c->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
+        return -1;
+    }
     if (ecat_foe_target_async_init(&s->runner, target->async_ops,
             target->async_user_ctx, s->operation_storage,
             s->operation_capacity) != 0) {
