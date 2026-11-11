@@ -46,4 +46,4 @@ SOES 示例和驱动接口详见 [`examples/bootloader_soes/README.md`](../examp
 
 ## Windows CLI
 
-仓库提供 Windows x64 独立可执行文件工作流。可从 [Windows CLI Actions](https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml) 下载工作流产物；通过工作流的测试版标签可获取 [预发布 Release](https://github.com/lckandyou-cmyk/ecat/releases)。解压后在 PowerShell 运行 `.ecat-efw.exe --help`。当前可执行文件未签名，且不支持 `--overwrite`。
+仓库提供 Windows x64 独立可执行文件工作流。可从 [Windows CLI Actions](https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml) 下载工作流产物；通过工作流的测试版标签可获取 [预发布 Release](https://github.com/lckandyou-cmyk/ecat/releases)。解压后在 PowerShell 运行 `\.\ecat-efw.exe --help`。当前可执行文件未签名，且不支持 `--overwrite`。

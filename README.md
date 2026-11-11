@@ -107,6 +107,7 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 
 ## 规范与反馈
 
+- [ECAT Wiki：快速开始、架构、移植与故障排查](wiki/Home.md)
 - [EFW 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
 - [旧 EFW v1 格式说明（历史）](docs/spec/efw-format-v0.1.md)
 - [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)

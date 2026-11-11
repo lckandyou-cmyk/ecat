@@ -107,6 +107,7 @@ Passing host tests does not establish hardware or full protocol-stack validation
 
 ## Documentation and feedback
 
+- [ECAT Wiki: getting started, architecture, porting, and troubleshooting](wiki/Home.md)
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
 - [Historical EFW v1 specification](docs/spec/efw-format-v0.1.md)
 - [System architecture](docs/architecture/SAD-v0.1.md)
