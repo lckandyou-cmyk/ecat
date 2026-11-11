@@ -1,5 +1,6 @@
 #include "ecat_foe_core_async.h"
 #include "ecat_foe_ssc.h"
+#include "mock_driver.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -278,6 +279,36 @@ int main(void)
     memcpy(packet_storage, efw + 128U, 20U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 20U, true, 161U) == ECAT_FOE_SSC_ERR_PROGERROR);
     CHECK(flash.valid && flash.starts == before);
+
+    /* A bound async session must not suppress a synchronous target's abort. */
+    CHECK(ecat_foe_core_deinit(&core) == 0);
+    static mock_driver_t sync_flash;
+    mock_driver_init(&sync_flash);
+    cfg.targets[0].asynchronous = false;
+    cfg.targets[0].driver = &sync_flash.driver;
+    cfg.targets[0].user_ctx = &sync_flash;
+    cfg.targets[0].write_unit = 4U;
+    cfg.targets[1].target_id = ECAT_FOE_TARGET_FPGA;
+    cfg.targets[1].enabled = true;
+    cfg.targets[1].asynchronous = true;
+    cfg.targets[1].async_ops = &flash_ops;
+    cfg.targets[1].async_user_ctx = &flash;
+    cfg.targets[1].max_payload_size = sizeof(flash.flash);
+    cfg.targets[1].write_unit = 4U;
+    CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+    CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
+          sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
+    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
+    ecat_foe_core_on_abort(&core);
+    CHECK(sync_flash.count_abort == 1U);
+    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
+    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(sync_flash.count_abort == 2U);
+    CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
+    CHECK(ecat_foe_core_deinit(&core) == 0);
+    CHECK(sync_flash.count_abort == 3U);
 
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;

@@ -578,10 +578,11 @@ static void async_abort(void *ctx)
     } else if (s->runner.pending) {
         ecat_foe_target_async_abort(&s->runner);
     }
-    if (s->core != NULL) {
+    if (s->core != NULL && s->target_session_started && s->core->active_drv == NULL) {
         s->core->session_active = false;
         s->core->driver_abort_called = true;
     }
+    s->target_session_started = false;
     s->state = ECAT_FOE_CORE_ASYNC_IDLE;
     s->phase = ECAT_FOE_CORE_ASYNC_PHASE_NONE;
     s->packet_length = 0U;
