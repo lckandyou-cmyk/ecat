@@ -846,6 +846,18 @@ int main(void)
     assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
     ecat_target_registry_set_enforce_acl(&reg, false);
 
+    /* 4.6 多传输管理器绑定权威注册表契约: 严禁后发管理器静默篡改核心权威注册表 */
+    ecat_target_registry_t conflicting_reg;
+    assert(ecat_target_registry_init(&conflicting_reg) == 0);
+    ecat_transfer_t second_mgr;
+    /* 对同一个已绑定 reg 的 core 尝试传入 conflicting_reg，必须返回 -1 拒绝 */
+    assert(ecat_transfer_init(&second_mgr, &conflicting_reg, &core) == -1);
+    assert(core.registry == &reg); /* 核心权威注册表指针未受篡改 */
+
+    /* 传入相同的权威注册表指针，允许共存并共享会话仲裁 */
+    assert(ecat_transfer_init(&second_mgr, &reg, &core) == 0);
+    assert(second_mgr.session_ptr == fw_manager.session_ptr);
+
     /* ---------------------------------------------------------------------- */
     /* 6. Issue 6: 传输方向严格枚举校验与防驱动副作用/占锁测试              */
     /* ---------------------------------------------------------------------- */

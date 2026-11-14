@@ -32,9 +32,14 @@ typedef struct {
     bool ending;
 } ecat_upgrade_t;
 
-/* Initialize once with an IDLE configured core. Afterwards this manager must
- * exclusively own the core: do not mix legacy event APIs or a second manager.
- * Calls are serialized; owners are stable identity pointers. */
+/* Initialize once with an IDLE configured core.
+ *
+ * 【Multi-Manager & Shared Session Contract】:
+ * - When sharing this core with other managers (e.g. ecat_transfer_t or secondary ecat_upgrade_t),
+ *   concurrency is arbitrated via core->shared_session.
+ * - The primary manager (first initialized) provides the backing memory for core->shared_session,
+ *   and therefore MUST outlive any secondary managers that reference it.
+ * - Calls are serialized; owners are stable identity pointers. */
 int ecat_upgrade_init(ecat_upgrade_t *upgrade, ecat_foe_core_t *core);
 /* Backend must already be bound to this core's abort hook; buffers and context
  * must outlive the manager. Synchronous targets remain supported too. */

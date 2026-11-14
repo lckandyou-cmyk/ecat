@@ -100,10 +100,18 @@ typedef struct {
 
 /**
  * @brief 初始化双向传输管理器
+ *
+ * 【多管理器共享与生命周期契约】：
+ * - 若 core != NULL，首个初始化的管理器将向 core 绑定权威注册表与会话仲裁器 (core->shared_session)；
+ * - 主管理器的生命周期必须覆盖任何共享该 core 的后发管理器；
+ * - 共享同一个 core 的后续管理器必须传入相同的权威注册表指针 (reg == core->registry)，
+ *   传入不同的注册表指针将被严格拒绝并返回 -1 (拒绝冲突绑定，禁止 last-writer-wins)；
+ * - 统一通过类型安全的 ACL 适配器检查权限，杜绝未定义行为。
+ *
  * @param t 管理器上下文指针
  * @param reg 目标注册表指针 (必须非空)
  * @param core 可选固件升级核心状态机 (若不执行固件安全升级可传入 NULL)
- * @return 0 成功，-1 参数非法
+ * @return 0 成功，-1 参数非法或尝试冲突绑定
  */
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core);
 

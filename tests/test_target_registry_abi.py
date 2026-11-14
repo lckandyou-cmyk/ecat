@@ -37,6 +37,54 @@ with tempfile.TemporaryDirectory(prefix='ecat-reg-abi-') as tmp:
     assert mismatch.returncode != 0, f"Mismatched registry configurations must fail to link, got returncode 0. stderr: {mismatch.stderr}"
     assert 'ecat_target_registry_abi_' in mismatch.stderr, f"Linker error must cite ecat_target_registry_abi_, got: {mismatch.stderr}"
 
+    # Compile caller with custom MAX_ACL_RULES=1
+    caller_acl_mismatch_obj = tmp_path / 'caller_acl_mismatch.o'
+    subprocess.run([cc, '-std=c99', '-I' + str(root / 'include'),
+                    '-DECAT_TARGET_REGISTRY_MAX_ACL_RULES=1',
+                    '-c', str(caller),
+                    '-o', str(caller_acl_mismatch_obj)], check=True)
+
+    mismatch_acl = subprocess.run([cc, str(caller_acl_mismatch_obj), str(reg_obj),
+                                   '-o', str(tmp_path / 'mismatch_acl')],
+                                  capture_output=True, text=True)
+    assert mismatch_acl.returncode != 0, f"Mismatched ACL rules configuration must fail to link, got returncode 0. stderr: {mismatch_acl.stderr}"
+    assert 'ecat_target_registry_abi_' in mismatch_acl.stderr, f"Linker error must cite ecat_target_registry_abi_, got: {mismatch_acl.stderr}"
+
+    # Optimization and linker dead-stripping scenarios (-O2 and link-time stripping)
+    import sys
+    compile_strip = ['-ffunction-sections', '-fdata-sections'] if sys.platform != 'darwin' else []
+    link_strip = ['-Wl,--gc-sections'] if sys.platform != 'darwin' else ['-Wl,-dead_strip']
+
+    reg_opt_obj = tmp_path / 'ecat_target_registry_opt.o'
+    subprocess.run([cc, '-std=c99', '-O2', '-I' + str(root / 'include')] +
+                   compile_strip +
+                   ['-c', str(root / 'src/ecat_target_registry.c'),
+                    '-o', str(reg_opt_obj)], check=True)
+
+    caller_opt_mismatch_obj = tmp_path / 'caller_opt_mismatch.o'
+    subprocess.run([cc, '-std=c99', '-O2', '-I' + str(root / 'include'),
+                    '-DECAT_TARGET_REGISTRY_MAX_BLOCKS=1'] +
+                   compile_strip +
+                   ['-c', str(caller),
+                    '-o', str(caller_opt_mismatch_obj)], check=True)
+
+    mismatch_opt = subprocess.run([cc, '-O2'] + link_strip +
+                                  [str(caller_opt_mismatch_obj), str(reg_opt_obj),
+                                   '-o', str(tmp_path / 'mismatch_opt')],
+                                  capture_output=True, text=True)
+    assert mismatch_opt.returncode != 0, f"Mismatched configurations under -O2 and dead-strip must fail to link, got returncode 0"
+    assert 'ecat_target_registry_abi_' in mismatch_opt.stderr, f"Linker error must cite ecat_target_registry_abi_, got: {mismatch_opt.stderr}"
+
+    caller_opt_match_obj = tmp_path / 'caller_opt_match.o'
+    subprocess.run([cc, '-std=c99', '-O2', '-I' + str(root / 'include')] +
+                   compile_strip +
+                   ['-c', str(caller),
+                    '-o', str(caller_opt_match_obj)], check=True)
+    subprocess.run([cc, '-O2'] + link_strip +
+                   [str(caller_opt_match_obj), str(reg_opt_obj),
+                    '-o', str(tmp_path / 'match_opt')], check=True)
+    subprocess.run([str(tmp_path / 'match_opt')], check=True)
+
     # Matching config must link and succeed
     caller_match_obj = tmp_path / 'caller_match.o'
     subprocess.run([cc, '-std=c99', '-I' + str(root / 'include'),

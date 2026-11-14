@@ -7,10 +7,30 @@
 #include "ecat_foe_efw.h"
 #include <string.h>
 
+static bool target_registry_acl_adapter(
+    const void *registry,
+    uint16_t transport_id,
+    uint16_t target_id,
+    uint8_t required_perm)
+{
+    return ecat_target_registry_check_permission(
+        (const ecat_target_registry_t *)registry,
+        transport_id,
+        target_id,
+        required_perm);
+}
+
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core)
 {
     if (t == NULL || reg == NULL) {
         return -1;
+    }
+
+    if (core != NULL) {
+        if (core->registry != NULL && core->registry != reg) {
+            /* 严禁冲突绑定: 核心状态机已绑定不同的权威注册表，杜绝 last-writer-wins 劫持 */
+            return -1;
+        }
     }
 
     memset(t, 0, sizeof(*t));
@@ -20,7 +40,7 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
 
     if (core != NULL) {
         core->registry = reg;
-        core->acl_check = (bool (*)(const void *, uint16_t, uint16_t, uint8_t))ecat_target_registry_check_permission;
+        core->acl_check = target_registry_acl_adapter;
         if (core->shared_session == NULL) {
             core->shared_session = &t->session;
         }
