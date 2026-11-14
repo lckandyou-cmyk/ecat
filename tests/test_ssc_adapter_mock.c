@@ -347,6 +347,35 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 12 项测试全部通过 (Mock 环境) <<<\n");
+    {
+        printf("[TEST 13] SSC shared upgrade ownership...");
+        setup_core_and_adapter(&core, &adapter, 0U);
+        ecat_upgrade_t upgrade;
+        int other = 0;
+        uint64_t token = 0;
+        ecat_upgrade_request_t request = {1U, TEST_FW_VER};
+        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_upgrade_init(&upgrade, &core) == 0);
+        assert(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
+        assert(ecat_upgrade_begin(&upgrade, &other, &request, &token) == ECAT_UPGRADE_COMPLETE);
+        assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0);
+        ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_ILLEGAL);
+        assert(ecat_upgrade_session_owns(&upgrade.session, &other, token));
+        assert(ecat_foe_ssc_on_data(&adapter, NULL, 0U) != 0);
+        assert(ecat_upgrade_cancel(&upgrade, &other, token) == ECAT_UPGRADE_COMPLETE);
+        assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) == 0);
+        uint8_t payload[16] = {1}, fw[256];
+        size_t length = build_valid_firmware(fw, sizeof(fw), payload, sizeof(payload));
+        assert(ecat_foe_ssc_on_data(&adapter, fw, (uint16_t)length) == 0);
+        assert(s_mock_drv.count_finalize == 0);
+        assert(ecat_foe_ssc_on_end(&adapter) == 0);
+        assert(s_mock_drv.count_finalize == 1);
+        assert(ecat_foe_ssc_on_data(&adapter, NULL, 0U) == 0);
+        ecat_foe_ssc_on_abort(&adapter, 0);
+        assert(s_mock_drv.count_abort == 0);
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 13 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

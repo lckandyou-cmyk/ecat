@@ -18,6 +18,7 @@ void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, u
         return;
     }
     adapter->core = core;
+    memset(&adapter->transport, 0, sizeof(adapter->transport));
     adapter->async_gate = NULL;
     adapter->max_packet_size = max_packet_size;
     adapter->expected_password = 0U;
@@ -33,11 +34,47 @@ void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
         return;
     }
     adapter->core = core;
+    memset(&adapter->transport, 0, sizeof(adapter->transport));
     adapter->async_gate = async_gate;
     adapter->max_packet_size = 0U;
     adapter->expected_password = 0U;
     adapter->session_active = false;
     adapter->async_final_acked = false;
+}
+
+int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *a, ecat_upgrade_t *upgrade)
+{
+    if (a == NULL || upgrade == NULL || upgrade->core == NULL || a->core != upgrade->core ||
+        a->transport.upgrade != NULL || a->session_active) return -1;
+    if (a->async_gate != NULL && (a->async_gate->pending || a->async_gate->completed ||
+        a->async_gate->ops != ecat_foe_transport_async_ops() ||
+        a->async_gate->ops_ctx != &a->transport)) return -1;
+    if (a->async_gate == NULL) {
+        for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++)
+            if (upgrade->core->cfg.targets[i].enabled && upgrade->core->cfg.targets[i].asynchronous)
+                return -1;
+    }
+    return ecat_foe_transport_init(&a->transport, upgrade);
+}
+
+static void ssc_abort_core(ecat_foe_ssc_adapter_t *a)
+{
+    if (a->transport.upgrade != NULL) ecat_foe_transport_abort(&a->transport);
+    else ecat_foe_core_on_abort(a->core);
+}
+
+static int ssc_end_core(ecat_foe_ssc_adapter_t *a)
+{
+    if (a->transport.upgrade == NULL) return ecat_foe_core_on_end(a->core);
+    int rc = ecat_foe_transport_start(&a->transport, NULL, 0U, false) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1;
+    if (rc == 0) a->async_final_acked = true;
+    return rc;
+}
+
+static bool ssc_completed(const ecat_foe_ssc_adapter_t *a)
+{
+    return a->transport.upgrade != NULL ? a->async_final_acked :
+        (a->core->state == ECAT_FOE_STATE_SUCCESS || a->async_final_acked);
 }
 
 int ecat_foe_ssc_set_expected_password(ecat_foe_ssc_adapter_t *adapter,
@@ -64,14 +101,16 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
 
     if (adapter->async_gate != NULL && adapter->session_active) {
         ecat_foe_ssc_async_abort_session(adapter->async_gate);
-        ecat_foe_core_on_abort(adapter->core);
+        ssc_abort_core(adapter);
         adapter->session_active = false;
     } else if (adapter->async_gate != NULL &&
                (adapter->async_gate->pending || adapter->async_gate->completed)) {
         ecat_foe_ssc_async_abort(adapter->async_gate);
     }
     /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
-    int rc = ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
+    int rc = adapter->transport.upgrade != NULL
+        ? ecat_foe_transport_begin(&adapter->transport, pName, (size_t)nameSize)
+        : ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
     if (rc != 0) {
         adapter->session_active = false;
         /* 保留核心机计算的标准 FoE 错误码 (如 0x8001 NOTFOUND, 0x8004 ILLEGAL 等) */
@@ -98,13 +137,13 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
      */
     if (length == 0U) {
         if (!adapter->session_active) {
-            if (adapter->core->state == ECAT_FOE_STATE_SUCCESS) {
+            if (ssc_completed(adapter)) {
                 return 0U; /* 短包结束后的幂等 0 长度确认包 */
             }
             return ECAT_FOE_SSC_ERR_ILLEGAL;
         }
 
-        if (ecat_foe_core_on_end(adapter->core) != 0) {
+        if (ssc_end_core(adapter) != 0) {
             adapter->session_active = false;
             return ECAT_FOE_SSC_ERR_PROGERROR;
         }
@@ -119,26 +158,29 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
 
     if (pData == NULL) {
         adapter->session_active = false;
-        ecat_foe_core_on_abort(adapter->core);
+        ssc_abort_core(adapter);
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
 
     /* 包长上限校验：单包大小不得超出适配层声明的最大邮箱容量 */
     if (adapter->max_packet_size > 0U && (uint32_t)length > adapter->max_packet_size) {
         adapter->session_active = false;
-        ecat_foe_core_on_abort(adapter->core);
+        ssc_abort_core(adapter);
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
 
     /* 写入常规数据块 */
-    if (ecat_foe_core_on_data(adapter->core, pData, (size_t)length) != 0) {
+    int data_rc = adapter->transport.upgrade != NULL
+        ? (ecat_foe_transport_start(&adapter->transport, pData, length, true) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1)
+        : ecat_foe_core_on_data(adapter->core, pData, (size_t)length);
+    if (data_rc != 0) {
         adapter->session_active = false;
         return ECAT_FOE_SSC_ERR_PROGERROR;
     }
 
     /* 依据短包定界传输结束：若当前块长度小于单包最大容量，判定为最后一包 (EOF) */
     if (adapter->max_packet_size > 0U && (uint32_t)length < adapter->max_packet_size) {
-        if (ecat_foe_core_on_end(adapter->core) != 0) {
+        if (ssc_end_core(adapter) != 0) {
             adapter->session_active = false;
             return ECAT_FOE_SSC_ERR_PROGERROR;
         }
@@ -177,14 +219,15 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
         adapter->async_final_acked = false;
         ecat_foe_ssc_async_abort(adapter->async_gate);
         if (adapter->core != NULL) {
-            ecat_foe_core_on_abort(adapter->core);
+            ssc_abort_core(adapter);
         }
         return result;
     }
     if (!data_following) {
-        if (adapter->core->state != ECAT_FOE_STATE_SUCCESS) {
+        if (adapter->transport.upgrade != NULL ? !adapter->transport.committed :
+            adapter->core->state != ECAT_FOE_STATE_SUCCESS) {
             ecat_foe_ssc_async_abort(adapter->async_gate);
-            ecat_foe_core_on_abort(adapter->core);
+            ssc_abort_core(adapter);
             adapter->session_active = false;
             adapter->async_final_acked = false;
             return ECAT_FOE_SSC_ERR_PROGERROR;
@@ -208,7 +251,7 @@ uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
         /* Timeout and driver failures happen in the main loop, outside DATA
          * callback routing. Close verifier/core state here; preserve the gate's
          * completed packet so SSC's retransmission receives the configured error. */
-        ecat_foe_core_on_abort(adapter->core);
+        ssc_abort_core(adapter);
         adapter->session_active = true;
         adapter->async_final_acked = false;
     }
@@ -223,7 +266,7 @@ uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 
     if (adapter->async_gate != NULL) {
         if (!adapter->session_active &&
-            (adapter->core->state == ECAT_FOE_STATE_SUCCESS || adapter->async_final_acked)) {
+            ssc_completed(adapter)) {
             return 0U;
         }
         return adapter->async_gate->pending
@@ -232,10 +275,10 @@ uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 
     /* 若会话已通过短包正常结束并达成 SUCCESS，返回成功 */
     if (!adapter->session_active) {
-        return (adapter->core->state == ECAT_FOE_STATE_SUCCESS) ? 0U : ECAT_FOE_SSC_ERR_ILLEGAL;
+        return ssc_completed(adapter) ? 0U : ECAT_FOE_SSC_ERR_ILLEGAL;
     }
 
-    if (ecat_foe_core_on_end(adapter->core) != 0) {
+    if (ssc_end_core(adapter) != 0) {
         adapter->session_active = false;
         return ECAT_FOE_SSC_ERR_PROGERROR;
     }
@@ -253,7 +296,7 @@ void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
 
     /* 若固件升级已顺利成功落盘 (SUCCESS)，保留终态标记，不予重置为 IDLE */
     if (!adapter->session_active &&
-        (adapter->core->state == ECAT_FOE_STATE_SUCCESS || adapter->async_final_acked)) {
+        ssc_completed(adapter)) {
         return;
     }
 
@@ -262,7 +305,7 @@ void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
          adapter->async_gate->completed)) {
         ecat_foe_ssc_async_abort_session(adapter->async_gate);
     }
-    ecat_foe_core_on_abort(adapter->core);
+    ssc_abort_core(adapter);
     adapter->session_active = false;
     adapter->async_final_acked = false;
 }

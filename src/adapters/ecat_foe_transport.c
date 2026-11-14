@@ -32,6 +32,7 @@ int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t l
     if (t->upgrade->session.owner != NULL && !ecat_foe_transport_owns(t))
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     ecat_foe_transport_abort(t);
+    t->committed = false;
     ecat_upgrade_request_t request;
     int result = ecat_foe_core_validate_wrq(t->upgrade->core, name, length,
                                             &request.target_id, &request.fw_version);
@@ -55,6 +56,7 @@ static ecat_upgrade_async_result_t advance(ecat_foe_transport_t *t, ecat_upgrade
         t->finishing = true;
         return advance(t, ecat_upgrade_finish(t->upgrade, t, t->token));
     }
+    if (t->finishing) t->committed = true;
     return ECAT_UPGRADE_ASYNC_COMPLETE;
 }
 

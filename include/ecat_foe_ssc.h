@@ -13,6 +13,7 @@
 #define ECAT_FOE_SSC_H
 
 #include "ecat_foe_core.h"
+#include "ecat_foe_transport.h"
 #include "ecat_foe_ssc_async.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -41,6 +42,7 @@ extern "C" {
  * @brief SSC 适配层上下文结构体
  */
 typedef struct {
+    ecat_foe_transport_t transport;
     ecat_foe_core_t *core;                /**< 关联的核心机上下文 */
     ecat_foe_ssc_async_t *async_gate;      /**< 可选：异步 DATA/BUSY 门控 */
     uint32_t         max_packet_size;     /**< SSC 邮箱配置的单包最大容量 (若已知) */
@@ -56,6 +58,11 @@ typedef struct {
  * @param max_packet_size SSC 邮箱单包大小 (通常为邮箱数据载荷容量)
  */
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size);
+/* Bind once after init, before accepting requests. For async mode initialize
+ * the gate with ecat_foe_transport_async_ops() and &adapter->transport first.
+ * The shared manager must refer to this same core. */
+int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *adapter, ecat_upgrade_t *upgrade);
+
 
 /**
  * Set the FoE access password expected by this adapter. Defaults to zero after

@@ -13,6 +13,7 @@ typedef struct {
     bool pending;
     bool finish_after_write;
     bool finishing;
+    bool committed;
 } ecat_foe_transport_t;
 
 /* Initialize once; address is the stable owner identity, so do not copy it. */

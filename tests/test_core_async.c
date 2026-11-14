@@ -400,6 +400,54 @@ int main(void)
     CHECK(flash.aborts == 1U && !flash.pending);
     CHECK(ecat_upgrade_cancel(&upgrade, &contender, rejected) == ECAT_UPGRADE_STALE);
 
+    /* SSC gate uses the shared manager, including final retry after ownership
+     * has passed to another transport following a successful commit. */
+    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_transport_async_ops(), &adapter.transport,
+          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
+          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+    CHECK(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
+    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) != 0U);
+    ecat_foe_ssc_on_abort(&adapter, 0U);
+    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
+    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
+    uint32_t tick = 1000U;
+    for (size_t pos = 0; pos < total;) {
+        size_t length = total - pos > 128U ? 128U : total - pos;
+        bool more = pos + length < total;
+        uint16_t r = ecat_foe_ssc_on_data_following(&adapter, efw + pos, (uint16_t)length, more, tick++);
+        if (r == gate.busy_foe_code) {
+            unsigned previous_starts = flash.starts;
+            CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + pos, (uint16_t)length, more, tick++) == gate.busy_foe_code);
+            CHECK(flash.starts == previous_starts);
+            for (unsigned poll = 0; gate.pending && poll < 64U; poll++)
+                (void)ecat_foe_ssc_on_main_loop(&adapter, tick++);
+            CHECK(gate.completed && !gate.operation_failed);
+            if (!more) {
+                CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+            }
+            r = ecat_foe_ssc_on_data_following(&adapter, efw + pos, (uint16_t)length, more, tick++);
+        }
+        CHECK(r == 0U);
+        pos += length;
+    }
+    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
+    ecat_foe_ssc_on_abort(&adapter, 0U);
+    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
+    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, efw, 128U, true, tick++) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, tick++) == gate.busy_foe_code);
+    tick += 100U;
+    CHECK(ecat_foe_ssc_on_main_loop(&adapter, tick++) == gate.operation_error_foe_code);
+    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, tick++) == gate.operation_error_foe_code);
+    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
+    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;
 }
