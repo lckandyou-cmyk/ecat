@@ -205,6 +205,49 @@ int main(void)
     assert(!ecat_transport_endpoint_is_active(&ep_uart));
     assert(s_cb_aborted);
 
+    /* ---------------------------------------------------------------------- */
+    /* 4. Issue 5: 可恢复/终止错误契约与会话清理验证 (Write & Read 均测试)    */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 Issue 5: 端点错误后的会话生命周期与释放 ---\n");
+    /* 4.1 写入路径空指针错误后调用 abort 必须释放底层传输会话 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 1U, 16, 0) == ECAT_TRANSFER_COMPLETE);
+    int wr_err = ecat_transport_endpoint_write_chunk(&ep_uart, NULL, 1);
+    assert(wr_err == ECAT_TRANSFER_INVALID);
+    /* 此时会话未被销毁，允许调用方 abort 释放会话 */
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ep_uart.current_token == 0U);
+    /* 验证底层传输管理器会话已被释放，其它通道可正常 begin */
+    assert(ecat_transport_endpoint_begin_import(&ep_can, 1U, 16, 0) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_can);
+
+    /* 4.2 写入路径可重试契约: 参数错误后更正参数可继续写入 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 1U, 16, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, NULL, 1) == ECAT_TRANSFER_INVALID);
+    /* 重试写入合法数据 */
+    uint8_t retry_buf[16] = {0xAA};
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, retry_buf, 16) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+
+    /* 4.3 回读导出路径空指针错误后调用 abort 必须释放底层传输会话 */
+    uint32_t rd_sz = 0;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, &rd_sz) == ECAT_TRANSFER_COMPLETE);
+    size_t actual_rd = 0;
+    int rd_err = ecat_transport_endpoint_read_chunk(&ep_uart, NULL, 16, &actual_rd);
+    assert(rd_err == ECAT_TRANSFER_INVALID);
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ep_uart.current_token == 0U);
+    /* 验证底层会话已释放，ep_can 可正常发起会话 */
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 1U, &rd_sz) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_can);
+
+    /* 4.4 回读导出路径可重试契约: 参数错误后更正参数可继续回读 */
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, &rd_sz) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, NULL, 16, &actual_rd) == ECAT_TRANSFER_INVALID);
+    uint8_t rd_buf[16];
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, rd_buf, sizeof(rd_buf), &actual_rd) == ECAT_TRANSFER_CONTINUE ||
+           ecat_transport_endpoint_read_chunk(&ep_uart, rd_buf, sizeof(rd_buf), &actual_rd) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_uart);
+
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;
 }
