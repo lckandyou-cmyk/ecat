@@ -275,7 +275,7 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
     }
 
     if (cfg->signature_verify_enable) {
-        if (hdr->format_version != ECAT_FOE_EFW_FORMAT_VERSION || !hdr->signed_package) {
+        if (!hdr->signed_package) {
             return ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED;
         }
     }
