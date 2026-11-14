@@ -39,7 +39,16 @@ jobs:
         run: make test-asan CC=clang PYTHON=python
       - name: Run isolated repository sentinel tests
         run: make test-sentinels CC=clang PYTHON=python
-      # SOES integration requires separately obtained, pinned external sources;
+      - name: Fetch and test pinned SOES baseline
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/soes-baseline"
+          for file in esc.c esc.h esc_foe.c esc_foe.h; do
+            curl --fail --silent --show-error --location --retry 3 \
+              "https://raw.githubusercontent.com/OpenEtherCATsociety/SOES/6ef7b9415e936c061ad30626ca00004bdde2ac62/soes/$file" \
+              -o "$RUNNER_TEMP/soes-baseline/$file"
+          done
+          make test-soes CC=clang PYTHON=python SOES_DIR="$RUNNER_TEMP/soes-baseline" SOES_HASH_STRICT=1
       # SSC and physical hardware integration are not covered by this job.
   build:
     runs-on: windows-2022

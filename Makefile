@@ -32,6 +32,7 @@ TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 BUILD_DIR ?= build
 OVERWRITE ?= 0
 SOES_DIR ?= /tmp/soes_src/soes
+SOES_HASH_STRICT ?= 0
 MONOCYPHER_DIR ?=
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
 PDF_FILE ?= $(PDF_SOURCES_DIR)/00001909A.pdf
@@ -93,6 +94,7 @@ test: test-examples test-ssc-async test-target-async test-core-async
 	$(CC) $(CFLAGS) -o "$$TMP_BUILD_DIR/test_runner_ssc_mock" $(SRC_SSC_ADAPTER) $(TEST_SSC_SRC) && \
 	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
+	$(PYTHON) tests/test_check_soes_hash.py && \
 	CC="$(CC)" $(PYTHON) tests/test_config_override.py && \
 	CC="$(CC)" $(PYTHON) tests/test_bootloader_assertions.py && \
 	"$$TMP_BUILD_DIR/test_runner_core" && \
@@ -193,7 +195,7 @@ test-bootloader:
 		echo "使用方法: make test-bootloader SOES_DIR=/path/to/soes"; \
 		exit 1; \
 	fi
-	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)"
+	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)" $(if $(filter 1,$(SOES_HASH_STRICT)),--strict,)
 	@TMP_SOES_DIR=$$(mktemp -d /tmp/foe_build_bootloader_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SOES_DIR"' EXIT INT TERM && \
 	echo "--- 在独立隔离构建目录编译并运行最小 Bootloader 集成验证 (构建目录: $$TMP_SOES_DIR) ---" && \
@@ -209,7 +211,7 @@ test-soes:
 		echo "使用方法: make test-soes SOES_DIR=/path/to/soes"; \
 		exit 1; \
 	fi
-	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)"
+	@$(PYTHON) tools/check_soes_hash.py --soes-dir "$(SOES_DIR)" $(if $(filter 1,$(SOES_HASH_STRICT)),--strict,)
 	@TMP_SOES_DIR=$$(mktemp -d /tmp/foe_build_soes_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SOES_DIR"' EXIT INT TERM && \
 	echo "--- 在独立隔离构建目录编译并运行真实 SOES Harness (构建目录: $$TMP_SOES_DIR) ---" && \

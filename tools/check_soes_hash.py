@@ -22,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description="SOES 文件哈希比对工具")
     parser.add_argument("--soes-dir", required=True, help="SOES 源码目录")
     parser.add_argument("--manifest", default="docs/quotes_manifest.json", help="Manifest 文件路径")
+    parser.add_argument("--strict", action="store_true", help="缺失或不匹配基线时返回非零")
     args = parser.parse_args()
 
     if not os.path.isdir(args.soes_dir):
@@ -56,6 +57,8 @@ def main():
         baseline = baseline_sums.get(fname)
         if baseline is None:
             print(f"  [UNTRACKED] {fname}: {actual_hash} (清单中无基线)")
+            if args.strict:
+                all_matched = False
         elif actual_hash.lower() == baseline.lower():
             print(f"  [MATCH]     {fname}: {actual_hash}")
         else:
@@ -65,6 +68,9 @@ def main():
 
     print("------------------------------------------------------------")
     if not all_matched:
+        if args.strict:
+            print(">>> 错误: SOES 源文件或登记基线不完整或哈希不一致 <<<")
+            return 1
         print(">>> 警告: 部分 SOES 源文件哈希与登记基线不一致或缺失，测试将在当前源码环境下继续执行 <<<")
     else:
         print(">>> 全部关联 SOES 源文件哈希与清单基线一致 <<<")
