@@ -6,6 +6,10 @@
 #include "ecat_target_registry.h"
 #include <string.h>
 
+void ECAT_TARGET_REGISTRY_ABI_SYMBOL(void)
+{
+}
+
 int ecat_target_registry_init(ecat_target_registry_t *reg)
 {
     if (reg == NULL) {

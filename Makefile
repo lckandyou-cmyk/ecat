@@ -135,6 +135,7 @@ test: test-examples test-ssc-async test-target-async test-core-async test-upgrad
 	$(PYTHON) tests/test_check_soes_hash.py && \
 	$(PYTHON) tests/test_review_docs.py && \
 	CC="$(CC)" $(PYTHON) tests/test_config_override.py && \
+	CC="$(CC)" $(PYTHON) tests/test_target_registry_abi.py && \
 	CC="$(CC)" $(PYTHON) tests/test_bootloader_assertions.py && \
 	"$$TMP_BUILD_DIR/test_runner_core" && \
 	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (Mock 环境) ---" && \

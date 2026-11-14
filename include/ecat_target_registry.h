@@ -31,6 +31,19 @@ extern "C" {
 #define ECAT_TARGET_REGISTRY_MAX_ACL_RULES 32U
 #endif
 
+#include "ecat_target_registry_abi.h"
+
+void ECAT_TARGET_REGISTRY_ABI_SYMBOL(void);
+#if defined(__has_attribute)
+#if __has_attribute(used) && __has_attribute(retain)
+__attribute__((used, retain)) static void (*const ecat_target_registry_abi_reference)(void) = ECAT_TARGET_REGISTRY_ABI_SYMBOL;
+#else
+#error "Target registry ABI checking requires compiler support for used and retain attributes"
+#endif
+#else
+#error "Target registry ABI checking requires compiler support for used and retain attributes"
+#endif
+
 #define ECAT_TARGET_NAME_MAX_LEN 16U
 
 /* 权限标志位 */
