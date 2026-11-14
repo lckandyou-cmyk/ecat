@@ -73,3 +73,5 @@ SOES 集成使用 ENABLE_FOE=1、FOE_STACK=soes，并用 SOES_DIR 与 CFLAGS 提
 编译参数和配置头须与调用方保持一致。此目标沿用现有 Make/POSIX 工具链要求，并非 Windows 原生构建或可烧录 MCU 工程。
 目标默认拒绝覆盖既有库；需重新构建时使用新目录，或用 `make clean BUILD_DIR=build/upgrade` 安全清理已登记产物。
 `make test-upgrade-build` 检查默认/关闭模式的 archive 对象、正反链接结果与不覆盖行为，已纳入 make test。
+
+步骤 7 已实现：可选宿主 FILE 流入口见 examples/file_stream/README.md，ENABLE_FILE 默认 0。同步/异步、入口争用、CRC/截断/验签失败和取消均有宿主测试；它不宣称实现任何硬件传输协议。六项回归均通过。剩余步骤 8：整理统一接入文档、复核构建矩阵和最终验证。

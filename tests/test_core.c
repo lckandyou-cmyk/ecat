@@ -24,6 +24,7 @@
 #include "mock_driver.h"
 #include "ecat_upgrade.h"
 #include "ecat_foe_transport.h"
+#include "ecat_upgrade_file.h"
 
 static int g_core_tests_run = 0;
 static int g_core_tests_passed = 0;
@@ -403,6 +404,94 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     cfg.signature_verifier.abort = mock_signature_abort;
     cfg.signature_verifier.user_ctx = verifier;
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
+}
+
+static void test_file_and_foe_signature_failure_equivalence(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    ecat_upgrade_t upgrade;
+    uint8_t payload[16] = {1}, efw[256], buffer[64];
+    ecat_upgrade_request_t request = {1U, 0x01000000U};
+    for (unsigned transport = 0; transport < 2U; transport++) {
+        mock_signature_verifier_t verifier = {0};
+        mock_driver_init(&mcu);
+        setup_signature_core(&core, &mcu, &verifier);
+        size_t length = build_signed_test_efw(efw, payload, sizeof(payload));
+        memcpy(verifier.expected, efw, length);
+        verifier.expected_len = length;
+        verifier.fail_finish = true;
+        TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "signed manager ready");
+        if (transport == 0U) {
+            FILE *stream = tmpfile();
+            TEST_ASSERT(stream != NULL, "signature stream");
+            TEST_ASSERT_EQ_INT(fwrite(efw, 1U, length, stream), length, "signed fixture");
+            rewind(stream);
+            ecat_upgrade_file_t file;
+            TEST_ASSERT_EQ_INT(ecat_upgrade_file_init(&file, &upgrade, buffer, sizeof(buffer)), 0, "file ready");
+            TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_COMPLETE, "signed file begins");
+            ecat_upgrade_result_t result = ECAT_UPGRADE_PENDING;
+            for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
+                result = ecat_upgrade_file_step(&file);
+            TEST_ASSERT_EQ_INT(result, ECAT_UPGRADE_FAILED, "signature failure rejects file");
+            fclose(stream);
+        } else {
+            ecat_foe_transport_t foe;
+            const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE ready");
+            TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "signed FoE begins");
+            TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, length, false), ECAT_UPGRADE_ASYNC_FAILED, "signature failure rejects FoE");
+        }
+        TEST_ASSERT_EQ_INT(upgrade.last_error, ECAT_FOE_CORE_ERR_SIGNATURE_INVALID, "same diagnostic across transports");
+        TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "same cleanup once");
+        TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "no commit on bad signature");
+        TEST_ASSERT_EQ_INT(verifier.finish_calls, 1, "verification reached");
+        ecat_foe_core_deinit(&core);
+    }
+}
+
+static void test_optional_file_transport(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    ecat_upgrade_t upgrade;
+    ecat_upgrade_file_t file;
+    ecat_foe_transport_t foe;
+    uint8_t buffer[32], payload[32] = {1, 3, 5}, efw[256];
+    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "shared manager ready");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_file_init(&file, &upgrade, buffer, sizeof(buffer)), 0, "file adapter ready");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE adapter ready");
+    size_t length = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                                  request.fw_version, 0U, payload, sizeof(payload));
+    for (unsigned scenario = 0; scenario < 3U; scenario++) {
+        FILE *stream = tmpfile();
+        TEST_ASSERT(stream != NULL, "temporary firmware stream");
+        if (scenario == 1U) efw[length - 1U] ^= 1U;
+        size_t written = scenario == 2U ? length - 1U : length;
+        TEST_ASSERT_EQ_INT(fwrite(efw, 1, written, stream), written, "write fixture");
+        rewind(stream);
+        const char *name = "SERVO_DRV_MCU_V1.2.3.4.efw";
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE first owns");
+        TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_BUSY, "file cannot steal FoE");
+        TEST_ASSERT_EQ_INT(ftell(stream), 0, "busy file did not consume input");
+        ecat_foe_transport_abort(&foe);
+        TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_COMPLETE, "file begins");
+        TEST_ASSERT(ecat_foe_transport_begin(&foe, name, strlen(name)) != 0, "FoE cannot steal file");
+        ecat_foe_transport_abort(&foe);
+        ecat_upgrade_result_t result = ECAT_UPGRADE_PENDING;
+        for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
+            result = ecat_upgrade_file_step(&file);
+        TEST_ASSERT_EQ_INT(result, scenario == 0U ? ECAT_UPGRADE_COMPLETE : ECAT_UPGRADE_FAILED, "file result follows integrity checks");
+        TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "only valid file commits");
+        TEST_ASSERT(upgrade.session.owner == NULL, "terminal file releases lease");
+        TEST_ASSERT_EQ_INT(fseek(stream, 0, SEEK_SET), 0, "caller still owns FILE lifetime");
+        fclose(stream);
+        if (scenario == 1U) efw[length - 1U] ^= 1U;
+    }
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 2, "corrupt and truncated streams cleaned once");
 }
 
 static void test_foe_transport_shares_upgrade_ownership(void)
@@ -3218,6 +3307,8 @@ int main(void)
     RUN_TEST(test_begin_request_without_filename);
     RUN_TEST(test_owned_sync_upgrade_stream);
     RUN_TEST(test_foe_transport_shares_upgrade_ownership);
+    RUN_TEST(test_optional_file_transport);
+    RUN_TEST(test_file_and_foe_signature_failure_equivalence);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);

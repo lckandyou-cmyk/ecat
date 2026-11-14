@@ -7,7 +7,7 @@ SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
 
 # 阶段 B: 核心升级状态机、目标驱动与 SOES 适配测试源码
-SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c
+SRC_CORE = src/adapters/ecat_upgrade_file.c src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 
 # 阶段 C: 真实 SOES 源码宿主独立 Harness 测试源码 (按需检测外部 SOES 源码)
@@ -31,9 +31,13 @@ TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 
 # Product library source selection; no test stubs are used for this target.
 ENABLE_FOE ?= 1
+ENABLE_FILE ?= 0
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
 UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/ecat_upgrade_session.c
+ifeq ($(ENABLE_FILE),1)
+UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_upgrade_file.c
+endif
 ifeq ($(ENABLE_FOE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_foe_transport.c
 ifeq ($(FOE_STACK),soes)
@@ -71,6 +75,7 @@ build:
 
 .PHONY: build-upgrade test-upgrade-build
 build-upgrade:
+	@case "$(ENABLE_FILE)" in 0|1) ;; *) echo "Invalid ENABLE_FILE"; exit 1 ;; esac
 	@case "$(ENABLE_FOE):$(FOE_STACK)" in 0:*|1:ssc|1:soes) ;; *) echo "Invalid ENABLE_FOE or FOE_STACK"; exit 1 ;; esac
 	@mkdir -p "$(UPGRADE_BUILD_DIR)"
 	@$(PYTHON) tools/safe_build.py check --build-dir "$(UPGRADE_BUILD_DIR)" --files libecat_upgrade.a
@@ -184,7 +189,7 @@ test-core-async:
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_core_async" \
 		src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c \
 		src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c \
-		src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
+		src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
 	"$$TMP_ASYNC_DIR/test_core_async"
 
 test-sentinels:
@@ -296,7 +301,7 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_adapter" $(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_target_async" src/ecat_foe_target_async.c tests/test_target_async.c && \
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
