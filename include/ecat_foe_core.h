@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "ecat_foe_efw.h"
+#include "ecat_upgrade_request.h"
 #include "ecat_foe_target.h"
 #include "ecat_foe_target_async.h"
 #ifdef ECAT_FOE_CONFIG_HEADER
@@ -325,6 +326,12 @@ bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
  * @return false core 为 NULL、对象配置标记为 false、参数越界、该目标未启动升级或已成功 finalize 闭环
  */
 bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id);
+
+/* Begin from transport-independent identity. Requires an IDLE configured core;
+ * rejects active/terminal sessions without modifying them. Call on_abort before
+ * reusing a terminal core. Returns a local core error, never a FoE wire code. */
+ecat_foe_core_err_t ecat_foe_core_begin_request(
+    ecat_foe_core_t *core, const ecat_upgrade_request_t *request);
 
 /**
  * @brief 只读预检 FoE WRQ 写请求文件名及目标合法性 (不改变核心机状态或调用驱动)

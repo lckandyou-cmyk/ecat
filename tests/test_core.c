@@ -403,6 +403,35 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
 }
 
+static void test_begin_request_without_filename(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &request), ECAT_FOE_CORE_OK, "metadata begins session");
+    TEST_ASSERT_EQ_INT(core.req_target_id, 1, "target recorded");
+    TEST_ASSERT_EQ_INT(core.req_fw_version, 0x01020304U, "version recorded");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &request), ECAT_FOE_CORE_ERR_INVALID_STATE, "second begin cannot steal session");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "busy begin does not abort");
+    uint8_t payload[32] = {1, 2, 3};
+    uint8_t efw[256];
+    size_t len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                                0x01020304U, 0U, payload, sizeof(payload));
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, len), 0, "EFW accepted without filename");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &request), ECAT_FOE_CORE_ERR_INVALID_STATE, "active driver cannot be stolen");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "active driver preserved");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "metadata session commits");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "commit once");
+    TEST_ASSERT(memcmp(mcu.mem, payload, sizeof(payload)) == 0, "stored payload matches");
+    ecat_foe_core_on_abort(&core);
+    request.target_id = 2U;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &request), ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED, "disabled target rejected");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 1, "invalid request performs no new IO");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, NULL), ECAT_FOE_CORE_ERR_INVALID_ARG, "NULL metadata rejected");
+}
+
 static void test_mock_erase_preserves_prior_sector(void)
 {
     static mock_driver_t mcu;
@@ -3101,6 +3130,7 @@ int main(void)
     RUN_TEST(test_soes_state_transition_aborts_active_session);
     RUN_TEST(test_null_data_aborts_driver_and_verifier);
     RUN_TEST(test_mock_erase_preserves_prior_sector);
+    RUN_TEST(test_begin_request_without_filename);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);

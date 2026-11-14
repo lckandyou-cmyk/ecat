@@ -398,6 +398,26 @@ int ecat_foe_core_validate_wrq(const ecat_foe_core_t *core,
     return 0;
 }
 
+ecat_foe_core_err_t ecat_foe_core_begin_request(
+    ecat_foe_core_t *core, const ecat_upgrade_request_t *request)
+{
+    if (core == NULL || request == NULL) {
+        return ECAT_FOE_CORE_ERR_INVALID_ARG;
+    }
+    if (!core->is_configured || core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
+        return ECAT_FOE_CORE_ERR_INVALID_STATE;
+    }
+    if (request->target_id < 1U || request->target_id > ECAT_FOE_TARGET_COUNT ||
+        !core->cfg.targets[request->target_id - 1U].enabled) {
+        return ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
+    }
+    core_reset_session(core);
+    core->req_target_id = request->target_id;
+    core->req_fw_version = request->fw_version;
+    core->state = ECAT_FOE_STATE_WRQ_ACKED;
+    return ECAT_FOE_CORE_OK;
+}
+
 int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t filename_len)
 {
     if (core == NULL || filename == NULL) {
@@ -435,14 +455,9 @@ int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t fil
         return vrc;
     }
 
-    core->req_target_id = parsed_tid;
-    core->req_fw_version = parsed_ver;
-    core->state = ECAT_FOE_STATE_WRQ_ACKED;
-    core->last_error = ECAT_FOE_CORE_OK;
-    core->session_active = false;
-    core->driver_abort_called = false;
-    core->driver_finalized = false;
-    return 0;
+    ecat_upgrade_request_t request = {parsed_tid, parsed_ver};
+    ecat_foe_core_err_t error = ecat_foe_core_begin_request(core, &request);
+    return ecat_foe_core_err_to_foe(error, true, false);
 }
 
 static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payload_data, size_t payload_len)
