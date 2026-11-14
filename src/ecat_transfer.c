@@ -18,12 +18,41 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
     t->core = core;
     t->last_error = ECAT_TRANSFER_ERR_NONE;
 
+    if (core != NULL) {
+        core->registry = reg;
+        core->acl_check = (bool (*)(const void *, uint16_t, uint16_t, uint8_t))ecat_target_registry_check_permission;
+        if (core->shared_session == NULL) {
+            core->shared_session = &t->session;
+        }
+        t->session_ptr = (ecat_upgrade_session_t *)core->shared_session;
+    } else {
+        t->session_ptr = &t->session;
+    }
+
     return 0;
+}
+
+static inline ecat_upgrade_session_t *get_transfer_session(ecat_transfer_t *t)
+{
+    return (t != NULL && t->session_ptr != NULL) ? t->session_ptr : (t != NULL ? &t->session : NULL);
+}
+
+static inline const ecat_upgrade_session_t *get_transfer_session_const(const ecat_transfer_t *t)
+{
+    return (t != NULL && t->session_ptr != NULL) ? t->session_ptr : (t != NULL ? &t->session : NULL);
+}
+
+static void release_session(ecat_transfer_t *t, const void *owner, uint64_t token)
+{
+    ecat_upgrade_session_t *s = get_transfer_session(t);
+    if (s != NULL) {
+        (void)ecat_upgrade_session_release(s, owner, token);
+    }
 }
 
 static bool is_owned(const ecat_transfer_t *t, const void *owner, uint64_t token)
 {
-    return (t != NULL && ecat_upgrade_session_owns(&t->session, owner, token));
+    return (t != NULL && ecat_upgrade_session_owns(get_transfer_session_const(t), owner, token));
 }
 
 ecat_transfer_result_t ecat_transfer_begin(
@@ -36,9 +65,21 @@ ecat_transfer_result_t ecat_transfer_begin(
         return ECAT_TRANSFER_INVALID;
     }
 
+    /* 检查 core 是否已被其它入口占用进行升级 */
+    if (t->core != NULL) {
+        if (t->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+            t->core->state == ECAT_FOE_STATE_DATA ||
+            t->core->session_active) {
+            return ECAT_TRANSFER_BUSY;
+        }
+        if (t->core->state == ECAT_FOE_STATE_SUCCESS || t->core->state == ECAT_FOE_STATE_ERROR) {
+            ecat_foe_core_on_abort(t->core);
+        }
+    }
+
     uint64_t acquired_token = 0;
     ecat_upgrade_session_result_t session_res =
-        ecat_upgrade_session_acquire(&t->session, owner, &acquired_token);
+        ecat_upgrade_session_acquire(get_transfer_session(t), owner, &acquired_token);
 
     if (session_res == ECAT_UPGRADE_SESSION_BUSY) {
         return ECAT_TRANSFER_BUSY;
@@ -52,7 +93,7 @@ ecat_transfer_result_t ecat_transfer_begin(
         ecat_target_registry_find_by_id(t->registry, request->target_id);
     if (target == NULL || !target->enabled) {
         t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
-        (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+        release_session(t, owner, acquired_token);
         return ECAT_TRANSFER_FAILED;
     }
 
@@ -63,7 +104,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     if (!ecat_target_registry_check_permission(
             t->registry, request->transport_id, request->target_id, required_perm)) {
         t->last_error = ECAT_TRANSFER_ERR_PERMISSION_DENIED;
-        (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+        release_session(t, owner, acquired_token);
         return ECAT_TRANSFER_DENIED;
     }
 
@@ -74,14 +115,14 @@ ecat_transfer_result_t ecat_transfer_begin(
             if (request->expected_size < 148U ||
                 request->expected_size > (target->max_size + 148U + 7U)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
         }
     } else {
         if (request->expected_size > target->max_size) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-            (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+            release_session(t, owner, acquired_token);
             return ECAT_TRANSFER_FAILED;
         }
     }
@@ -101,7 +142,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     if (request->direction == ECAT_TRANSFER_DIR_EXPORT) {
         if (target->driver.io.read == NULL) {
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
-            (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+            release_session(t, owner, acquired_token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -129,7 +170,7 @@ ecat_transfer_result_t ecat_transfer_begin(
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
             t->active = false;
             t->driver_initialized = false;
-            (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+            release_session(t, owner, acquired_token);
             return ECAT_TRANSFER_FAILED;
         }
         t->driver_initialized = true;
@@ -140,7 +181,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 t->driver_initialized = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
 
@@ -148,7 +189,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
                 t->active = false;
                 t->driver_initialized = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
 
@@ -157,7 +198,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
                 t->active = false;
                 t->driver_initialized = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
 
@@ -169,7 +210,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
                     t->active = false;
                     t->driver_initialized = false;
-                    (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                    release_session(t, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
             } else if (target->driver.io.write != NULL &&
@@ -178,7 +219,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
                 t->active = false;
                 t->driver_initialized = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
 
@@ -204,7 +245,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 t->driver_initialized = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
             t->core_started = true;
@@ -217,7 +258,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
                     t->active = false;
                     t->driver_initialized = false;
-                    (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                    release_session(t, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
             }
@@ -231,7 +272,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                     }
                     t->active = false;
                     t->driver_initialized = false;
-                    (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                    release_session(t, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
             }
@@ -287,7 +328,7 @@ ecat_transfer_result_t ecat_transfer_read(
         }
         t->driver_initialized = false;
         t->active = false;
-        (void)ecat_upgrade_session_release(&t->session, owner, token);
+        release_session(t, owner, token);
         return ECAT_TRANSFER_FAILED;
     }
 
@@ -338,7 +379,7 @@ ecat_transfer_result_t ecat_transfer_write(
                 ecat_foe_core_on_abort(t->core);
                 t->core_started = false;
                 t->active = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
         }
@@ -351,7 +392,7 @@ ecat_transfer_result_t ecat_transfer_write(
             }
             t->core_started = false;
             t->active = false;
-            (void)ecat_upgrade_session_release(&t->session, owner, token);
+            release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -363,7 +404,7 @@ ecat_transfer_result_t ecat_transfer_write(
                 ecat_foe_core_on_abort(t->core);
                 t->core_started = false;
                 t->active = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
         }
@@ -380,7 +421,7 @@ ecat_transfer_result_t ecat_transfer_write(
             }
             t->driver_initialized = false;
             t->active = false;
-            (void)ecat_upgrade_session_release(&t->session, owner, token);
+            release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -398,7 +439,7 @@ ecat_transfer_result_t ecat_transfer_write(
                     }
                     t->driver_initialized = false;
                     t->active = false;
-                    (void)ecat_upgrade_session_release(&t->session, owner, token);
+                    release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
                 }
                 t->erased_watermark = actual_erased;
@@ -413,7 +454,7 @@ ecat_transfer_result_t ecat_transfer_write(
             }
             t->driver_initialized = false;
             t->active = false;
-            (void)ecat_upgrade_session_release(&t->session, owner, token);
+            release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -426,7 +467,7 @@ ecat_transfer_result_t ecat_transfer_write(
             }
             t->driver_initialized = false;
             t->active = false;
-            (void)ecat_upgrade_session_release(&t->session, owner, token);
+            release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -462,7 +503,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 t->core_started = false;
                 t->driver_initialized = false;
                 t->active = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
             if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
@@ -470,7 +511,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 t->core_started = false;
                 t->driver_initialized = false;
                 t->active = false;
-                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
         } else {
@@ -484,7 +525,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     t->core_started = false;
                     t->driver_initialized = false;
                     t->active = false;
-                    (void)ecat_upgrade_session_release(&t->session, owner, token);
+                    release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
                 }
             }
@@ -494,7 +535,7 @@ ecat_transfer_result_t ecat_transfer_finish(
     t->core_started = false;
     t->driver_initialized = false;
     t->active = false;
-    (void)ecat_upgrade_session_release(&t->session, owner, token);
+    release_session(t, owner, token);
     return ECAT_TRANSFER_COMPLETE;
 }
 
@@ -520,7 +561,7 @@ ecat_transfer_result_t ecat_transfer_cancel(
     t->core_started = false;
     t->driver_initialized = false;
     t->active = false;
-    (void)ecat_upgrade_session_release(&t->session, owner, token);
+    release_session(t, owner, token);
     return ECAT_TRANSFER_COMPLETE;
 }
 

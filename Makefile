@@ -212,7 +212,7 @@ test-target-registry:
 test-transfer-bidirectional:
 	@TMP_XFER_DIR=$$(mktemp -d /tmp/ecat_transfer_XXXXXX) && \
 	trap 'rm -rf "$$TMP_XFER_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_XFER_DIR/test_transfer_bidirectional" src/ecat_foe_core.c src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transfer_bidirectional.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_XFER_DIR/test_transfer_bidirectional" src/ecat_foe_core.c src/ecat_upgrade.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transfer_bidirectional.c && \
 	"$$TMP_XFER_DIR/test_transfer_bidirectional"
 
 test-transport-endpoint:

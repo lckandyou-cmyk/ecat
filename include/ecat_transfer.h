@@ -73,6 +73,7 @@ typedef struct {
     ecat_target_registry_t *registry;   /* 目标注册表指针 */
     ecat_foe_core_t *core;              /* 可选: 底层 FoE 固件升级机 (若不升级固件可为 NULL) */
     ecat_upgrade_session_t session;     /* 互斥会话与租约令牌 */
+    ecat_upgrade_session_t *session_ptr; /* 共享仲裁器会话指针 */
 
     /* 当前激活传输状态 */
     const ecat_target_desc_t *target;   /* 当前目标描述符 */

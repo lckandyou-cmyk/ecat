@@ -213,6 +213,9 @@ typedef struct {
     bool                signature_active;      /**< 验签会话已 begin，尚未 finish/abort */
     void              (*async_abort_hook)(void *ctx); /**< 异步会话清理钩子，由异步核心注册 */
     void               *async_abort_ctx;
+    void               *shared_session;       /**< 跨管理器共享会话仲裁器 (指向 ecat_upgrade_session_t) */
+    void               *registry;             /**< 关联目标注册表 (用于 ACL 统一拦截) */
+    bool              (*acl_check)(const void *registry, uint16_t transport_id, uint16_t target_id, uint8_t required_perm); /**< 统一 ACL 权限校验钩子 */
 
     /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
     char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];

@@ -1,12 +1,22 @@
 #include "ecat_upgrade.h"
 #include <string.h>
 
+static ecat_upgrade_session_t *get_session(ecat_upgrade_t *u)
+{
+    return (u != NULL && u->session_ptr != NULL) ? u->session_ptr : &u->session;
+}
+
 int ecat_upgrade_init(ecat_upgrade_t *u, ecat_foe_core_t *core)
 {
     if (u == NULL || core == NULL || !core->is_configured ||
         core->state != ECAT_FOE_STATE_IDLE || core->session_active) return -1;
     memset(u, 0, sizeof(*u));
     u->core = core;
+    u->transport_id = 1U; /* 默认 ECAT_TRANSPORT_ID_FOE */
+    if (core->shared_session == NULL) {
+        core->shared_session = &u->session;
+    }
+    u->session_ptr = (ecat_upgrade_session_t *)core->shared_session;
     return 0;
 }
 
@@ -24,7 +34,7 @@ int ecat_upgrade_init_async(ecat_upgrade_t *u, ecat_foe_core_t *core,
 
 static bool owns(ecat_upgrade_t *u, const void *owner, uint64_t token)
 {
-    return u != NULL && u->core != NULL && ecat_upgrade_session_owns(&u->session, owner, token);
+    return u != NULL && u->core != NULL && ecat_upgrade_session_owns(get_session(u), owner, token);
 }
 
 static ecat_upgrade_result_t fail(ecat_upgrade_t *u, const void *owner, uint64_t token)
@@ -37,7 +47,7 @@ static ecat_upgrade_result_t fail(ecat_upgrade_t *u, const void *owner, uint64_t
     /* Preserve terminal diagnostics for protocol post-hooks and status readers. */
     u->core->state = ECAT_FOE_STATE_ERROR;
     u->core->last_error = u->last_error;
-    (void)ecat_upgrade_session_release(&u->session, owner, token);
+    (void)ecat_upgrade_session_release(get_session(u), owner, token);
     return ECAT_UPGRADE_FAILED;
 }
 
@@ -46,22 +56,45 @@ ecat_upgrade_result_t ecat_upgrade_begin(ecat_upgrade_t *u, const void *owner,
 {
     if (u == NULL || u->core == NULL || request == NULL || token == NULL || owner == NULL)
         return ECAT_UPGRADE_INVALID;
+
+    /* 检查 core 是否已被其它入口占用 */
+    if (u->core != NULL) {
+        if (u->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+            u->core->state == ECAT_FOE_STATE_DATA ||
+            u->core->session_active) {
+            return ECAT_UPGRADE_BUSY;
+        }
+        if (u->core->state == ECAT_FOE_STATE_SUCCESS || u->core->state == ECAT_FOE_STATE_ERROR) {
+            ecat_foe_core_on_abort(u->core);
+        }
+    }
+
+    /* ACL 白名单核验: 防止旧升级入口绕过注册表权限管控 */
+    if (u->core->registry != NULL && u->core->acl_check != NULL) {
+        uint16_t tid = (u->transport_id != 0U) ? u->transport_id : 1U; /* 1U = ECAT_TRANSPORT_ID_FOE */
+        if (!u->core->acl_check(u->core->registry, tid, request->target_id, 0x02U /* ECAT_PERM_WRITE */)) {
+            u->last_error = ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
+            return ECAT_UPGRADE_FAILED;
+        }
+    }
+
     uint64_t acquired = 0;
-    ecat_upgrade_session_result_t result = ecat_upgrade_session_acquire(&u->session, owner, &acquired);
+    ecat_upgrade_session_t *sess = get_session(u);
+    ecat_upgrade_session_result_t result = ecat_upgrade_session_acquire(sess, owner, &acquired);
     if (result == ECAT_UPGRADE_SESSION_BUSY) return ECAT_UPGRADE_BUSY;
     if (result != ECAT_UPGRADE_SESSION_OK) return ECAT_UPGRADE_FAILED;
     if (request->target_id < 1U || request->target_id > ECAT_FOE_TARGET_COUNT ||
         !u->core->cfg.targets[request->target_id - 1U].enabled ||
         (u->core->cfg.targets[request->target_id - 1U].asynchronous && u->async_ops == NULL)) {
         u->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
-        (void)ecat_upgrade_session_release(&u->session, owner, acquired);
+        (void)ecat_upgrade_session_release(sess, owner, acquired);
         return ECAT_UPGRADE_FAILED;
     }
     if (u->core->state == ECAT_FOE_STATE_SUCCESS || u->core->state == ECAT_FOE_STATE_ERROR)
         ecat_foe_core_on_abort(u->core);
     u->last_error = ecat_foe_core_begin_request(u->core, request);
     if (u->last_error != ECAT_FOE_CORE_OK) {
-        (void)ecat_upgrade_session_release(&u->session, owner, acquired);
+        (void)ecat_upgrade_session_release(sess, owner, acquired);
         return ECAT_UPGRADE_FAILED;
     }
     u->asynchronous = u->core->cfg.targets[request->target_id - 1U].asynchronous;
@@ -82,7 +115,7 @@ static ecat_upgrade_result_t async_result(ecat_upgrade_t *u, const void *owner,
         if (u->core->state != ECAT_FOE_STATE_SUCCESS) return fail(u, owner, token);
         u->ending = false;
         u->last_error = ECAT_FOE_CORE_OK;
-        (void)ecat_upgrade_session_release(&u->session, owner, token);
+        (void)ecat_upgrade_session_release(get_session(u), owner, token);
     }
     return ECAT_UPGRADE_COMPLETE;
 }
@@ -109,7 +142,7 @@ ecat_upgrade_result_t ecat_upgrade_finish(ecat_upgrade_t *u, const void *owner, 
     }
     if (ecat_foe_core_on_end(u->core) != 0) return fail(u, owner, token);
     u->last_error = ECAT_FOE_CORE_OK;
-    (void)ecat_upgrade_session_release(&u->session, owner, token);
+    (void)ecat_upgrade_session_release(get_session(u), owner, token);
     return ECAT_UPGRADE_COMPLETE;
 }
 
@@ -126,6 +159,6 @@ ecat_upgrade_result_t ecat_upgrade_cancel(ecat_upgrade_t *u, const void *owner, 
     ecat_foe_core_on_abort(u->core);
     u->pending = false;
     u->ending = false;
-    (void)ecat_upgrade_session_release(&u->session, owner, token);
+    (void)ecat_upgrade_session_release(get_session(u), owner, token);
     return ECAT_UPGRADE_COMPLETE;
 }

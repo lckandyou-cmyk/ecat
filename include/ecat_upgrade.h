@@ -22,6 +22,8 @@ typedef enum {
 typedef struct {
     ecat_foe_core_t *core;
     ecat_upgrade_session_t session;
+    ecat_upgrade_session_t *session_ptr; /**< 共享仲裁器会话指针 */
+    uint16_t transport_id;              /**< 通道标识符 (默认 1 为 FoE) */
     ecat_foe_core_err_t last_error;
     const ecat_upgrade_async_ops_t *async_ops;
     void *async_ctx;

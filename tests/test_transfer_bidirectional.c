@@ -4,6 +4,9 @@
  */
 
 #include "ecat_transfer.h"
+#include "ecat_upgrade.h"
+#include "ecat_foe_transport.h"
+#include "ecat_upgrade_file.h"
 #include "ecat_foe_efw.h"
 #include <stdio.h>
 #include <assert.h>
@@ -620,6 +623,94 @@ int main(void)
     assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_token, s_valid_16_efw, sizeof(s_valid_16_efw)) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.written_offset == 16U);
+
+    /* 验证 Issue 4: 统一旧升级入口 (ecat_upgrade_t) 与新传输管理器的会话仲裁与 ACL */
+    printf("--- 测试 Issue 4: 统一旧升级入口与新管理器的会话仲裁与 ACL ---\n");
+    ecat_foe_core_on_abort(&core);
+    ecat_upgrade_t old_mgr;
+    assert(ecat_upgrade_init(&old_mgr, &core) == 0);
+    ecat_upgrade_request_t old_req = {
+        .target_id = 1U,
+        .fw_version = 0x01020304U
+    };
+    uint64_t old_token = 0;
+    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_COMPLETE);
+    assert(old_token != 0);
+
+    /* 4.1 旧入口活动期间，新管理器对共享 core 发起请求必须返回 BUSY */
+    uint64_t new_token = 0;
+    ecat_transfer_request_t new_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = sizeof(s_valid_16_efw),
+        .fw_version = 0x01020304U
+    };
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
+    /* 新管理器无法取消旧入口会话 */
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, old_token) == ECAT_TRANSFER_STALE);
+    assert(ecat_upgrade_session_owns(old_mgr.session_ptr, &channel_can, old_token));
+
+    /* 释放旧入口会话 */
+    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
+
+    /* 4.2 反向仲裁: 新管理器活动期间，旧入口发起请求必须返回 BUSY */
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
+    assert(new_token != 0);
+    uint64_t dummy_old_token = 0;
+    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &dummy_old_token) == ECAT_UPGRADE_BUSY);
+    /* 旧入口无法取消新管理器持有的会话 */
+    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, new_token) == ECAT_UPGRADE_STALE);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
+
+    /* 4.3 真实 FoE 传输适配器 (ecat_foe_transport_t) 仲裁竞争测试 */
+    ecat_foe_transport_t foe_tr;
+    assert(ecat_foe_transport_init(&foe_tr, &old_mgr) == 0);
+    const char *wrq_name = "TEST_PROJ_MCU_V1.2.3.4.efw";
+    size_t wrq_name_len = strlen(wrq_name);
+
+    /* 新管理器占有时，FoE 适配器 begin 返回 wire error (ECAT_FOE_ERRCODE_NOTDEFINED) */
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == ECAT_FOE_ERRCODE_NOTDEFINED);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
+
+    /* FoE 适配器激活时，新管理器 begin 返回 BUSY */
+    assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == 0);
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
+    ecat_foe_transport_abort(&foe_tr);
+
+    /* 4.4 真实文件传输适配器 (ecat_upgrade_file_t) 仲裁竞争测试 */
+    uint8_t file_buf[128];
+    ecat_upgrade_file_t file_tr;
+    assert(ecat_upgrade_file_init(&file_tr, &old_mgr, file_buf, sizeof(file_buf)) == 0);
+    FILE *dummy_file = tmpfile();
+    assert(dummy_file != NULL);
+
+    /* 新管理器占有时，File 适配器 begin 返回 BUSY */
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_BUSY);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
+
+    /* File 适配器激活时，新管理器 begin 返回 BUSY */
+    assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
+    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    fclose(dummy_file);
+
+    /* 4.5 统一 ACL 管控: 旧入口及适配器不能绕过注册表权限管控 */
+    size_t saved_rule_cnt = reg.acl_rule_count;
+    reg.acl_rule_count = 0;
+    ecat_target_registry_set_enforce_acl(&reg, true);
+    /* 此时未向 FoE (transport_id=1) 配置 Target 1 的写权限，旧入口必须被拦截 */
+    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_FAILED);
+    assert(old_mgr.last_error == ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED);
+    assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == ECAT_FOE_ERRCODE_NOTDEFINED);
+
+    /* 恢复 ACL 白名单授权 FoE (ID=1) 对 Target 1 写入 */
+    reg.acl_rule_count = saved_rule_cnt;
+    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
+    ecat_target_registry_set_enforce_acl(&reg, false);
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;

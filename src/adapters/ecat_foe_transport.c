@@ -11,8 +11,9 @@ int ecat_foe_transport_init(ecat_foe_transport_t *t, ecat_upgrade_t *upgrade)
 
 bool ecat_foe_transport_owns(const ecat_foe_transport_t *t)
 {
-    return t != NULL && t->upgrade != NULL &&
-        ecat_upgrade_session_owns(&t->upgrade->session, t, t->token);
+    if (t == NULL || t->upgrade == NULL) return false;
+    ecat_upgrade_session_t *sess = t->upgrade->session_ptr ? t->upgrade->session_ptr : &t->upgrade->session;
+    return ecat_upgrade_session_owns(sess, t, t->token);
 }
 
 void ecat_foe_transport_abort(void *ctx)
@@ -29,7 +30,8 @@ void ecat_foe_transport_abort(void *ctx)
 int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t length)
 {
     if (t == NULL || t->upgrade == NULL || name == NULL) return ECAT_FOE_ERRCODE_ILLEGAL;
-    if (t->upgrade->session.owner != NULL && !ecat_foe_transport_owns(t))
+    ecat_upgrade_session_t *sess = t->upgrade->session_ptr ? t->upgrade->session_ptr : &t->upgrade->session;
+    if (sess->owner != NULL && !ecat_foe_transport_owns(t))
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     ecat_foe_transport_abort(t);
     t->committed = false;
