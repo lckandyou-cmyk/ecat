@@ -109,3 +109,22 @@ ecat_transport_endpoint_finish_import(&uart_ep);
 ## 4. 嵌入式约束保证
 - **零动态分配 (Zero malloc)**：所有结构体大小编译期确定，可在静态数据段 (`.bss`) 或调用方栈上分配。
 - **单一互斥租约 (Mutex Lease)**：多通道共享底层 Flash 驱动时，通过会话令牌强行保证操作互斥与排他性，杜绝多通道并发操作硬件造成的总线踩踏。
+
+---
+
+## 5. 当前完成度与实现边界说明 (Implementation Status & Boundaries)
+
+为了保证工程交付的严谨性与对标工业级嵌入式产品的准确性，特此对当前框架的实现边界作以下明确区分：
+
+### 5.1 硬件适配器完成度说明 (Hardware Adapters)
+- **已实现/已接入适配器**：
+  - `src/adapters/ecat_foe_transport.c`：面向 EtherCAT 从站协议栈（Beckhoff SSC / SOES）FoE 状态机的适配桥接层。
+  - `src/adapters/ecat_upgrade_file.c`：面向宿主机标准 I/O 流 (`FILE *`) 的测试与集成参考适配器。
+- **未在此仓库内实现的内容（标为未实现）**：
+  - 具体的物理外设硬件驱动（如真实的 MCU 片上 UART 硬件中断/DMA 驱动、物理 CAN 现场总线控制器驱动、SPI 外设驱动等）**未内置在当前仓库中**。
+  - 架构设计中的 UART、CAN 等通道 ID 属于通道编号规范，单元测试中的 `ep_uart`、`ep_can` 属于通用传输端点接口 (`ecat_transport_endpoint_t`) 的原型验证，实际硬件工程集成时须由集成方根据目标板级芯片 SDK 实现对应外设中断收发回调。
+
+### 5.2 异步传输标志完成度说明 (Asynchronous Flags)
+- **未实现的内容（标为未实现/规划中）**：
+  - 目标描述符 `ecat_target_desc_t` 中的 `asynchronous` 标志目前在双向传输管理器 (`ecat_transfer_t`) 中**尚未实现**。
+  - 当前 `ecat_transfer_t` 的 `ecat_transfer_begin`、`ecat_transfer_write`、`ecat_transfer_read`、`ecat_transfer_finish` 等 API 严格采用同步调用模型；对于非阻塞分步轮询与异步完成回调，双向管理器尚未提供集成。当前对异步目标块的处理保留给底层的 `ecat_foe_core_async` 核心，双向传输层暂不执行异步调度。
