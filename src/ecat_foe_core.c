@@ -562,6 +562,8 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
     }
     if (data == NULL) {
         core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
+        core_abort_driver(core);
+        core->state = ECAT_FOE_STATE_ERROR;
         return -1;
     }
 

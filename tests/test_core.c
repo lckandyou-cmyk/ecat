@@ -403,6 +403,29 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
 }
 
+static void test_null_data_aborts_driver_and_verifier(void)
+{
+    static mock_driver_t mcu;
+    mock_signature_verifier_t verifier = {0};
+    ecat_foe_core_t core;
+    uint8_t payload[16] = {1};
+    uint8_t efw[256];
+    mock_driver_init(&mcu);
+    setup_signature_core(&core, &mcu, &verifier);
+    build_signed_test_efw(efw, payload, sizeof(payload));
+    TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "WRQ accepted");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "header accepted");
+    TEST_ASSERT(core.session_active && core.signature_active, "both sessions active");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, NULL, 1), -1, "invalid data rejected");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "driver aborted");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "verifier aborted");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "error state");
+    ecat_foe_core_on_abort(&core);
+    ecat_foe_core_deinit(&core);
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "driver aborted once");
+    TEST_ASSERT_EQ_INT(verifier.abort_calls, 1, "verifier aborted once");
+}
+
 static void test_soes_state_transition_aborts_active_session(void)
 {
     static mock_driver_t mcu;
@@ -3064,6 +3087,7 @@ int main(void)
     RUN_TEST(test_header_rejections_driver_zero_calls);
     RUN_TEST(test_filename_rejection_driver_zero_calls);
     RUN_TEST(test_soes_state_transition_aborts_active_session);
+    RUN_TEST(test_null_data_aborts_driver_and_verifier);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);
