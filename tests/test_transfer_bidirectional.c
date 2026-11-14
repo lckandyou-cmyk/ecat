@@ -131,8 +131,12 @@ static int param_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 static int param_finalize(void *ctx) { (void)ctx; g_finalize_called = true; return 0; }
 static void param_abort(void *ctx) { (void)ctx; g_abort_called = true; }
 
+static int param_read_open(void *ctx) { (void)ctx; g_init_called = true; return 0; }
+static void param_read_close(void *ctx) { (void)ctx; g_read_close_called = true; }
+
 /* Log Mock 驱动 */
 static int log_init(void *ctx) { (void)ctx; g_init_called = true; return 0; }
+static void log_close(void *ctx) { (void)ctx; g_read_close_called = true; }
 static int log_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 {
     (void)ctx;
@@ -160,6 +164,8 @@ int main(void)
     param_desc.permissions = ECAT_PERM_RW;
     param_desc.max_size = MOCK_PARAM_SIZE;
     param_desc.enabled = true;
+    param_desc.driver.read_open = param_read_open;
+    param_desc.driver.read_close = param_read_close;
     param_desc.driver.io.init = param_init;
     param_desc.driver.io.invalidate = param_invalidate;
     param_desc.driver.io.erase_to = param_erase_to;
@@ -178,6 +184,8 @@ int main(void)
     log_desc.permissions = ECAT_PERM_READ;
     log_desc.max_size = 64U * 1024U;
     log_desc.enabled = true;
+    log_desc.driver.read_open = log_init;
+    log_desc.driver.read_close = log_close;
     log_desc.driver.io.init = log_init;
     log_desc.driver.io.read = log_read;
     log_desc.driver.io.finalize = log_finalize;
@@ -323,10 +331,26 @@ int main(void)
     assert(ecat_transfer_cancel(&manager, &channel_uart, dummy_token) == ECAT_TRANSFER_COMPLETE);
 
     /* ---------------------------------------------------------------------- */
-    /* 4. 取消与异常清理 (abort 保证)                                         */
+    /* 4. 取消与异常清理: IMPORT 保证 abort，EXPORT 保证 read_close 且不 abort */
     /* ---------------------------------------------------------------------- */
     reset_mock_flags();
+    /* 4.1 导出取消: 仅调用 read_close，绝不调用 abort 使原数据失效 */
     assert(ecat_transfer_begin(&manager, &channel_uart, &uart_read_param, &dummy_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_init_called);
+    assert(!g_abort_called);
+    assert(ecat_transfer_cancel(&manager, &channel_uart, dummy_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_close_called);
+    assert(!g_abort_called);
+
+    /* 4.2 导入取消: 调用底层 write driver 的 abort 保证未完结写入回滚 */
+    reset_mock_flags();
+    ecat_transfer_request_t uart_write_param = {
+        .transport_id = 1U,
+        .target_id = 2U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 64
+    };
+    assert(ecat_transfer_begin(&manager, &channel_uart, &uart_write_param, &dummy_token) == ECAT_TRANSFER_COMPLETE);
     assert(g_init_called);
     assert(!g_abort_called);
     assert(ecat_transfer_cancel(&manager, &channel_uart, dummy_token) == ECAT_TRANSFER_COMPLETE);
@@ -382,24 +406,10 @@ int main(void)
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, fw_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.state == ECAT_FOE_STATE_IDLE || core.state == ECAT_FOE_STATE_ERROR);
 
-    /* 验证 Issue 2: 只读 EXPORT 生命周期与清理契约 */
+    /* 验证 Issue 2 & R2-01: 只读 EXPORT 生命周期与清理契约 */
     printf("--- 测试 EXPORT 只读生命周期与驱动清理 ---\n");
-    reset_mock_flags();
-    ecat_transfer_request_t exp_req = {
-        .transport_id = 1U,
-        .target_id = 2U, /* params (ECAT_TARGET_TYPE_DATA) */
-        .direction = ECAT_TRANSFER_DIR_EXPORT,
-        .expected_size = 16U,
-        .fw_version = 0U
-    };
-    uint64_t exp_token = 0;
-    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
-    assert(g_init_called == true);
-    /* 导出完成，严禁调用 io.finalize (不可用写提交激活镜像) */
-    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
-    assert(g_finalize_called == false);
 
-    /* 2.1 固件区块导出取消: 必须清理实际打开的 registry 驱动，且不得误触发 core_abort */
+    /* 2.1 旧驱动 (仅含 io.init，无 read_close): 缺少安全只读关闭，必须在 begin 时拒绝，禁止静默泄漏或调用写abort */
     ecat_target_desc_t fw_export_desc;
     memset(&fw_export_desc, 0, sizeof(fw_export_desc));
     fw_export_desc.target_id = 10U;
@@ -418,19 +428,113 @@ int main(void)
     assert(ecat_target_registry_add_acl(&reg, 0U, 10U, ECAT_PERM_RW) == 0);
 
     reset_mock_flags();
-    exp_req.target_id = 10U;
-    exp_req.direction = ECAT_TRANSFER_DIR_EXPORT;
-    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
-    assert(g_init_called == true);
-    assert(g_driver_locked == 1);
-    assert(core.state == ECAT_FOE_STATE_IDLE);
-    /* 取消导出: 必须清理注册表驱动 (locked 归零并调用 abort)，且 core 保持 IDLE */
-    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
-    assert(g_abort_called == true);
+    g_valid_state = 1;
+    g_driver_locked = 0;
+    ecat_transfer_request_t exp_req = {
+        .transport_id = 1U,
+        .target_id = 10U,
+        .direction = ECAT_TRANSFER_DIR_EXPORT,
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t exp_token = 0;
+    /* 旧契约驱动缺少安全只读关闭能力，begin 必须拒绝 */
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_DRIVER_INIT);
+    assert(g_init_called == false);
     assert(g_driver_locked == 0);
+    assert(g_valid_state == 1);
+    assert(g_abort_called == false);
     assert(core.state == ECAT_FOE_STATE_IDLE);
 
-    /* 2.2 专用只读生命周期 (read_open / read_close): 不触碰写提交与写失效 */
+    /* 2.2 不配对只读驱动: 仅提供 read_open 或仅提供 read_close 必须在 begin 时拒绝 */
+    ecat_target_desc_t unpair_open_desc;
+    memset(&unpair_open_desc, 0, sizeof(unpair_open_desc));
+    unpair_open_desc.target_id = 12U;
+    strncpy(unpair_open_desc.name, "ro_unpair_open", sizeof(unpair_open_desc.name));
+    unpair_open_desc.type = ECAT_TARGET_TYPE_DATA;
+    unpair_open_desc.permissions = ECAT_PERM_READ;
+    unpair_open_desc.max_size = 1024U;
+    unpair_open_desc.enabled = true;
+    unpair_open_desc.driver.read_open = lifecycle_read_open;
+    unpair_open_desc.driver.read_close = NULL;
+    unpair_open_desc.driver.io.read = lifecycle_read;
+    assert(ecat_target_registry_add(&reg, &unpair_open_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 0U, 12U, ECAT_PERM_READ) == 0);
+
+    reset_mock_flags();
+    exp_req.target_id = 12U;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_FAILED);
+    assert(manager.last_error == ECAT_TRANSFER_ERR_DRIVER_INIT);
+    assert(g_read_open_called == false);
+
+    ecat_target_desc_t unpair_close_desc;
+    memset(&unpair_close_desc, 0, sizeof(unpair_close_desc));
+    unpair_close_desc.target_id = 13U;
+    strncpy(unpair_close_desc.name, "ro_unpair_close", sizeof(unpair_close_desc.name));
+    unpair_close_desc.type = ECAT_TARGET_TYPE_DATA;
+    unpair_close_desc.permissions = ECAT_PERM_READ;
+    unpair_close_desc.max_size = 1024U;
+    unpair_close_desc.enabled = true;
+    unpair_close_desc.driver.read_open = NULL;
+    unpair_close_desc.driver.read_close = lifecycle_read_close;
+    unpair_close_desc.driver.io.read = lifecycle_read;
+    assert(ecat_target_registry_add(&reg, &unpair_close_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 0U, 13U, ECAT_PERM_READ) == 0);
+
+    reset_mock_flags();
+    exp_req.target_id = 13U;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_FAILED);
+    assert(manager.last_error == ECAT_TRANSFER_ERR_DRIVER_INIT);
+
+    /* 2.3 纯 read 驱动 (无生命周期钩子): 允许导出，finish/cancel/读失败绝不触发 abort 或泄漏锁 */
+    ecat_target_desc_t pure_read_desc;
+    memset(&pure_read_desc, 0, sizeof(pure_read_desc));
+    pure_read_desc.target_id = 14U;
+    strncpy(pure_read_desc.name, "pure_read", sizeof(pure_read_desc.name));
+    pure_read_desc.type = ECAT_TARGET_TYPE_DATA;
+    pure_read_desc.permissions = ECAT_PERM_READ;
+    pure_read_desc.max_size = 1024U;
+    pure_read_desc.enabled = true;
+    pure_read_desc.driver.io.read = lifecycle_read;
+    assert(ecat_target_registry_add(&reg, &pure_read_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 0U, 14U, ECAT_PERM_READ) == 0);
+
+    /* 纯 read: 正常 finish */
+    reset_mock_flags();
+    g_valid_state = 1;
+    exp_req.target_id = 14U;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(manager.driver_initialized == false);
+    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_valid_state == 1);
+    assert(g_driver_locked == 0);
+    assert(g_finalize_called == false);
+    assert(g_abort_called == false);
+
+    /* 纯 read: cancel 取消 */
+    reset_mock_flags();
+    g_valid_state = 1;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_valid_state == 1);
+    assert(g_driver_locked == 0);
+    assert(g_abort_called == false);
+
+    /* 纯 read: read 失败 */
+    reset_mock_flags();
+    g_valid_state = 1;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    g_fail_read = true;
+    uint8_t pure_dummy[16];
+    size_t pure_act = 0;
+    assert(ecat_transfer_read(&manager, &channel_uart, exp_token, pure_dummy, sizeof(pure_dummy), &pure_act) == ECAT_TRANSFER_FAILED);
+    assert(g_valid_state == 1);
+    assert(g_driver_locked == 0);
+    assert(g_abort_called == false);
+    g_fail_read = false;
+
+    /* 2.4 专用只读生命周期 (read_open / read_close): 验证配对调用与保护有效标记 */
     ecat_target_desc_t ro_desc;
     memset(&ro_desc, 0, sizeof(ro_desc));
     ro_desc.target_id = 11U;

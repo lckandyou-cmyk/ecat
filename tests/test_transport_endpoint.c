@@ -20,6 +20,8 @@ int port_get_version_floor(uint16_t id, uint32_t *v)
 static uint8_t s_flash[TEST_FLASH_SIZE];
 
 static int mock_init(void *ctx) { (void)ctx; return 0; }
+static int mock_read_open(void *ctx) { (void)ctx; return 0; }
+static void mock_read_close(void *ctx) { (void)ctx; }
 static int mock_invalidate(void *ctx) { (void)ctx; return 0; }
 static int mock_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx)
 {
@@ -102,6 +104,8 @@ int main(void)
     desc.permissions = ECAT_PERM_RW;
     desc.max_size = TEST_FLASH_SIZE;
     desc.enabled = true;
+    desc.driver.read_open = mock_read_open;
+    desc.driver.read_close = mock_read_close;
     desc.driver.io.init = mock_init;
     desc.driver.io.invalidate = mock_invalidate;
     desc.driver.io.erase_to = mock_erase_to;
@@ -244,8 +248,9 @@ int main(void)
     assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, &rd_sz) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_read_chunk(&ep_uart, NULL, 16, &actual_rd) == ECAT_TRANSFER_INVALID);
     uint8_t rd_buf[16];
-    assert(ecat_transport_endpoint_read_chunk(&ep_uart, rd_buf, sizeof(rd_buf), &actual_rd) == ECAT_TRANSFER_CONTINUE ||
-           ecat_transport_endpoint_read_chunk(&ep_uart, rd_buf, sizeof(rd_buf), &actual_rd) == ECAT_TRANSFER_COMPLETE);
+    ecat_transfer_result_t retry_rd = ecat_transport_endpoint_read_chunk(
+        &ep_uart, rd_buf, sizeof(rd_buf), &actual_rd);
+    assert(retry_rd == ECAT_TRANSFER_CONTINUE || retry_rd == ECAT_TRANSFER_COMPLETE);
     ecat_transport_endpoint_abort(&ep_uart);
 
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");

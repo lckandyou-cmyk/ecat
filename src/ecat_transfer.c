@@ -165,22 +165,47 @@ ecat_transfer_result_t ecat_transfer_begin(
             t->total_size = target->max_size;
         }
 
-        /* 驱动只读打开或 init 初始化硬件外设 */
-        int init_rc = 0;
-        if (target->driver.read_open != NULL) {
-            init_rc = target->driver.read_open(target->user_ctx);
-        } else if (target->driver.io.init != NULL) {
-            init_rc = target->driver.io.init(target->user_ctx);
-        }
+        /* 只读生命周期安全校验:
+         * 1. 允许完全无生命周期的纯 read 驱动 (read_open == NULL && read_close == NULL && io.init == NULL)
+         * 2. 安全配对的只读驱动 (read_open != NULL && read_close != NULL)
+         * 3. 拒绝任何未安全配对或缺少只读关闭的驱动:
+         *    - read_open 与 read_close 仅提供其一 (不配对)
+         *    - 需要打开资源 (io.init != NULL) 但缺少 safe read_close (防止资源泄漏或误调 abort 损坏镜像)
+         */
+        bool has_read_open = (target->driver.read_open != NULL);
+        bool has_read_close = (target->driver.read_close != NULL);
+        bool has_io_init = (target->driver.io.init != NULL);
 
-        if (init_rc != 0) {
+        if (has_read_open != has_read_close) {
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
             t->active = false;
             t->driver_initialized = false;
             release_session(t, owner, acquired_token);
             return ECAT_TRANSFER_FAILED;
         }
-        t->driver_initialized = true;
+
+        if (has_io_init && !has_read_close) {
+            t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+            t->active = false;
+            t->driver_initialized = false;
+            release_session(t, owner, acquired_token);
+            return ECAT_TRANSFER_FAILED;
+        }
+
+        if (has_read_open && has_read_close) {
+            int init_rc = target->driver.read_open(target->user_ctx);
+            if (init_rc != 0) {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+                t->active = false;
+                t->driver_initialized = false;
+                release_session(t, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+            t->driver_initialized = true;
+        } else {
+            /* 纯 read 驱动，无生命周期开销 */
+            t->driver_initialized = false;
+        }
     } else {
         /* IMPORT 模式 */
         if (target->type == ECAT_TARGET_TYPE_FIRMWARE) {
@@ -327,9 +352,11 @@ ecat_transfer_result_t ecat_transfer_read(
         t->current_offset, out_buf, to_read, t->target->user_ctx);
     if (rc != 0) {
         t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
-        if (t->driver_initialized) {
-            if (t->target->driver.read_close != NULL) {
-                t->target->driver.read_close(t->target->user_ctx);
+        if (t->driver_initialized && t->target != NULL) {
+            if (t->direction == ECAT_TRANSFER_DIR_EXPORT) {
+                if (t->target->driver.read_close != NULL) {
+                    t->target->driver.read_close(t->target->user_ctx);
+                }
             } else if (t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
             }

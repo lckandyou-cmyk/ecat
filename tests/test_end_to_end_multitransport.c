@@ -69,6 +69,8 @@ static void mcu_abort(void *ctx) { (void)ctx; }
 
 /* 参数区驱动 Mock */
 static int params_init(void *ctx) { (void)ctx; return 0; }
+static int params_read_open(void *ctx) { (void)ctx; return 0; }
+static void params_read_close(void *ctx) { (void)ctx; }
 static int params_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx)
 {
     (void)ctx;
@@ -95,6 +97,8 @@ static uint32_t params_get_size(void *ctx) { (void)ctx; return 128U; }
 
 /* 日志区驱动 Mock */
 static int log_init(void *ctx) { (void)ctx; return 0; }
+static int log_read_open(void *ctx) { (void)ctx; return 0; }
+static void log_read_close(void *ctx) { (void)ctx; }
 static int log_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 {
     (void)ctx;
@@ -141,6 +145,8 @@ int main(void)
     param_desc.permissions = ECAT_PERM_RW;
     param_desc.max_size = sizeof(s_flash_params);
     param_desc.enabled = true;
+    param_desc.driver.read_open = params_read_open;
+    param_desc.driver.read_close = params_read_close;
     param_desc.driver.io.init = params_init;
     param_desc.driver.io.erase_to = params_erase_to;
     param_desc.driver.io.write = params_write;
@@ -159,6 +165,8 @@ int main(void)
     log_desc.permissions = ECAT_PERM_READ;
     log_desc.max_size = sizeof(s_flash_log);
     log_desc.enabled = true;
+    log_desc.driver.read_open = log_read_open;
+    log_desc.driver.read_close = log_read_close;
     log_desc.driver.io.init = log_init;
     log_desc.driver.io.read = log_read;
     log_desc.driver.io.finalize = log_finalize;
