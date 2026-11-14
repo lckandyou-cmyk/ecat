@@ -145,6 +145,7 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
 
 int main(void)
 {
+    CHECK(ecat_foe_core_async_ops() == ecat_foe_core_async_ssc_ops());
     static async_flash_t flash;
     static uint8_t packet_storage[128];
     static uint8_t operation_storage[128];

@@ -4,7 +4,7 @@
 
 #include "ecat_foe_core.h"
 #include "ecat_foe_target_async.h"
-#include "ecat_foe_ssc_async.h"
+#include "ecat_upgrade_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +67,10 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *session,
                              size_t operation_capacity);
 
 /* Compatible with ecat_foe_ssc_async_ops_t; bDataFollowing is carried through. */
-const ecat_foe_ssc_async_ops_t *ecat_foe_core_async_ssc_ops(void);
+const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
+
+/* Legacy getter, same backend and contract; retained for existing SSC users. */
+const ecat_upgrade_async_ops_t *ecat_foe_core_async_ssc_ops(void);
 
 /* Use these as the SSC gate's callbacks, with session as ops_ctx. */
 void ecat_foe_core_async_abort(ecat_foe_core_async_t *session);

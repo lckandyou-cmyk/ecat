@@ -3,7 +3,7 @@
 #include <string.h>
 
 static int validate_header(ecat_foe_core_async_t *s);
-static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s);
+static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s);
 static int begin_operation(ecat_foe_core_async_t *s,
                            ecat_foe_target_op_kind_t kind,
                            uint32_t offset,
@@ -16,23 +16,28 @@ static int complete_operation(ecat_foe_core_async_t *s);
 static int pump_payload(ecat_foe_core_async_t *s);
 static int pump_end(ecat_foe_core_async_t *s);
 static ecat_foe_core_err_t phase_error(ecat_foe_core_async_phase_t phase);
-static ecat_foe_ssc_async_result_t fail_session(ecat_foe_core_async_t *s,
+static ecat_upgrade_async_result_t fail_session(ecat_foe_core_async_t *s,
                                                  ecat_foe_core_err_t error);
 
-static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
+static ecat_upgrade_async_result_t async_start(void *ctx, const uint8_t *data,
                                                 size_t length, bool following);
-static ecat_foe_ssc_async_result_t async_poll(void *ctx);
+static ecat_upgrade_async_result_t async_poll(void *ctx);
 static void async_abort(void *ctx);
 
-static const ecat_foe_ssc_async_ops_t s_ssc_ops = {
+static const ecat_upgrade_async_ops_t s_async_ops = {
     async_start,
     async_poll,
     async_abort
 };
 
-const ecat_foe_ssc_async_ops_t *ecat_foe_core_async_ssc_ops(void)
+const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void)
 {
-    return &s_ssc_ops;
+    return &s_async_ops;
+}
+
+const ecat_upgrade_async_ops_t *ecat_foe_core_async_ssc_ops(void)
+{
+    return &s_async_ops;
 }
 
 int ecat_foe_core_async_init(ecat_foe_core_async_t *s,
@@ -60,7 +65,7 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *s,
     return 0;
 }
 
-static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
+static ecat_upgrade_async_result_t async_start(void *ctx, const uint8_t *data,
                                                 size_t length, bool following)
 {
     ecat_foe_core_async_t *s = (ecat_foe_core_async_t *)ctx;
@@ -68,7 +73,7 @@ static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
         (s->core->state != ECAT_FOE_STATE_WRQ_ACKED &&
          s->core->state != ECAT_FOE_STATE_DATA) ||
         length > s->packet_capacity || (length > 0U && data == NULL)) {
-        return ECAT_FOE_SSC_ASYNC_FAILED;
+        return ECAT_UPGRADE_ASYNC_FAILED;
     }
     if (s->core->state == ECAT_FOE_STATE_WRQ_ACKED &&
         s->core->header_rx_len == 0U && !s->core->header_complete) {
@@ -81,7 +86,7 @@ static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
         s->readback_crc = 0U;
     }
     if (s->runner.failed && ecat_foe_target_async_reset(&s->runner) != 0) {
-        return ECAT_FOE_SSC_ASYNC_FAILED;
+        return ECAT_UPGRADE_ASYNC_FAILED;
     }
     if (length > 0U) {
         memcpy(s->packet, data, length);
@@ -98,16 +103,16 @@ static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
     return pump(s);
 }
 
-static ecat_foe_ssc_async_result_t async_poll(void *ctx)
+static ecat_upgrade_async_result_t async_poll(void *ctx)
 {
     ecat_foe_core_async_t *s = (ecat_foe_core_async_t *)ctx;
     if (s == NULL || s->core == NULL) {
-        return ECAT_FOE_SSC_ASYNC_FAILED;
+        return ECAT_UPGRADE_ASYNC_FAILED;
     }
     if (s->runner.pending) {
         ecat_foe_target_async_result_t r = ecat_foe_target_async_poll(&s->runner);
         if (r == ECAT_FOE_TARGET_ASYNC_PENDING) {
-            return ECAT_FOE_SSC_ASYNC_PENDING;
+            return ECAT_UPGRADE_ASYNC_PENDING;
         }
         if (r == ECAT_FOE_TARGET_ASYNC_FAILED) {
             return fail_session(s, phase_error(s->phase));
@@ -117,9 +122,9 @@ static ecat_foe_ssc_async_result_t async_poll(void *ctx)
             return fail_session(s, s->core->last_error != ECAT_FOE_CORE_OK
                 ? s->core->last_error : phase_error(s->phase));
         }
-        if (done > 0) return ECAT_FOE_SSC_ASYNC_PENDING;
+        if (done > 0) return ECAT_UPGRADE_ASYNC_PENDING;
         if (s->core->state == ECAT_FOE_STATE_SUCCESS) {
-            return ECAT_FOE_SSC_ASYNC_COMPLETE;
+            return ECAT_UPGRADE_ASYNC_COMPLETE;
         }
     }
     return pump(s);
@@ -138,7 +143,7 @@ static ecat_foe_core_err_t phase_error(ecat_foe_core_async_phase_t phase)
     }
 }
 
-static ecat_foe_ssc_async_result_t fail_session(ecat_foe_core_async_t *s,
+static ecat_upgrade_async_result_t fail_session(ecat_foe_core_async_t *s,
                                                  ecat_foe_core_err_t error)
 {
     ecat_foe_core_t *c = s->core;
@@ -157,7 +162,7 @@ static ecat_foe_ssc_async_result_t fail_session(ecat_foe_core_async_t *s,
     c->last_error = error;
     s->phase = ECAT_FOE_CORE_ASYNC_PHASE_NONE;
     s->state = ECAT_FOE_CORE_ASYNC_FAILED;
-    return ECAT_FOE_SSC_ASYNC_FAILED;
+    return ECAT_UPGRADE_ASYNC_FAILED;
 }
 
 /* Returns 1 for pending, 0 for complete, and -1 for failure. */
@@ -497,18 +502,18 @@ static int pump_end(ecat_foe_core_async_t *s)
     return complete_operation(s);
 }
 
-static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s)
+static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s)
 {
     ecat_foe_core_t *c = s->core;
-    if (s->state == ECAT_FOE_CORE_ASYNC_FAILED) return ECAT_FOE_SSC_ASYNC_FAILED;
+    if (s->state == ECAT_FOE_CORE_ASYNC_FAILED) return ECAT_UPGRADE_ASYNC_FAILED;
     if (s->state == ECAT_FOE_CORE_ASYNC_ENDING) {
         int r = pump_end(s);
         if (r < 0) return fail_session(s, c->last_error);
-        return r > 0 ? ECAT_FOE_SSC_ASYNC_PENDING :
-            (c->state == ECAT_FOE_STATE_SUCCESS ? ECAT_FOE_SSC_ASYNC_COMPLETE
-                                                : ECAT_FOE_SSC_ASYNC_PENDING);
+        return r > 0 ? ECAT_UPGRADE_ASYNC_PENDING :
+            (c->state == ECAT_FOE_STATE_SUCCESS ? ECAT_UPGRADE_ASYNC_COMPLETE
+                                                : ECAT_UPGRADE_ASYNC_PENDING);
     }
-    if (s->state != ECAT_FOE_CORE_ASYNC_PACKET) return ECAT_FOE_SSC_ASYNC_FAILED;
+    if (s->state != ECAT_FOE_CORE_ASYNC_PACKET) return ECAT_UPGRADE_ASYNC_FAILED;
 
     if (!c->header_complete) {
         while (s->packet_cursor < s->packet_length &&
@@ -533,7 +538,7 @@ static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s)
                 return fail_session(s, c->last_error);
             }
             s->packet_complete = true;
-            return ECAT_FOE_SSC_ASYNC_COMPLETE;
+            return ECAT_UPGRADE_ASYNC_COMPLETE;
         }
         if (validate_header(s) != 0) return fail_session(s, c->last_error);
         if (s->packet_length - s->packet_cursor > c->hdr.payload_length) {
@@ -543,20 +548,20 @@ static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s)
         int r = begin_operation(s, ECAT_FOE_TARGET_OP_INIT, 0U, 0U,
                                 NULL, 0U, NULL, NULL);
         if (r < 0) return fail_session(s, ECAT_FOE_CORE_ERR_DRV_INIT);
-        if (r > 0) return ECAT_FOE_SSC_ASYNC_PENDING;
+        if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
         /* init completion started invalidate; if it is still pending, return. */
-        if (s->runner.pending) return ECAT_FOE_SSC_ASYNC_PENDING;
+        if (s->runner.pending) return ECAT_UPGRADE_ASYNC_PENDING;
     }
 
     if (!c->driver_invalidated) {
         /* This also covers synchronous-complete init -> invalidate chains. */
         if (s->phase != ECAT_FOE_CORE_ASYNC_PHASE_NONE || s->runner.pending) {
-            return ECAT_FOE_SSC_ASYNC_PENDING;
+            return ECAT_UPGRADE_ASYNC_PENDING;
         }
         int r = begin_operation(s, ECAT_FOE_TARGET_OP_INVALIDATE, 0U, 0U,
                                 NULL, 0U, NULL, NULL);
         if (r < 0) return fail_session(s, ECAT_FOE_CORE_ERR_DRV_INVALIDATE);
-        if (r > 0) return ECAT_FOE_SSC_ASYNC_PENDING;
+        if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
         c->driver_invalidated = true;
         c->session_active = true;
         c->target_incomplete_mask |= (1U << (c->hdr.target_id - 1U));
@@ -564,10 +569,10 @@ static ecat_foe_ssc_async_result_t pump(ecat_foe_core_async_t *s)
 
     int r = pump_payload(s);
     if (r < 0) return fail_session(s, c->last_error);
-    if (r > 0) return ECAT_FOE_SSC_ASYNC_PENDING;
-    if (s->runner.pending) return ECAT_FOE_SSC_ASYNC_PENDING;
+    if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
+    if (s->runner.pending) return ECAT_UPGRADE_ASYNC_PENDING;
     if (s->state == ECAT_FOE_CORE_ASYNC_ENDING) return pump(s);
-    return s->packet_complete ? ECAT_FOE_SSC_ASYNC_COMPLETE : ECAT_FOE_SSC_ASYNC_PENDING;
+    return s->packet_complete ? ECAT_UPGRADE_ASYNC_COMPLETE : ECAT_UPGRADE_ASYNC_PENDING;
 }
 
 static void async_abort(void *ctx)

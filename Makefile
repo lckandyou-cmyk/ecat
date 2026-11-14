@@ -145,6 +145,7 @@ test-target-async:
 	"$$TMP_ASYNC_DIR/test_target_async"
 
 test-core-async:
+	@$(CC) $(CFLAGS) -fsyntax-only tests/test_upgrade_async_header.c
 	@TMP_ASYNC_DIR=$$(mktemp -d /tmp/foe_core_async_XXXXXX) && \
 	trap 'rm -rf "$$TMP_ASYNC_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_core_async" \

@@ -13,23 +13,18 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "ecat_upgrade_async.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef enum {
-    ECAT_FOE_SSC_ASYNC_FAILED = -1,
-    ECAT_FOE_SSC_ASYNC_COMPLETE = 0,
-    ECAT_FOE_SSC_ASYNC_PENDING = 1
-} ecat_foe_ssc_async_result_t;
-
-typedef struct {
-    ecat_foe_ssc_async_result_t (*start)(void *ctx, const uint8_t *data,
-                                         size_t length, bool data_following);
-    ecat_foe_ssc_async_result_t (*poll)(void *ctx);
-    void (*abort)(void *ctx);
-} ecat_foe_ssc_async_ops_t;
+/* Source-compatible aliases for the transport-independent backend contract. */
+typedef ecat_upgrade_async_result_t ecat_foe_ssc_async_result_t;
+typedef ecat_upgrade_async_ops_t ecat_foe_ssc_async_ops_t;
+#define ECAT_FOE_SSC_ASYNC_FAILED ECAT_UPGRADE_ASYNC_FAILED
+#define ECAT_FOE_SSC_ASYNC_COMPLETE ECAT_UPGRADE_ASYNC_COMPLETE
+#define ECAT_FOE_SSC_ASYNC_PENDING ECAT_UPGRADE_ASYNC_PENDING
 
 typedef struct {
     const ecat_foe_ssc_async_ops_t *ops;
