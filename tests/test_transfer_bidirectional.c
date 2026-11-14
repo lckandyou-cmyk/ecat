@@ -930,9 +930,41 @@ int main(void)
     assert(fw_manager.session.owner == NULL);
 
     /* ---------------------------------------------------------------------- */
-    /* 8. Issue 8: 64位超大尺寸 (UINT32_MAX+2) 整数窄化与缓冲区溢出防护     */
+    /* 8. Issue 8 & R2-03: 32位平台算术环绕防范与 64位大尺寸防窄化验证       */
     /* ---------------------------------------------------------------------- */
-    printf("--- 测试 Issue 8: 64 位大尺寸长度防窄化与安全拦截 ---\n");
+    printf("--- 测试 Issue 8 & R2-03: 32 位加法环绕防范与大尺寸防窄化 ---\n");
+
+    /* 8.1 32位平台加法环绕防范 (offset=1, length=UINT32_MAX 减法检查防加法环绕) */
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_unknown, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    uint8_t one_byte = 0x55;
+    /* 先写入 1 字节使 current_offset = 1 */
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, &one_byte, 1U) == ECAT_TRANSFER_COMPLETE);
+    assert(fw_manager.current_offset == 1U);
+    /* 传入 (size_t)UINT32_MAX: 若加法环绕为 0，则 0 <= limit 会错误放行；减法校验必须安全拦截 */
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, &one_byte, (size_t)UINT32_MAX) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(g_abort_called == true);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 8.2 固件模式同样验证 32 位加法环绕防范与有界推导 */
+    uint64_t fw_wrap_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &fw_wrap_tok) == ECAT_TRANSFER_COMPLETE);
+    fw_manager.current_offset = 1U; /* 模拟 offset=1 */
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, fw_wrap_tok, &one_byte, (size_t)UINT32_MAX) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 8.3 纯算术减法防御对比验证 (可移植到任何 32 位 MCU 架构) */
+    uint32_t test_off = 1U;
+    uint32_t test_limit = 1024U;
+    uint32_t test_len = UINT32_MAX;
+    /* 若用旧加法检查: 1 + UINT32_MAX 在 32 位下环绕为 0，0 > 1024 为 false (漏洞放行) */
+    assert((uint32_t)(test_off + test_len) == 0U);
+    /* 用新减法检查: 1 <= 1024 且 test_len > (1024 - 1)，严格拦截 */
+    bool rejected = (test_off > test_limit) || (test_len > (test_limit - test_off));
+    assert(rejected == true);
+
 #if __SIZEOF_SIZE_T__ > 4
     reset_mock_flags();
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_unknown, &data_tok) == ECAT_TRANSFER_COMPLETE);

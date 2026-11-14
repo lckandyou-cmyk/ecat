@@ -429,10 +429,29 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 先用 size_t 拒绝无法表示及超界长度，防止 64 位整型窄化与溢出 */
-        uint32_t fw_cap = (t->total_size > 0U) ? t->total_size : (t->target->max_size + 148U + 7U);
+        /* 固件容器物理上限有界推导: 使用实际配置的 max_header_size 与 write_unit，防止硬编码与溢出 */
+        uint32_t eff_payload = t->target->max_size;
+        uint32_t target_idx = (uint32_t)t->target->target_id - 1U;
+        if (t->core->cfg.targets[target_idx].max_payload_size > 0U &&
+            t->core->cfg.targets[target_idx].max_payload_size < eff_payload) {
+            eff_payload = t->core->cfg.targets[target_idx].max_payload_size;
+        }
+
+        uint32_t max_hdr = t->core->cfg.max_header_size;
+        if (max_hdr < ECAT_FOE_EFW_HEADER_MIN_LEN) {
+            max_hdr = ECAT_FOE_EFW_HEADER_MIN_LEN;
+        }
+        uint32_t wunit = t->core->cfg.targets[target_idx].write_unit;
+        uint32_t max_pad = (wunit > 0U) ? (wunit - 1U) : 0U;
+
+        uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr + (uint64_t)max_pad;
+        uint32_t fw_cap = (t->total_size > 0U) ? t->total_size :
+                          ((wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap);
+
+        /* 先用 size_t 与减法防环绕拒绝超界长度，保证 32 位与 64 位平台均绝不溢出 */
         if (length > (size_t)UINT32_MAX ||
-            (size_t)t->current_offset + length > (size_t)fw_cap) {
+            t->current_offset > fw_cap ||
+            length > (size_t)(fw_cap - t->current_offset)) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->core != NULL) {
                 ecat_foe_core_on_abort(t->core);
@@ -472,10 +491,11 @@ ecat_transfer_result_t ecat_transfer_write(
         t->current_offset += len32;
         ecat_foe_crc32_update(&t->running_crc32, data, len32);
     } else {
-        /* DATA 普通数据流导入: 先用 size_t 拒绝无法表示及超界长度 */
+        /* DATA 普通数据流导入: 先用 size_t 与减法防环绕拒绝超界长度 */
         uint32_t write_limit = (t->expected_size > 0U) ? t->expected_size : t->target->max_size;
         if (length > (size_t)UINT32_MAX ||
-            (size_t)t->current_offset + length > (size_t)write_limit) {
+            t->current_offset > write_limit ||
+            length > (size_t)(write_limit - t->current_offset)) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
