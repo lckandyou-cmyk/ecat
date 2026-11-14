@@ -23,6 +23,7 @@
 #include "ecat_foe_soes.h"
 #include "mock_driver.h"
 #include "ecat_upgrade.h"
+#include "ecat_foe_transport.h"
 
 static int g_core_tests_run = 0;
 static int g_core_tests_passed = 0;
@@ -402,6 +403,41 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     cfg.signature_verifier.abort = mock_signature_abort;
     cfg.signature_verifier.user_ctx = verifier;
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
+}
+
+static void test_foe_transport_shares_upgrade_ownership(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    ecat_upgrade_t upgrade;
+    ecat_foe_transport_t foe;
+    int other = 0;
+    uint64_t other_token = 0;
+    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "manager ready");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE bridge ready");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &other, &request, &other_token), ECAT_UPGRADE_COMPLETE, "other entry owns core");
+    const char *name = "SERVO_DRV_MCU_V1.2.3.4.efw";
+    TEST_ASSERT(ecat_foe_transport_begin(&foe, name, strlen(name)) != 0, "FoE cannot steal other entry");
+    ecat_foe_transport_abort(&foe);
+    TEST_ASSERT(ecat_upgrade_session_owns(&upgrade.session, &other, other_token), "FoE abort preserves other owner");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &other, other_token), ECAT_UPGRADE_COMPLETE, "other owner cancels");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE begins");
+    uint8_t payload[32] = {7, 8}, efw[256];
+    size_t len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                                0x01020304U, 0U, payload, sizeof(payload));
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, len, true), ECAT_UPGRADE_ASYNC_COMPLETE, "FoE data accepted");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "FoE full packet not EOF");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, NULL, 0, false), ECAT_UPGRADE_ASYNC_COMPLETE, "FoE empty EOF explicitly finishes");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "committed once");
+    ecat_foe_transport_abort(&foe);
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "post-commit abort is harmless");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE restart");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, ECAT_FOE_EFW_HEADER_MIN_LEN, true), ECAT_UPGRADE_ASYNC_COMPLETE, "driver active");
+    TEST_ASSERT(ecat_foe_transport_begin(&foe, "bad", 3) != 0, "own bad WRQ closes old session");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "old FoE session cleaned");
 }
 
 static void test_owned_sync_upgrade_stream(void)
@@ -3167,6 +3203,7 @@ int main(void)
     RUN_TEST(test_mock_erase_preserves_prior_sector);
     RUN_TEST(test_begin_request_without_filename);
     RUN_TEST(test_owned_sync_upgrade_stream);
+    RUN_TEST(test_foe_transport_shares_upgrade_ownership);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);
