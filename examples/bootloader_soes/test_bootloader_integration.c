@@ -14,6 +14,10 @@
  * - 真实板卡 (STM32/XMC4800/LAN9252) 擦写总线冻结与现场物理总线联调尚未开展，需实机验证。
  */
 
+#ifdef NDEBUG
+#error "bootloader integration tests require assertions"
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -935,7 +939,8 @@ int main(void)
         uint32_t packet = 1U;
         while (pos < n) {
             size_t chunk = (n - pos > 116U) ? 116U : n - pos;
-            assert(bootloader_master_send_data(&app, &s_foe_cfg, packet++, capacity_efw + pos, chunk, &resp) == 0);
+            int send_rc = bootloader_master_send_data(&app, &s_foe_cfg, packet++, capacity_efw + pos, chunk, &resp);
+            assert(send_rc == 0);
             if (resp.opcode != BOOTLOADER_FOE_OP_ACK) break;
             pos += chunk;
         }

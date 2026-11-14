@@ -94,6 +94,7 @@ test: test-examples test-ssc-async test-target-async test-core-async
 	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	CC="$(CC)" $(PYTHON) tests/test_config_override.py && \
+	CC="$(CC)" $(PYTHON) tests/test_bootloader_assertions.py && \
 	"$$TMP_BUILD_DIR/test_runner_core" && \
 	echo "--- 运行 Beckhoff SSC 适配层抽象契约测试 (Mock 环境) ---" && \
 	"$$TMP_BUILD_DIR/test_runner_ssc_mock" && \
