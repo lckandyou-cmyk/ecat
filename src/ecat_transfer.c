@@ -68,10 +68,22 @@ ecat_transfer_result_t ecat_transfer_begin(
     }
 
     /* 物理边界防越界检查 */
-    if (request->expected_size > target->max_size) {
-        t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-        (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
-        return ECAT_TRANSFER_FAILED;
+    if (request->direction == ECAT_TRANSFER_DIR_IMPORT &&
+        target->type == ECAT_TARGET_TYPE_FIRMWARE) {
+        if (request->expected_size > 0U) {
+            if (request->expected_size < 148U ||
+                request->expected_size > (target->max_size + 148U + 7U)) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+        }
+    } else {
+        if (request->expected_size > target->max_size) {
+            t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+            (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+            return ECAT_TRANSFER_FAILED;
+        }
     }
 
     /* 初始化会话参数 */
@@ -131,6 +143,54 @@ ecat_transfer_result_t ecat_transfer_begin(
                 (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
+
+            if (request->target_id < 1U || request->target_id > ECAT_FOE_TARGET_COUNT) {
+                t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
+                t->active = false;
+                t->driver_initialized = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
+            uint32_t target_idx = (uint32_t)request->target_id - 1U;
+            if (!t->core->cfg.targets[target_idx].enabled) {
+                t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
+                t->active = false;
+                t->driver_initialized = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
+            /* 校验并绑定底层驱动映射 */
+            if (t->core->cfg.targets[target_idx].driver == NULL) {
+                if (target->driver.io.write != NULL) {
+                    t->core->cfg.targets[target_idx].driver = &target->driver.io;
+                } else {
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+                    t->active = false;
+                    t->driver_initialized = false;
+                    (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                    return ECAT_TRANSFER_FAILED;
+                }
+            } else if (target->driver.io.write != NULL &&
+                       t->core->cfg.targets[target_idx].driver != &target->driver.io &&
+                       t->core->cfg.targets[target_idx].driver->write != target->driver.io.write) {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+                t->active = false;
+                t->driver_initialized = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
+            /* 统一容量约束: 物理上限以 registry 与 core 中的更严格者为准并双向对齐 */
+            uint32_t effective_cap = target->max_size;
+            if (t->core->cfg.targets[target_idx].max_payload_size > 0U &&
+                t->core->cfg.targets[target_idx].max_payload_size < effective_cap) {
+                effective_cap = t->core->cfg.targets[target_idx].max_payload_size;
+            }
+            t->core->cfg.targets[target_idx].max_payload_size = effective_cap;
+
+            t->total_size = request->expected_size;
 
             ecat_upgrade_request_t core_req;
             core_req.target_id = request->target_id;
@@ -271,12 +331,43 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
+        /* 若声明了 expected_size，持续执行总包长度边界检查 */
+        if (t->total_size > 0U) {
+            if ((uint32_t)length > (t->total_size - t->current_offset)) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                ecat_foe_core_on_abort(t->core);
+                t->core_started = false;
+                t->active = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
+        }
+
         if (ecat_foe_core_on_data(t->core, data, length) != 0) {
-            t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            if (t->core->last_error == ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+            } else {
+                t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            t->core_started = false;
             t->active = false;
             (void)ecat_upgrade_session_release(&t->session, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
+
+        /* 持续执行注册表有效负载物理容量核验 */
+        if (t->core->header_complete) {
+            if (t->core->hdr.payload_length > t->target->max_size ||
+                t->core->written_offset > t->target->max_size) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                ecat_foe_core_on_abort(t->core);
+                t->core_started = false;
+                t->active = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
+        }
+
         t->current_offset += (uint32_t)length;
         ecat_foe_crc32_update(&t->running_crc32, data, length);
     } else {
@@ -363,6 +454,17 @@ ecat_transfer_result_t ecat_transfer_finish(
     } else {
         /* IMPORT 模式 */
         if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
+            if (t->total_size > 0U && t->current_offset != t->total_size) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                if (t->core != NULL) {
+                    ecat_foe_core_on_abort(t->core);
+                }
+                t->core_started = false;
+                t->driver_initialized = false;
+                t->active = false;
+                (void)ecat_upgrade_session_release(&t->session, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
             if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->core_started = false;

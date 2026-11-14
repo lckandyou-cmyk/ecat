@@ -498,6 +498,129 @@ int main(void)
     assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
 
+    /* 验证 Issue 3: 严格校验固件注册表容量与持续写入约束 */
+    printf("--- 测试 Issue 3: 固件容量约束与注册表/核心对齐 ---\n");
+    static uint8_t s_oversize_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + 257U];
+    static uint8_t s_valid_16_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
+    {
+        uint32_t plen = 257U;
+        uint8_t *out = s_oversize_efw;
+        memset(out, 0, sizeof(s_oversize_efw));
+        out[0] = 0x45; out[1] = 0x43; out[2] = 0x46; out[3] = 0x57;
+        out[4] = ECAT_FOE_EFW_FORMAT_VERSION;
+        out[6] = (uint8_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
+        out[7] = (uint8_t)(ECAT_FOE_EFW_HEADER_MIN_LEN >> 8);
+        out[8] = 0x01; out[9] = 0x00; out[10] = 0x01; out[11] = 0x10; /* project_id = 0x10010001 */
+        out[12] = 0x01; /* hardware_id = 1 */
+        out[16] = 1; out[18] = 1; out[20] = 1; /* target_id = 1 */
+        out[24] = 4; out[25] = 3; out[26] = 2; out[27] = 1;
+        out[28] = 0; out[29] = 0; out[30] = 0; out[31] = 1;
+        out[32] = (uint8_t)plen; out[33] = (uint8_t)(plen >> 8);
+        for (uint32_t i = 0; i < plen; ++i) out[ECAT_FOE_EFW_HEADER_MIN_LEN + i] = (uint8_t)(i & 0xFF);
+        uint32_t pcrc = ecat_foe_crc32_calc(out + ECAT_FOE_EFW_HEADER_MIN_LEN, plen);
+        out[36] = (uint8_t)pcrc; out[37] = (uint8_t)(pcrc >> 8);
+        out[38] = (uint8_t)(pcrc >> 16); out[39] = (uint8_t)(pcrc >> 24);
+        memcpy(out + 60U, "SIG2", 4U);
+        out[64] = 1U;
+        uint32_t hcrc = ecat_foe_crc32_calc(out, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+        out[144] = (uint8_t)hcrc; out[145] = (uint8_t)(hcrc >> 8);
+        out[146] = (uint8_t)(hcrc >> 16); out[147] = (uint8_t)(hcrc >> 24);
+    }
+    {
+        uint32_t plen = 16U;
+        uint8_t *out = s_valid_16_efw;
+        memset(out, 0, sizeof(s_valid_16_efw));
+        out[0] = 0x45; out[1] = 0x43; out[2] = 0x46; out[3] = 0x57;
+        out[4] = ECAT_FOE_EFW_FORMAT_VERSION;
+        out[6] = (uint8_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
+        out[7] = (uint8_t)(ECAT_FOE_EFW_HEADER_MIN_LEN >> 8);
+        out[8] = 0x01; out[9] = 0x00; out[10] = 0x01; out[11] = 0x10;
+        out[12] = 0x01;
+        out[16] = 1; out[18] = 1; out[20] = 1;
+        out[24] = 4; out[25] = 3; out[26] = 2; out[27] = 1;
+        out[28] = 0; out[29] = 0; out[30] = 0; out[31] = 1;
+        out[32] = (uint8_t)plen; out[33] = (uint8_t)(plen >> 8);
+        for (uint32_t i = 0; i < plen; ++i) out[ECAT_FOE_EFW_HEADER_MIN_LEN + i] = (uint8_t)(i & 0xFF);
+        uint32_t pcrc = ecat_foe_crc32_calc(out + ECAT_FOE_EFW_HEADER_MIN_LEN, plen);
+        out[36] = (uint8_t)pcrc; out[37] = (uint8_t)(pcrc >> 8);
+        out[38] = (uint8_t)(pcrc >> 16); out[39] = (uint8_t)(pcrc >> 24);
+        memcpy(out + 60U, "SIG2", 4U);
+        out[64] = 1U;
+        uint32_t hcrc = ecat_foe_crc32_calc(out, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+        out[144] = (uint8_t)hcrc; out[145] = (uint8_t)(hcrc >> 8);
+        out[146] = (uint8_t)(hcrc >> 16); out[147] = (uint8_t)(hcrc >> 24);
+    }
+
+    /* 将 Target 1 (mcu_fw) 在注册表中的容量设为 16 字节，而 core.cfg 中为 1024 字节 */
+    const ecat_target_desc_t *fw_reg_desc = ecat_target_registry_find_by_id(&reg, 1U);
+    assert(fw_reg_desc != NULL);
+    ((ecat_target_desc_t *)fw_reg_desc)->max_size = 16U;
+    core.cfg.project_id = 0x10010001U;
+    core.cfg.hardware_id = 1U;
+    core.cfg.local_hw_ver = 1U;
+    core.cfg.targets[0].max_payload_size = 1024U;
+
+    /* 3.1 未知长度下超限有效负载拦截 */
+    ecat_transfer_request_t oversize_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 0U, /* 未知总长 */
+        .fw_version = 0x01020304U
+    };
+    uint64_t over_token = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &over_token) == ECAT_TRANSFER_COMPLETE);
+    int write_rc = ecat_transfer_write(&fw_manager, &channel_uart, over_token, s_oversize_efw, sizeof(s_oversize_efw));
+    /* 257 字节 payload 超过注册表 max_size=16，必须写入失败且核心未写入任何介质 */
+    assert(write_rc != ECAT_TRANSFER_COMPLETE);
+    assert(core.written_offset == 0);
+
+    /* 3.2 分片写入场景下的超限拦截 */
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &over_token) == ECAT_TRANSFER_COMPLETE);
+    size_t chunk_sz = 32U;
+    bool chunk_failed = false;
+    for (size_t off = 0; off < sizeof(s_oversize_efw); off += chunk_sz) {
+        size_t this_sz = (sizeof(s_oversize_efw) - off < chunk_sz) ? (sizeof(s_oversize_efw) - off) : chunk_sz;
+        if (ecat_transfer_write(&fw_manager, &channel_uart, over_token, &s_oversize_efw[off], this_sz) != ECAT_TRANSFER_COMPLETE) {
+            chunk_failed = true;
+            break;
+        }
+    }
+    assert(chunk_failed == true);
+    assert(core.written_offset == 0);
+
+    /* 3.3 声明总长但传输截断检测 */
+    ecat_transfer_request_t trunc_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = sizeof(s_valid_16_efw),
+        .fw_version = 0x01020304U
+    };
+    uint64_t trunc_token = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &trunc_req, &trunc_token) == ECAT_TRANSFER_COMPLETE);
+    /* 仅发送头部，未发送 payload 即尝试 finish */
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, trunc_token, s_valid_16_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, trunc_token) == ECAT_TRANSFER_FAILED);
+
+    /* 3.4 声明总长超出物理上限在 begin 时即被拦截 */
+    ecat_transfer_request_t too_large_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 16U + 148U + 8U + 10U, /* 超出 max_size(16) + 148 + 7 */
+        .fw_version = 0x01020304U
+    };
+    uint64_t dummy_t = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &too_large_req, &dummy_t) == ECAT_TRANSFER_FAILED);
+
+    /* 3.5 合法 16 字节有效负载端到端导入成功 */
+    uint64_t valid_token = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &trunc_req, &valid_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_token, s_valid_16_efw, sizeof(s_valid_16_efw)) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_token) == ECAT_TRANSFER_COMPLETE);
+    assert(core.written_offset == 16U);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }
