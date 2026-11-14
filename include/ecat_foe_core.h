@@ -32,9 +32,7 @@ extern "C" {
 /* Every translation unit that sees the public core layout references the
  * symbol for its two compile-time buffer sizes.  A mixed configuration then
  * fails at link time, before a differently sized object can be accessed. */
-#define ECAT_FOE_ABI_JOIN_IMPL(header, unit) ecat_foe_config_abi_##header##_##unit
-#define ECAT_FOE_ABI_JOIN(header, unit) ECAT_FOE_ABI_JOIN_IMPL(header, unit)
-#define ECAT_FOE_ABI_SYMBOL ECAT_FOE_ABI_JOIN(ECAT_FOE_HEADER_BUF_MAX, ECAT_FOE_MAX_WRITE_UNIT)
+#include "ecat_foe_config_abi.h"
 void ECAT_FOE_ABI_SYMBOL(void);
 
 #if defined(__has_attribute)

@@ -54,4 +54,15 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
     mixed = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw', 'observer')),
                             '-o', str(tmp_path / 'mixed')], capture_output=True, text=True)
     assert mixed.returncode != 0 and 'ecat_foe_config_abi_' in mixed.stderr, mixed.stderr
+    # Equivalent preprocessor expressions must link to the literal-built core.
+    for unit in ('(512U)', '(256U * 2U)', '(1U << 9)', '0x200U'):
+        expression_config = config.replace('ECAT_FOE_MAX_WRITE_UNIT             512U',
+                                            'ECAT_FOE_MAX_WRITE_UNIT             ' + unit)
+        expression_config = expression_config.replace('ECAT_FOE_HEADER_BUF_MAX             148U',
+                                                       'ECAT_FOE_HEADER_BUF_MAX             (144U + 4U)')
+        (tmp_path / 'ecat_foe_conf.h').write_text(expression_config)
+        subprocess.run(flags + ['-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(caller),
+                                '-o', str(tmp_path / 'expression.o')], check=True)
+        subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('expression', 'core', 'efw')),
+                        '-o', str(tmp_path / 'expression')], check=True)
 print('PASS: custom core configuration controls public buffer size')

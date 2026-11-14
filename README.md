@@ -91,7 +91,7 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c src/ecat_foe_core.c
 ```
 
-同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 使用单个整数字面量（例如 `148U`、`256U`），各编译单元的写法和数值都必须一致。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
+同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 支持预处理整数常量表达式（例如 `(144U + 4U)`、`(1U << 8)`），各编译单元求值后的数值必须一致；括号、进制和算术写法不同不会造成假错配。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
 
 ## 可选升级入口
 
