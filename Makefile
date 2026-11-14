@@ -29,6 +29,21 @@ EXAMPLES_BOOTLOADER_ALL_SRC = \
 SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c
 TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 
+# Product library source selection; no test stubs are used for this target.
+ENABLE_FOE ?= 1
+FOE_STACK ?= ssc
+UPGRADE_BUILD_DIR ?= build/upgrade
+UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/ecat_upgrade_session.c
+ifeq ($(ENABLE_FOE),1)
+UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_foe_transport.c
+ifeq ($(FOE_STACK),soes)
+UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_foe_soes.c
+UPGRADE_STACK_CFLAGS = -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes
+else
+UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c
+endif
+endif
+
 BUILD_DIR ?= build
 OVERWRITE ?= 0
 SOES_DIR ?= /tmp/soes_src/soes
@@ -53,6 +68,24 @@ build:
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner_core $(SRC_CORE) $(TEST_CORE_SRC)
 	@$(PYTHON) tools/safe_build.py record --build-dir $(BUILD_DIR) --files test_runner_efw test_runner_core
 	@echo "  [BUILD] 本地调试二进制已生成至 $(BUILD_DIR)/ 并完成归属登记"
+
+.PHONY: build-upgrade test-upgrade-build
+build-upgrade:
+	@case "$(ENABLE_FOE):$(FOE_STACK)" in 0:*|1:ssc|1:soes) ;; *) echo "Invalid ENABLE_FOE or FOE_STACK"; exit 1 ;; esac
+	@mkdir -p "$(UPGRADE_BUILD_DIR)"
+	@$(PYTHON) tools/safe_build.py check --build-dir "$(UPGRADE_BUILD_DIR)" --files libecat_upgrade.a
+	@TMP_LIBRARY_DIR=$$(mktemp -d /tmp/ecat_upgrade_library_XXXXXX) && \
+	trap 'rm -rf "$$TMP_LIBRARY_DIR"' EXIT INT TERM && \
+	for source in $(UPGRADE_LIBRARY_SOURCES); do \
+		object="$$TMP_LIBRARY_DIR/$$(basename "$$source" .c).o"; \
+		$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) $(UPGRADE_STACK_CFLAGS) -I"$(SOES_DIR)" -c "$$source" -o "$$object" || exit 1; \
+	done && \
+	$(AR) rcs "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$$TMP_LIBRARY_DIR/"*.o && \
+	$(PYTHON) -c 'import shutil,sys; src=open(sys.argv[1], "rb"); dst=open(sys.argv[2], "xb"); shutil.copyfileobj(src,dst); dst.close(); src.close()' "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$(UPGRADE_BUILD_DIR)/libecat_upgrade.a" && \
+	$(PYTHON) tools/safe_build.py record --build-dir "$(UPGRADE_BUILD_DIR)" --files libecat_upgrade.a
+
+test-upgrade-build:
+	@CC="$(CC)" AR="$(AR)" $(PYTHON) tests/test_upgrade_build.py
 
 vectors:
 	@if [ "$(OVERWRITE)" = "1" ]; then \
@@ -82,7 +115,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session
+test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-upgrade-build
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \

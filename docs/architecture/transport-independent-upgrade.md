@@ -64,3 +64,12 @@ SSC 末包完成结果由桥接层保存，避免提交后其他入口取得核�
 
 Bootloader SOES 示例已默认创建并绑定统一会话管理器；应用层 FoE abort/结构错误清理同样只取消自己的桥接会话。管理器清理失败会话后保留核心 ERROR 与细分诊断供协议后置钩子读取。固定 SOES 源码宿主测试覆盖了共享模式成功、失败、乱序、结构错误、BOOT 迁移、容量边界与外部入口争用；不代表实板验证。
 步骤 6 当前剩余仅为可选构建入口与关闭 FoE 的独立链接验证。
+
+## 可选静态库构建
+
+`make build-upgrade` 在 `build/upgrade/` 生成静态库，默认 ENABLE_FOE=1、FOE_STACK=ssc，包含 SSC 和 FoE 桥接层，不包含任何第三方协议栈源码或测试桩。
+`make build-upgrade ENABLE_FOE=0 UPGRADE_BUILD_DIR=build/upgrade-base` 仅编译通用会话、EFW 和同步/异步引擎；没有 SOES/SSC 依赖，保留历史命名的核心兼容 API。
+SOES 集成使用 ENABLE_FOE=1、FOE_STACK=soes，并用 SOES_DIR 与 CFLAGS 提供真实 SOES 头和目标 BSP 包含路径；库不提供厂商 BSP 或协议栈实现。
+编译参数和配置头须与调用方保持一致。此目标沿用现有 Make/POSIX 工具链要求，并非 Windows 原生构建或可烧录 MCU 工程。
+目标默认拒绝覆盖既有库；需重新构建时使用新目录，或用 `make clean BUILD_DIR=build/upgrade` 安全清理已登记产物。
+`make test-upgrade-build` 检查默认/关闭模式的 archive 对象、正反链接结果与不覆盖行为，已纳入 make test。

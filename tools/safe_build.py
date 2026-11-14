@@ -23,7 +23,7 @@ LOCK_NAME = ".foe_build.lock"
 LOCK_MAGIC = "ECAT_FOE_BUILD_LOCK_V1"
 
 # 严格受控构建目标名称白名单（纯文件名，严禁包含路径分隔符）
-ALLOWED_TARGET_NAMES = frozenset({"test_runner_efw", "test_runner_core"})
+ALLOWED_TARGET_NAMES = frozenset({"test_runner_efw", "test_runner_core", "libecat_upgrade.a"})
 
 
 def sha256_file(filepath: str) -> str:
