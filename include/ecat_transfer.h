@@ -87,6 +87,9 @@ typedef struct {
     bool active;                        /* 会话是否处于激活状态 */
     bool driver_initialized;            /* 驱动是否成功初始化 (用于保证 abort 契约) */
     bool core_started;                  /* 是否已向底层 core 发起请求 */
+    uint32_t saved_core_max_payload;    /* 会话期间暂存的 core 原始容量，防止永久污染配置 */
+    uint32_t saved_core_target_idx;     /* 暂存容量对应的目标索引 */
+    bool core_cap_overridden;           /* 是否暂存并临时重写了 core 容量限额 */
 
     ecat_transfer_err_t last_error;     /* 最近一次错误码 */
 } ecat_transfer_t;

@@ -44,9 +44,15 @@ static inline const ecat_upgrade_session_t *get_transfer_session_const(const eca
 
 static void release_session(ecat_transfer_t *t, const void *owner, uint64_t token)
 {
-    ecat_upgrade_session_t *s = get_transfer_session(t);
-    if (s != NULL) {
-        (void)ecat_upgrade_session_release(s, owner, token);
+    if (t != NULL) {
+        if (t->core_cap_overridden && t->core != NULL) {
+            t->core->cfg.targets[t->saved_core_target_idx].max_payload_size = t->saved_core_max_payload;
+            t->core_cap_overridden = false;
+        }
+        ecat_upgrade_session_t *s = get_transfer_session(t);
+        if (s != NULL) {
+            (void)ecat_upgrade_session_release(s, owner, token);
+        }
     }
 }
 
@@ -234,33 +240,49 @@ ecat_transfer_result_t ecat_transfer_begin(
                 return ECAT_TRANSFER_FAILED;
             }
 
-            /* 校验并绑定底层驱动映射 */
-            if (t->core->cfg.targets[target_idx].driver == NULL) {
-                if (target->driver.io.write != NULL) {
-                    t->core->cfg.targets[target_idx].driver = &target->driver.io;
-                } else {
+            /* 校验并绑定底层驱动映射: 验证上下文与所有非空驱动回调一致性 */
+            const ecat_foe_target_driver_t *cdrv = t->core->cfg.targets[target_idx].driver;
+            const ecat_foe_target_driver_t *rdrv = &target->driver.io;
+
+            if (cdrv == NULL) {
+                if (rdrv->write == NULL) {
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
                     t->active = false;
                     t->driver_initialized = false;
                     release_session(t, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
-            } else if (target->driver.io.write != NULL &&
-                       t->core->cfg.targets[target_idx].driver != &target->driver.io &&
-                       t->core->cfg.targets[target_idx].driver->write != target->driver.io.write) {
-                t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
-                t->active = false;
-                t->driver_initialized = false;
-                release_session(t, owner, acquired_token);
-                return ECAT_TRANSFER_FAILED;
+                t->core->cfg.targets[target_idx].driver = rdrv;
+                t->core->cfg.targets[target_idx].user_ctx = target->user_ctx;
+            } else {
+                if (target->user_ctx != t->core->cfg.targets[target_idx].user_ctx ||
+                    rdrv->write == NULL ||
+                    cdrv->write != rdrv->write ||
+                    cdrv->init != rdrv->init ||
+                    cdrv->invalidate != rdrv->invalidate ||
+                    cdrv->erase_to != rdrv->erase_to ||
+                    cdrv->read != rdrv->read ||
+                    cdrv->finalize != rdrv->finalize ||
+                    cdrv->abort != rdrv->abort ||
+                    cdrv->finalize_with_version_floor != rdrv->finalize_with_version_floor) {
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+                    t->active = false;
+                    t->driver_initialized = false;
+                    release_session(t, owner, acquired_token);
+                    return ECAT_TRANSFER_FAILED;
+                }
             }
 
-            /* 统一容量约束: 物理上限以 registry 与 core 中的更严格者为准并双向对齐 */
+            /* 统一容量约束: 物理上限以 registry 与 core 中的更严格者为准，暂存原容量防止永久污染 */
             uint32_t effective_cap = target->max_size;
             if (t->core->cfg.targets[target_idx].max_payload_size > 0U &&
                 t->core->cfg.targets[target_idx].max_payload_size < effective_cap) {
                 effective_cap = t->core->cfg.targets[target_idx].max_payload_size;
             }
+
+            t->saved_core_max_payload = t->core->cfg.targets[target_idx].max_payload_size;
+            t->saved_core_target_idx = target_idx;
+            t->core_cap_overridden = true;
             t->core->cfg.targets[target_idx].max_payload_size = effective_cap;
 
             t->total_size = request->expected_size;

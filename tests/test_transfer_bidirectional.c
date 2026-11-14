@@ -728,6 +728,36 @@ int main(void)
     assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.written_offset == 16U);
 
+    /* 3.6 驱动映射上下文与回调严格一致性校验: 两个目标实例共用驱动函数但 ctx 不同，严禁放行 */
+    int ctx_a = 0xA, ctx_b = 0xB;
+    core.cfg.targets[0].user_ctx = &ctx_a;
+    ((ecat_target_desc_t *)fw_reg_desc)->user_ctx = &ctx_b;
+    uint64_t ctx_mismatch_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &ctx_mismatch_tok) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_DRIVER_WRITE);
+    assert(fw_manager.session.owner == NULL);
+    /* 回调函数不一致拒绝 */
+    ((ecat_target_desc_t *)fw_reg_desc)->user_ctx = &ctx_a;
+    ecat_foe_target_driver_t modified_drv = param_desc.driver.io;
+    modified_drv.erase_to = NULL;
+    core.cfg.targets[0].driver = &modified_drv;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &ctx_mismatch_tok) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_DRIVER_WRITE);
+    core.cfg.targets[0].driver = &param_desc.driver.io;
+
+    /* 3.7 临时会话限额不可永久污染 core.cfg 原始配置 */
+    core.cfg.targets[0].max_payload_size = 1024U;
+    ((ecat_target_desc_t *)fw_reg_desc)->max_size = 16U;
+    uint64_t sess_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &sess_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, sess_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(core.cfg.targets[0].max_payload_size == 1024U);
+
+    ((ecat_target_desc_t *)fw_reg_desc)->max_size = 1024U;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &sess_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, sess_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(core.cfg.targets[0].max_payload_size == 1024U);
+
     /* 验证 Issue 4: 统一旧升级入口 (ecat_upgrade_t) 与新传输管理器的会话仲裁与 ACL */
     printf("--- 测试 Issue 4: 统一旧升级入口与新管理器的会话仲裁与 ACL ---\n");
     ecat_foe_core_on_abort(&core);
