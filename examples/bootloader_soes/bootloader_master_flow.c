@@ -40,6 +40,10 @@ size_t bootloader_master_build_efw(uint8_t *out_buf,
                                    size_t payload_len)
 {
     (void)project_name;
+    if (payload_len > UINT32_MAX || payload_len > SIZE_MAX - ECAT_FOE_EFW_HEADER_MIN_LEN ||
+        (payload_len > 0U && payload == NULL)) {
+        return 0;
+    }
     size_t total_len = ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
     if (out_buf == NULL || out_max < total_len) {
         return 0;
@@ -178,7 +182,10 @@ int bootloader_master_send_wrq(bootloader_app_t *app,
     uint8_t *mbx = app->adapter.mbx_ctx.mbx_buffers;
     uint8_t *ctrl_bytes = (uint8_t *)app->adapter.mbx_ctx.mbx_control_states;
 
-    if (mbx == NULL || ctrl_bytes == NULL) {
+    if (mbx == NULL || ctrl_bytes == NULL ||
+        app->adapter.mbx_ctx.buffer_size < MBX_HDR_SIZE + FOE_HDR_SIZE ||
+        fn_len > (size_t)app->adapter.mbx_ctx.buffer_size - MBX_HDR_SIZE - FOE_HDR_SIZE ||
+        fn_len > UINT16_MAX - FOE_HDR_SIZE) {
         return -1;
     }
 
@@ -221,7 +228,10 @@ int bootloader_master_send_data(bootloader_app_t *app,
     uint8_t *mbx = app->adapter.mbx_ctx.mbx_buffers;
     uint8_t *ctrl_bytes = (uint8_t *)app->adapter.mbx_ctx.mbx_control_states;
 
-    if (mbx == NULL || ctrl_bytes == NULL) {
+    if (mbx == NULL || ctrl_bytes == NULL ||
+        app->adapter.mbx_ctx.buffer_size < MBX_HDR_SIZE + FOE_HDR_SIZE ||
+        data_len > (size_t)app->adapter.mbx_ctx.buffer_size - MBX_HDR_SIZE - FOE_HDR_SIZE ||
+        data_len > UINT16_MAX - FOE_HDR_SIZE) {
         return -1;
     }
 

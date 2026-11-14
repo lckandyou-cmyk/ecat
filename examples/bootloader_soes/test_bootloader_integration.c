@@ -178,6 +178,30 @@ int main(void)
 
     bootloader_app_t app;
 
+    /* Reject oversized input before touching even the first mailbox slot. */
+    {
+        uint8_t mailbox[256], original[256], control[2] = {0}, data[117] = {0};
+        char name[118];
+        memset(&app, 0, sizeof(app));
+        memset(mailbox, 0xA5, sizeof(mailbox));
+        memcpy(original, mailbox, sizeof(mailbox));
+        memset(name, 'A', sizeof(name) - 1U);
+        name[sizeof(name) - 1U] = '\0';
+        app.adapter.mbx_ctx.mbx_buffers = mailbox;
+        app.adapter.mbx_ctx.mbx_control_states = control;
+        app.adapter.mbx_ctx.buffer_size = 128U;
+        app.adapter.mbx_ctx.num_buffers = 2U;
+        assert(bootloader_master_send_wrq(&app, &s_foe_cfg, name, 0U, NULL) != 0);
+        assert(memcmp(mailbox, original, sizeof(mailbox)) == 0);
+        assert(bootloader_master_send_data(&app, &s_foe_cfg, 1U, data, sizeof(data), NULL) != 0);
+        assert(memcmp(mailbox, original, sizeof(mailbox)) == 0);
+        assert(bootloader_master_build_efw(mailbox, sizeof(mailbox), 1U, "P", 1U,
+                                           1U, 1U, 1U, 1U, data, SIZE_MAX) == 0U);
+        assert(bootloader_master_build_efw(mailbox, sizeof(mailbox), 1U, "P", 1U,
+                                           1U, 1U, 1U, 1U, NULL, 1U) == 0U);
+        assert(memcmp(mailbox, original, sizeof(mailbox)) == 0);
+    }
+
     /* ---------------------------------------------------------------------- */
     /* 场景 1: 有效固件端到端升级闭环验证                                    */
     /* ---------------------------------------------------------------------- */
