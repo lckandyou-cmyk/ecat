@@ -2,7 +2,9 @@
  * @file ecat_foe_conf_template.h
  * @brief 全局工程配置模板 (依据 SAD-v0.1 第 4.1 节)
  *
- * 用户移植时复制此文件为 ecat_foe_conf.h 并置于工程包含路径中。
+ * 用户移植时复制为 ecat_foe_conf.h，置于包含路径，并对所有编译单元定义
+ * ECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"。否则使用本模板。
+ * 身份、目标及安全策略仍须在 ecat_foe_core_cfg_t 中配置。
  * 所有物理基地址与分区限额完全由本地硬编码管理，坚决不信任固件携带的任何物理地址。
  */
 

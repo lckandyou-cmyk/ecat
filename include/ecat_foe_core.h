@@ -18,7 +18,11 @@
 #include "ecat_foe_efw.h"
 #include "ecat_foe_target.h"
 #include "ecat_foe_target_async.h"
+#ifdef ECAT_FOE_CONFIG_HEADER
+#include ECAT_FOE_CONFIG_HEADER
+#else
 #include "ecat_foe_conf_template.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
