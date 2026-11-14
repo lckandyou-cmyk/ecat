@@ -122,9 +122,11 @@ static const ecat_foe_target_async_ops_t flash_ops = {
     flash_start, flash_poll, flash_abort, flash_abort_session
 };
 
+static unsigned floor_calls;
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
 {
     (void)target_id;
+    floor_calls++;
     *floor_ver = 0U;
     return 0;
 }
@@ -279,6 +281,28 @@ int main(void)
     memcpy(packet_storage, efw + 128U, 20U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, packet_storage, 20U, true, 161U) == ECAT_FOE_SSC_ERR_PROGERROR);
     CHECK(flash.valid && flash.starts == before);
+
+    /* A disabled or mismatched header target must never reach the floor port. */
+    CHECK(ecat_foe_core_deinit(&core) == 0);
+    cfg.targets[0].write_unit = 4U;
+    cfg.anti_rollback_enable = true;
+    CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+    CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
+          sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
+    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
+          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
+          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    (void)make_efw(efw, payload, sizeof(payload));
+    put16(efw + 20, ECAT_FOE_TARGET_FPGA);
+    put32(efw + 144, ecat_foe_crc32_calc(efw, 144U));
+    floor_calls = 0U;
+    CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, efw, 128U, true, 170U) == 0U);
+    CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, 171U) == ECAT_FOE_SSC_ERR_PROGERROR);
+    CHECK(floor_calls == 0U);
+    cfg.anti_rollback_enable = false;
+    (void)make_efw(efw, payload, sizeof(payload));
 
     /* A bound async session must not suppress a synchronous target's abort. */
     CHECK(ecat_foe_core_deinit(&core) == 0);

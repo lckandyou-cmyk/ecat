@@ -216,6 +216,11 @@ static int validate_header(ecat_foe_core_async_t *s)
         c->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
         return -1;
     }
+    if (!c->cfg.targets[c->hdr.target_id - 1U].enabled ||
+        c->hdr.target_id != c->req_target_id || c->hdr.fw_version != c->req_fw_version) {
+        c->last_error = ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH;
+        return -1;
+    }
     if (c->cfg.anti_rollback_enable) {
         uint32_t floor = 0U;
         if (port_get_version_floor(c->hdr.target_id, &floor) != 0) {
