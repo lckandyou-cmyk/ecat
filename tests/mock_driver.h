@@ -31,6 +31,7 @@ typedef enum {
 typedef struct {
     uint8_t  mem[MOCK_DRIVER_MEM_SIZE];          /**< 物理存储介质 RAM 模拟 */
     bool     valid_flag;                         /**< 固件有效标记 (invalidate 清除, finalize 置位) */
+    uint32_t erased_watermark;
 
     /* 故障注入开关 */
     bool     inject_fail_init;

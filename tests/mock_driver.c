@@ -21,6 +21,7 @@ static int mock_init(void *user_ctx)
     if (m->inject_fail_init) {
         return -1;
     }
+    m->erased_watermark = 0U;
     return 0;
 }
 
@@ -57,7 +58,10 @@ static int mock_erase_to(uint32_t need_end, uint32_t *erased_end, void *user_ctx
     }
 
     /* 模拟 Flash 擦除: 全置 0xFF */
-    memset(m->mem, 0xFF, actual_end);
+    if (actual_end > m->erased_watermark) {
+        memset(m->mem + m->erased_watermark, 0xFF, actual_end - m->erased_watermark);
+        m->erased_watermark = actual_end;
+    }
     if (erased_end != NULL) {
         if (m->inject_insufficient_erase) {
             *erased_end = (need_end > 0) ? (need_end - 1U) : 0U;

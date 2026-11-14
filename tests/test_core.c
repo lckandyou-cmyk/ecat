@@ -403,6 +403,18 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
 }
 
+static void test_mock_erase_preserves_prior_sector(void)
+{
+    static mock_driver_t mcu;
+    uint32_t end = 0;
+    mock_driver_init(&mcu);
+    TEST_ASSERT_EQ_INT(mcu.driver.init(&mcu), 0, "mock init");
+    TEST_ASSERT_EQ_INT(mcu.driver.erase_to(1U, &end, &mcu), 0, "first erase");
+    mcu.mem[0] = 0x12U;
+    TEST_ASSERT_EQ_INT(mcu.driver.erase_to(MOCK_DRIVER_SECTOR_SIZE + 1U, &end, &mcu), 0, "next erase");
+    TEST_ASSERT_EQ_INT(mcu.mem[0], 0x12U, "previous sector retained");
+}
+
 static void test_null_data_aborts_driver_and_verifier(void)
 {
     static mock_driver_t mcu;
@@ -3088,6 +3100,7 @@ int main(void)
     RUN_TEST(test_filename_rejection_driver_zero_calls);
     RUN_TEST(test_soes_state_transition_aborts_active_session);
     RUN_TEST(test_null_data_aborts_driver_and_verifier);
+    RUN_TEST(test_mock_erase_preserves_prior_sector);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);

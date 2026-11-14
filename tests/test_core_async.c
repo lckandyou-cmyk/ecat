@@ -16,6 +16,7 @@ typedef struct {
     unsigned starts;
     unsigned polls;
     unsigned aborts;
+    uint32_t erased_watermark;
     bool immediate;
 } async_flash_t;
 
@@ -74,6 +75,7 @@ static ecat_foe_target_async_result_t flash_poll(void *ctx,
     f->polls++;
     switch (op->kind) {
     case ECAT_FOE_TARGET_OP_INIT:
+        f->erased_watermark = 0U;
         break;
     case ECAT_FOE_TARGET_OP_INVALIDATE:
         f->valid = false;
@@ -81,7 +83,10 @@ static ecat_foe_target_async_result_t flash_poll(void *ctx,
     case ECAT_FOE_TARGET_OP_ERASE_TO: {
         uint32_t end = (op->need_end + 255U) & ~255U;
         if (end > sizeof(f->flash)) return ECAT_FOE_TARGET_ASYNC_FAILED;
-        memset(f->flash, 0xFF, end);
+        if (end > f->erased_watermark) {
+            memset(f->flash + f->erased_watermark, 0xFF, end - f->erased_watermark);
+            f->erased_watermark = end;
+        }
         op->erased_end = end;
         break;
     }
@@ -152,6 +157,17 @@ int main(void)
     uint8_t payload[130U];
     ecat_foe_core_cfg_t cfg;
 
+    memset(&flash, 0, sizeof(flash));
+    {
+        ecat_foe_target_async_op_t op = {0};
+        op.kind = ECAT_FOE_TARGET_OP_ERASE_TO;
+        op.need_end = 1U;
+        CHECK(flash_poll(&flash, &op) == ECAT_FOE_TARGET_ASYNC_COMPLETE);
+        flash.flash[0] = 0x12U;
+        op.need_end = 257U;
+        CHECK(flash_poll(&flash, &op) == ECAT_FOE_TARGET_ASYNC_COMPLETE);
+        CHECK(flash.flash[0] == 0x12U);
+    }
     memset(&flash, 0, sizeof(flash));
     memset(flash.flash, 0xFF, sizeof(flash.flash));
     for (size_t i = 0U; i < sizeof(payload); i++) payload[i] = (uint8_t)(i ^ 0x5AU);
