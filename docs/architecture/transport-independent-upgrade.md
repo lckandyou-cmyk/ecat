@@ -1,6 +1,6 @@
 # 可选传输的统一升级架构
 
-状态：实施中的设计基线。FoE 是默认入口；其他入口只有接入并通过验收后才声明支持。
+状态：本轮统一架构实施与宿主验收已完成。FoE 是默认入口；可选 FILE 流为已验证的第二入口参考，硬件传输仍须分别实现和验收。
 
 ## 边界
 
@@ -48,7 +48,7 @@ FoE 默认启用；宿主文件流入口显式启用。后续硬件传输各自�
 
 ## 实施状态与接入
 
-步骤 1 至 7 已实现。收尾构建矩阵和最终回归记录随步骤 8 更新。硬件 UART/CAN/USB/网络协议没有实现，不能仅凭通用接口宣称已经支持。
+步骤 1 至 8 已完成，最终从干净 git archive 副本验证。硬件 UART/CAN/USB/网络协议没有实现，不能仅凭通用接口宣称已经支持。
 
 - `include/ecat_upgrade_request.h`：只携带目标与候选版本，无物理地址。旧 WRQ 文件名解析复用同一元数据 begin 路径。
 - `include/ecat_upgrade_session.h`：独占所有者和单调会话代号，无协议和硬件依赖。
@@ -86,3 +86,18 @@ make build-upgrade ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/upgrade-shared
 make test-upgrade-build 覆盖默认 FoE、无传输、仅文件流和两入口同时启用四种 archive 对象与正反链接结果，并检查不覆盖已有产物。已纳入 make test。
 同步/异步测试覆盖入口争用、过期代号、等待时缓冲复用、重复包不重写、显式结束、取消、提交后延迟重试及超时后新所有者保护。相同 EFW 通过 FoE 与文件流的成功、CRC 错误、截断和验签失败结果有对照测试。
 固定 SOES 源码宿主测试覆盖共享模式成功、失败、乱序、结构错误、BOOT 迁移和容量边界；Monocypher 测试验证密码学互操作。真实 SSC、MCU Flash、物理总线和主站仍未验证，宿主测试不证明掉电安全。
+
+## 本轮最终验收记录
+
+在 macOS 宿主 Clang、PyNaCl 环境，以 Bash 分别记录每条命令退出码。所有测试从干净 git archive 副本运行：
+
+| 命令 | 退出码 |
+| --- | --- |
+| make test | 0 |
+| make test-asan | 0 |
+| make test-sentinels | 0 |
+| make test-soes（严格哈希模式） | 0 |
+| make test-monocypher | 0 |
+| make test-bootloader（严格哈希模式） | 0 |
+
+SOES 使用提交 6ef7b9415e936c061ad30626ca00004bdde2ac62 的四文件固定基线；Monocypher 为已校验归档的 4.0.3。另验证 SOES 静态库配置能编译，以及新库的安全 clean 保留用户文件。测试证明本轮宿主契约，不扩大真实硬件验证范围。
