@@ -28,6 +28,13 @@ static bool g_finalize_called = false;
 static bool g_abort_called = false;
 static uint32_t g_erased_bytes = 0U;
 
+static bool g_read_open_called = false;
+static bool g_read_close_called = false;
+static int g_valid_state = 0;
+static int g_driver_locked = 0;
+static bool g_fail_read = false;
+static bool g_fail_init = false;
+
 static void reset_mock_flags(void)
 {
     g_init_called = false;
@@ -35,6 +42,63 @@ static void reset_mock_flags(void)
     g_finalize_called = false;
     g_abort_called = false;
     g_erased_bytes = 0U;
+    g_read_open_called = false;
+    g_read_close_called = false;
+    g_valid_state = 0;
+    g_driver_locked = 0;
+    g_fail_read = false;
+    g_fail_init = false;
+}
+
+static int lifecycle_read_open(void *ctx)
+{
+    (void)ctx;
+    g_read_open_called = true;
+    if (g_fail_init) return -1;
+    g_driver_locked = 1;
+    return 0;
+}
+
+static void lifecycle_read_close(void *ctx)
+{
+    (void)ctx;
+    g_read_close_called = true;
+    g_driver_locked = 0;
+}
+
+static int lifecycle_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
+{
+    (void)ctx;
+    if (g_fail_read) return -1;
+    if (offset + len > MOCK_PARAM_SIZE) return -1;
+    memcpy(buf, &g_mock_param_flash[offset], len);
+    return 0;
+}
+
+static int lifecycle_init(void *ctx)
+{
+    (void)ctx;
+    g_init_called = true;
+    if (g_fail_init) return -1;
+    g_driver_locked = 1;
+    return 0;
+}
+
+static int lifecycle_finalize(void *ctx)
+{
+    (void)ctx;
+    g_finalize_called = true;
+    g_valid_state = 1;
+    g_driver_locked = 0;
+    return 0;
+}
+
+static void lifecycle_abort(void *ctx)
+{
+    (void)ctx;
+    g_abort_called = true;
+    g_valid_state = 0;
+    g_driver_locked = 0;
 }
 
 /* Param Flash Mock 驱动 */
@@ -218,7 +282,7 @@ int main(void)
     assert(memcmp(rx_buffer, g_mock_log_flash, MOCK_LOG_SIZE) == 0);
     assert(ecat_transfer_get_crc32(&manager) == expected_log_crc);
     assert(ecat_transfer_finish(&manager, &channel_can, token2) == ECAT_TRANSFER_COMPLETE);
-    assert(g_finalize_called);
+    assert(!g_finalize_called); /* 导出完成不应调用写提交 finalize */
 
     /* ---------------------------------------------------------------------- */
     /* 3. 权限与非法操作拦截验证                                             */
@@ -314,6 +378,125 @@ int main(void)
     /* 取消固件升级，核实 core 回到 IDLE/ABORT 状态 */
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, fw_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.state == ECAT_FOE_STATE_IDLE || core.state == ECAT_FOE_STATE_ERROR);
+
+    /* 验证 Issue 2: 只读 EXPORT 生命周期与清理契约 */
+    printf("--- 测试 EXPORT 只读生命周期与驱动清理 ---\n");
+    reset_mock_flags();
+    ecat_transfer_request_t exp_req = {
+        .transport_id = 1U,
+        .target_id = 2U, /* params (ECAT_TARGET_TYPE_DATA) */
+        .direction = ECAT_TRANSFER_DIR_EXPORT,
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t exp_token = 0;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_init_called == true);
+    /* 导出完成，严禁调用 io.finalize (不可用写提交激活镜像) */
+    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_finalize_called == false);
+
+    /* 2.1 固件区块导出取消: 必须清理实际打开的 registry 驱动，且不得误触发 core_abort */
+    ecat_target_desc_t fw_export_desc;
+    memset(&fw_export_desc, 0, sizeof(fw_export_desc));
+    fw_export_desc.target_id = 10U;
+    strncpy(fw_export_desc.name, "fw_legacy_drv", sizeof(fw_export_desc.name));
+    fw_export_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    fw_export_desc.permissions = ECAT_PERM_RW;
+    fw_export_desc.max_size = 4096U;
+    fw_export_desc.enabled = true;
+    fw_export_desc.driver.io.init = lifecycle_init;
+    fw_export_desc.driver.io.read = lifecycle_read;
+    fw_export_desc.driver.io.write = param_write;
+    fw_export_desc.driver.io.erase_to = param_erase_to;
+    fw_export_desc.driver.io.finalize = lifecycle_finalize;
+    fw_export_desc.driver.io.abort = lifecycle_abort;
+    assert(ecat_target_registry_add(&reg, &fw_export_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 0U, 10U, ECAT_PERM_RW) == 0);
+
+    reset_mock_flags();
+    exp_req.target_id = 10U;
+    exp_req.direction = ECAT_TRANSFER_DIR_EXPORT;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_init_called == true);
+    assert(g_driver_locked == 1);
+    assert(core.state == ECAT_FOE_STATE_IDLE);
+    /* 取消导出: 必须清理注册表驱动 (locked 归零并调用 abort)，且 core 保持 IDLE */
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_abort_called == true);
+    assert(g_driver_locked == 0);
+    assert(core.state == ECAT_FOE_STATE_IDLE);
+
+    /* 2.2 专用只读生命周期 (read_open / read_close): 不触碰写提交与写失效 */
+    ecat_target_desc_t ro_desc;
+    memset(&ro_desc, 0, sizeof(ro_desc));
+    ro_desc.target_id = 11U;
+    strncpy(ro_desc.name, "ro_lifecycle", sizeof(ro_desc.name));
+    ro_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    ro_desc.permissions = ECAT_PERM_RW;
+    ro_desc.max_size = 4096U;
+    ro_desc.enabled = true;
+    ro_desc.driver.read_open = lifecycle_read_open;
+    ro_desc.driver.read_close = lifecycle_read_close;
+    ro_desc.driver.io.init = lifecycle_init;
+    ro_desc.driver.io.read = lifecycle_read;
+    ro_desc.driver.io.write = param_write;
+    ro_desc.driver.io.erase_to = param_erase_to;
+    ro_desc.driver.io.finalize = lifecycle_finalize;
+    ro_desc.driver.io.abort = lifecycle_abort;
+    assert(ecat_target_registry_add(&reg, &ro_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 0U, 11U, ECAT_PERM_RW) == 0);
+
+    /* 导出成功生命周期: 保持现有 valid 标记不变 */
+    reset_mock_flags();
+    g_valid_state = 1; /* 介质中已有合法镜像 */
+    exp_req.target_id = 11U;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_open_called == true);
+    assert(g_init_called == false); /* read_open 优先于 io.init */
+    assert(g_driver_locked == 1);
+    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_close_called == true);
+    assert(g_driver_locked == 0);
+    assert(g_finalize_called == false);
+    assert(g_valid_state == 1); /* 有效标记未被篡改 */
+
+    /* 导出取消生命周期: 不可在读取消时使镜像失效 */
+    reset_mock_flags();
+    g_valid_state = 1;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_open_called == true);
+    assert(g_driver_locked == 1);
+    assert(ecat_transfer_cancel(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_close_called == true);
+    assert(g_driver_locked == 0);
+    assert(g_abort_called == false);
+    assert(g_valid_state == 1); /* 取消读取绝不使原有固件镜像失效 */
+
+    /* 2.3 读失败错误处理与只读会话清理 */
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(g_driver_locked == 1);
+    g_fail_read = true;
+    uint8_t read_chunk[16];
+    size_t actual_r = 0;
+    assert(ecat_transfer_read(&manager, &channel_uart, exp_token, read_chunk, sizeof(read_chunk), &actual_r) == ECAT_TRANSFER_FAILED);
+    assert(g_read_close_called == true);
+    assert(g_driver_locked == 0);
+    /* 会话已释放，其他 owner 可以立即开始 */
+    g_fail_read = false;
+    uint64_t next_token = 0;
+    assert(ecat_transfer_begin(&manager, &channel_can, &exp_req, &next_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&manager, &channel_can, next_token) == ECAT_TRANSFER_COMPLETE);
+
+    /* 2.4 初始化失败不污染驱动状态与会话 */
+    reset_mock_flags();
+    g_fail_init = true;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_FAILED);
+    assert(g_driver_locked == 0);
+    g_fail_init = false;
+    assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;

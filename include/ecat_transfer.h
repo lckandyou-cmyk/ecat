@@ -84,6 +84,7 @@ typedef struct {
     uint32_t running_crc32;             /* 传输流实时 CRC32 校验码 */
     bool active;                        /* 会话是否处于激活状态 */
     bool driver_initialized;            /* 驱动是否成功初始化 (用于保证 abort 契约) */
+    bool core_started;                  /* 是否已向底层 core 发起请求 */
 
     ecat_transfer_err_t last_error;     /* 最近一次错误码 */
 } ecat_transfer_t;

@@ -57,7 +57,7 @@ typedef enum {
     ECAT_TARGET_TYPE_DATA           /* 普通数据区块: 参数、日志、配置、字库等纯数据流 */
 } ecat_target_type_t;
 
-/* 扩展目标驱动定义: 包含标准写入回调与可选导出尺寸获取 */
+/* 扩展目标驱动定义: 包含标准写入回调、可选导出尺寸获取以及只读生命周期回调 */
 typedef struct {
     ecat_foe_target_driver_t io;
     /**
@@ -66,6 +66,20 @@ typedef struct {
      * @return 返回实际有效数据量；若为 NULL 则默认使用区块配置的 max_size
      */
     uint32_t (*get_data_size)(void *user_ctx);
+
+    /**
+     * @brief 可选只读打开回调 (EXPORT 开始时优先调用)
+     * @param user_ctx 用户自定义上下文指针
+     * @return 0 成功，非 0 失败；若为 NULL 则回退到 io.init
+     */
+    int (*read_open)(void *user_ctx);
+
+    /**
+     * @brief 可选只读关闭回调 (EXPORT 结束或取消时调用)
+     * 仅释放只读会话资源/锁，绝不触碰镜像有效性标记或触发写入失效。
+     * @param user_ctx 用户自定义上下文指针
+     */
+    void (*read_close)(void *user_ctx);
 } ecat_target_driver_t;
 
 /* 单个目标区块描述符 */
