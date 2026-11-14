@@ -18,4 +18,13 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-I' + str(root / 'include'),
                     '-I' + str(tmp_path), '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"',
                     '-c', str(source), '-o', str(tmp_path / 'check.o')], check=True)
+    # Every TU must select the custom config even when the template is seen first.
+    first = tmp_path / 'template_first.c'
+    first.write_text('#include "ecat_foe_conf_template.h"\n'
+                     '#include "ecat_foe_core.h"\n'
+                     'typedef char check_size[sizeof(((ecat_foe_core_t *)0)->residual_buf) == 512 ? 1 : -1];\n')
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-Wall', '-Werror',
+                    '-I' + str(root / 'include'), '-I' + str(tmp_path),
+                    '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(first),
+                    '-o', str(tmp_path / 'template_first.o')], check=True)
 print('PASS: custom core configuration controls public buffer size')

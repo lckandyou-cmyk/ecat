@@ -8,8 +8,15 @@
  * 所有物理基地址与分区限额完全由本地硬编码管理，坚决不信任固件携带的任何物理地址。
  */
 
-#ifndef ECAT_FOE_CONF_H
-#define ECAT_FOE_CONF_H
+/* A direct template include must honor the same selection as core.h.  The
+ * selection guard also permits a user config copied from this template. */
+#if defined(ECAT_FOE_CONFIG_HEADER) && !defined(ECAT_FOE_CONFIG_SELECTING)
+#define ECAT_FOE_CONFIG_SELECTING
+#include ECAT_FOE_CONFIG_HEADER
+#undef ECAT_FOE_CONFIG_SELECTING
+#else
+#ifndef ECAT_FOE_CONF_TEMPLATE_H
+#define ECAT_FOE_CONF_TEMPLATE_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -86,4 +93,5 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver);
 }
 #endif
 
-#endif /* ECAT_FOE_CONF_H */
+#endif /* ECAT_FOE_CONF_TEMPLATE_H */
+#endif /* configuration selection */
