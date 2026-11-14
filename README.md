@@ -85,6 +85,14 @@ Windows 可执行文件目前未签名，且不支持 `--overwrite`；请指定�
 
 从 [SOES Bootloader 示例](examples/bootloader_soes/README.md) 开始查看接口、配置和移植步骤。示例驱动用于展示接口，不是可直接用于产品的板级实现。
 
+需要调整核心静态缓冲区时，将 `include/ecat_foe_conf_template.h` 复制为工程自己的 `ecat_foe_conf.h` 并加入包含路径；所有使用核心头文件的编译单元以及核心本身都要使用相同配置。Shell 中可用单引号保留宏值里的双引号，例如：
+
+```sh
+cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c src/ecat_foe_core.c
+```
+
+同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 使用单个整数字面量（例如 `148U`、`256U`），各编译单元的写法和数值都必须一致。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
+
 ## 验证状态
 
 | 范围 | 已验证 | 尚未验证 |
