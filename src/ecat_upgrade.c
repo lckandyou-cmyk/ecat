@@ -34,6 +34,9 @@ static ecat_upgrade_result_t fail(ecat_upgrade_t *u, const void *owner, uint64_t
     u->pending = false;
     u->ending = false;
     ecat_foe_core_on_abort(u->core);
+    /* Preserve terminal diagnostics for protocol post-hooks and status readers. */
+    u->core->state = ECAT_FOE_STATE_ERROR;
+    u->core->last_error = u->last_error;
     (void)ecat_upgrade_session_release(&u->session, owner, token);
     return ECAT_UPGRADE_FAILED;
 }

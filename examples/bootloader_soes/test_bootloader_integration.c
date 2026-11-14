@@ -225,6 +225,22 @@ int main(void)
                                           NULL);
         assert(init_rc == 0);
         assert(app.is_initialized == true);
+        assert(app.adapter.transport.upgrade == &app.upgrade);
+        {
+            int file_entry = 0;
+            uint64_t token = 0;
+            ecat_upgrade_request_t request = {BOOTLOADER_TARGET_MCU_ID, 0x01000000U};
+            master_foe_response_t rejected;
+            const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+            assert(ecat_upgrade_begin(&app.upgrade, &file_entry, &request, &token) == ECAT_UPGRADE_COMPLETE);
+            assert(bootloader_master_send_wrq(&app, &s_foe_cfg, name, 0U, &rejected) == 0);
+            assert(rejected.opcode == BOOTLOADER_FOE_OP_ERR);
+            assert(ecat_upgrade_session_owns(&app.upgrade.session, &file_entry, token));
+            bootloader_app_abort(&app);
+            assert(ecat_upgrade_session_owns(&app.upgrade.session, &file_entry, token));
+            assert(ecat_upgrade_cancel(&app.upgrade, &file_entry, token) == ECAT_UPGRADE_COMPLETE);
+        }
+
 
         /* 1. 构造合法 v2 .efw 固件 (148 字节头部 + 128 字节载荷 = 276 字节) */
         size_t efw_len = bootloader_master_build_efw(

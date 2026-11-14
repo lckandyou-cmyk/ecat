@@ -26,6 +26,7 @@ extern "C" {
  * @brief Bootloader 应用层主上下文结构体
  */
 typedef struct {
+    ecat_upgrade_t            upgrade;
     ecat_foe_core_t           core;           /**< 核心升级状态机实例 */
     ecat_foe_soes_adapter_t   adapter;        /**< SOES 协议栈适配器实例 */
     bootloader_flash_driver_t flash_drv;      /**< 目标存储 Flash 驱动实例 */

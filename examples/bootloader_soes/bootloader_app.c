@@ -61,7 +61,9 @@ int bootloader_app_init(bootloader_app_t *app,
 
     /* 4. 初始化 SOES 适配层并绑定信箱上下文 (传入 SOES 文件写缓冲容量 foe_cfg->buffer_size) */
     uint32_t foe_buf_size = (foe_cfg != NULL) ? foe_cfg->buffer_size : 0;
+    if (ecat_upgrade_init(&app->upgrade, &app->core) != 0) return -1;
     ecat_foe_soes_init(&app->adapter, &app->core, foe_buf_size);
+    if (ecat_foe_soes_bind_upgrade(&app->adapter, &app->upgrade) != 0) return -1;
     if (ecat_foe_soes_set_mbx_context(&app->adapter, mbxcontrol, mbx, num_slots, slot_size) != 0) {
         return -1;
     }
@@ -118,7 +120,7 @@ int bootloader_app_step(bootloader_app_t *app,
         /* The mailbox owner must discard slot 0 after this error. */
         if (app->core.state == ECAT_FOE_STATE_WRQ_ACKED ||
             app->core.state == ECAT_FOE_STATE_DATA || app->core.session_active) {
-            ecat_foe_core_on_abort(&app->core);
+            ecat_foe_transport_abort(&app->adapter.transport);
         }
         if (app->adapter.foe_reset_fn != NULL) app->adapter.foe_reset_fn();
         return -1;
@@ -138,7 +140,7 @@ int bootloader_app_step(bootloader_app_t *app,
 void bootloader_app_abort(bootloader_app_t *app)
 {
     if (app != NULL && app->is_initialized) {
-        ecat_foe_core_on_abort(&app->core);
+        ecat_foe_transport_abort(&app->adapter.transport);
         if (app->adapter.foe_reset_fn != NULL) {
             app->adapter.foe_reset_fn();
         }
