@@ -22,6 +22,7 @@
 #include "ecat_foe_core.h"
 #include "ecat_foe_soes.h"
 #include "mock_driver.h"
+#include "ecat_upgrade.h"
 
 static int g_core_tests_run = 0;
 static int g_core_tests_passed = 0;
@@ -401,6 +402,40 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     cfg.signature_verifier.abort = mock_signature_abort;
     cfg.signature_verifier.user_ctx = verifier;
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
+}
+
+static void test_owned_sync_upgrade_stream(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    ecat_upgrade_t upgrade;
+    int foe = 0, file = 0;
+    uint64_t token = 0, other = 0;
+    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "manager initialized");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &foe, &request, &token), ECAT_UPGRADE_COMPLETE, "owner begins");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &file, &request, &other), ECAT_UPGRADE_BUSY, "other entry busy");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, token, NULL, 0), ECAT_UPGRADE_STALE, "other entry rejected");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &file, token), ECAT_UPGRADE_STALE, "other entry cannot cancel");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &foe, token, NULL, 0), ECAT_UPGRADE_COMPLETE, "empty write is no-op");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_WRQ_ACKED, "empty write did not finish");
+    uint8_t payload[32] = {1, 2, 3}, efw[256];
+    size_t len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
+                                0x01020304U, 0U, payload, sizeof(payload));
+    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &foe, token, efw, len), ECAT_UPGRADE_COMPLETE, "stream written");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "explicit finish required");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_finish(&upgrade, &foe, token), ECAT_UPGRADE_COMPLETE, "finish commits");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "committed once");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &foe, token), ECAT_UPGRADE_STALE, "completed token stale");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &file, &request, &other), ECAT_UPGRADE_COMPLETE, "next owner starts");
+    TEST_ASSERT(other > token, "new token generation");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, other, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), ECAT_UPGRADE_COMPLETE, "driver active");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, other, NULL, 1), ECAT_UPGRADE_FAILED, "invalid input fails session");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "failure cleans driver once");
+    TEST_ASSERT_EQ_INT(upgrade.last_error, ECAT_FOE_CORE_ERR_INVALID_ARG, "diagnostic retained");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &file, other), ECAT_UPGRADE_STALE, "failed token stale");
 }
 
 static void test_begin_request_without_filename(void)
@@ -3131,6 +3166,7 @@ int main(void)
     RUN_TEST(test_null_data_aborts_driver_and_verifier);
     RUN_TEST(test_mock_erase_preserves_prior_sector);
     RUN_TEST(test_begin_request_without_filename);
+    RUN_TEST(test_owned_sync_upgrade_stream);
     RUN_TEST(test_soes_invalid_boot_exit_aborts_active_session);
     RUN_TEST(test_optional_signature_policy_and_readback);
     RUN_TEST(test_call_sequence_and_mutex);

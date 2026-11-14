@@ -7,7 +7,7 @@ SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
 
 # 阶段 B: 核心升级状态机、目标驱动与 SOES 适配测试源码
-SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c
+SRC_CORE = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c src/ecat_upgrade.c src/ecat_upgrade_session.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 
 # 阶段 C: 真实 SOES 源码宿主独立 Harness 测试源码 (按需检测外部 SOES 源码)
