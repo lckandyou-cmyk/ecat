@@ -82,7 +82,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async test-core-async
+test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -155,6 +155,13 @@ test-core-async:
 
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
+
+.PHONY: test-upgrade-session
+test-upgrade-session:
+	@TMP_SESSION_DIR=$$(mktemp -d /tmp/ecat_upgrade_session_XXXXXX) && \
+	trap 'rm -rf "$$TMP_SESSION_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_SESSION_DIR/test_upgrade_session" src/ecat_upgrade_session.c tests/test_upgrade_session.c && \
+	"$$TMP_SESSION_DIR/test_upgrade_session"
 
 test-examples:
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_examples_XXXXXX) && \
@@ -240,6 +247,7 @@ test-soes:
 # 3. 栈帧尺寸限定：核心库代码 (src/ecat_foe_core.c) 为零动态分配，内部函数最大栈帧约 240 字节系在当前所测宿主环境
 #    (macOS arm64 / Apple Clang) 下的静态测量值，而非通用常量。
 test-asan:
+	@$(MAKE) test-upgrade-session CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@echo "--- 编译并运行宿主示例套件 (ASan/UBSan 模式) ---"
 	@$(MAKE) test-examples CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
