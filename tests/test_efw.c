@@ -632,13 +632,18 @@ static void test_property_512_bit_flips(void)
 }
 
 /**
- * 测项 22: 属性测试 - 0 到 63 字节截断输入安全校验 (不得越界读)
+ * 测项 22: 所有头部截断长度均使用独立的精确大小分配。
  */
 static void test_property_truncation(void)
 {
-    for (size_t len = 0; len < 64; len++) {
+    size_t tested_lengths = 0U;
+    for (size_t len = 0; len < ECAT_FOE_EFW_HEADER_MIN_LEN; len++) {
+        tested_lengths++;
+        uint8_t *truncated = malloc(len == 0U ? 1U : len);
+        TEST_ASSERT(truncated != NULL, "分配截断输入");
+        memcpy(truncated, s_spec_valid_efw, len);
         uint16_t hlen = 0;
-        ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(s_spec_valid_efw, len, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
+        ecat_foe_efw_err_t err1 = ecat_foe_efw_parse_stage1(truncated, len, ECAT_FOE_EFW_HEADER_MIN_LEN, &hlen);
         if (len < 8) {
             TEST_ASSERT_EQ_INT(err1, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 1 长度 < 8 必须返回 BUFFER_TOO_SMALL");
         } else {
@@ -646,9 +651,11 @@ static void test_property_truncation(void)
         }
 
         ecat_foe_efw_header_t hdr;
-        ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(s_spec_valid_efw, len, &hdr);
-        TEST_ASSERT_EQ_INT(err2, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 2 长度 < 64 必须返回 BUFFER_TOO_SMALL");
+        ecat_foe_efw_err_t err2 = ecat_foe_efw_parse_stage2(truncated, len, &hdr);
+        free(truncated);
+        TEST_ASSERT_EQ_INT(err2, ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL, "阶段 2 截断头必须返回 BUFFER_TOO_SMALL");
     }
+    TEST_ASSERT_EQ_INT(tested_lengths, ECAT_FOE_EFW_HEADER_MIN_LEN, "测试覆盖全部截断长度");
 }
 
 /**
