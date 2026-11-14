@@ -795,6 +795,39 @@ int main(void)
     assert(g_finalize_called == true);
     assert(fw_manager.session.owner == NULL);
 
+    /* ---------------------------------------------------------------------- */
+    /* 8. Issue 8: 64位超大尺寸 (UINT32_MAX+2) 整数窄化与缓冲区溢出防护     */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 Issue 8: 64 位大尺寸长度防窄化与安全拦截 ---\n");
+#if __SIZEOF_SIZE_T__ > 4
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_unknown, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    uint8_t single_byte = 0xAA;
+    /* 传入 64 位大长度 UINT32_MAX + 2，若窄化为 1 字节将越界访问 single_byte 后续内存 */
+    ecat_transfer_result_t oversize_res = ecat_transfer_write(
+        &fw_manager, &channel_uart, data_tok, &single_byte, (size_t)UINT32_MAX + 2U);
+    assert(oversize_res == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(g_abort_called == true);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 导出路径防窄化测试: 传入超大容量缓冲，必须正确计算剩余量而非窄化截断 */
+    ecat_transfer_request_t exp_req_oversize = {
+        .transport_id = 1U,
+        .target_id = 2U,
+        .direction = ECAT_TRANSFER_DIR_EXPORT,
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t exp_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &exp_req_oversize, &exp_tok) == ECAT_TRANSFER_COMPLETE);
+    uint8_t exp_out[32];
+    size_t exp_actual = 0;
+    assert(ecat_transfer_read(&fw_manager, &channel_uart, exp_tok, exp_out, (size_t)UINT32_MAX + 2U, &exp_actual) == ECAT_TRANSFER_COMPLETE);
+    assert(exp_actual == 16U);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, exp_tok) == ECAT_TRANSFER_COMPLETE);
+#endif
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

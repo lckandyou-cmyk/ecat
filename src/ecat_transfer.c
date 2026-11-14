@@ -315,7 +315,8 @@ ecat_transfer_result_t ecat_transfer_read(
     }
 
     uint32_t remaining = t->total_size - t->current_offset;
-    uint32_t to_read = (remaining < (uint32_t)buf_capacity) ? remaining : (uint32_t)buf_capacity;
+    size_t to_read_sz = ((size_t)remaining < buf_capacity) ? (size_t)remaining : buf_capacity;
+    uint32_t to_read = (uint32_t)to_read_sz;
 
     if (t->target->driver.io.read == NULL) {
         t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
@@ -379,19 +380,22 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 若声明了 expected_size，持续执行总包长度边界检查 */
-        if (t->total_size > 0U) {
-            if ((uint32_t)length > (t->total_size - t->current_offset)) {
-                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+        /* 先用 size_t 拒绝无法表示及超界长度，防止 64 位整型窄化与溢出 */
+        uint32_t fw_cap = (t->total_size > 0U) ? t->total_size : (t->target->max_size + 148U + 7U);
+        if (length > (size_t)UINT32_MAX ||
+            (size_t)t->current_offset + length > (size_t)fw_cap) {
+            t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+            if (t->core != NULL) {
                 ecat_foe_core_on_abort(t->core);
-                t->core_started = false;
-                t->active = false;
-                release_session(t, owner, token);
-                return ECAT_TRANSFER_FAILED;
             }
+            t->core_started = false;
+            t->active = false;
+            release_session(t, owner, token);
+            return ECAT_TRANSFER_FAILED;
         }
 
-        if (ecat_foe_core_on_data(t->core, data, length) != 0) {
+        uint32_t len32 = (uint32_t)length;
+        if (ecat_foe_core_on_data(t->core, data, len32) != 0) {
             if (t->core->last_error == ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             } else {
@@ -416,13 +420,13 @@ ecat_transfer_result_t ecat_transfer_write(
             }
         }
 
-        t->current_offset += (uint32_t)length;
-        ecat_foe_crc32_update(&t->running_crc32, data, length);
+        t->current_offset += len32;
+        ecat_foe_crc32_update(&t->running_crc32, data, len32);
     } else {
-        /* DATA 普通数据流导入: 若声明 expected_size 则以此为上限，否则以 max_size 为上限 */
+        /* DATA 普通数据流导入: 先用 size_t 拒绝无法表示及超界长度 */
         uint32_t write_limit = (t->expected_size > 0U) ? t->expected_size : t->target->max_size;
-        if ((uint32_t)length > (UINT32_MAX - t->current_offset) ||
-            t->current_offset + (uint32_t)length > write_limit) {
+        if (length > (size_t)UINT32_MAX ||
+            (size_t)t->current_offset + length > (size_t)write_limit) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
@@ -433,8 +437,9 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
+        uint32_t len32 = (uint32_t)length;
         /* 按需擦除 */
-        uint32_t need_end = t->current_offset + (uint32_t)length;
+        uint32_t need_end = t->current_offset + len32;
         if (need_end > t->erased_watermark) {
             uint32_t actual_erased = 0U;
             if (t->target->driver.io.erase_to != NULL) {
@@ -467,7 +472,7 @@ ecat_transfer_result_t ecat_transfer_write(
         }
 
         int write_rc = t->target->driver.io.write(
-            t->current_offset, data, (uint32_t)length, t->target->user_ctx);
+            t->current_offset, data, len32, t->target->user_ctx);
         if (write_rc != 0) {
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
@@ -479,8 +484,8 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
-        t->current_offset += (uint32_t)length;
-        ecat_foe_crc32_update(&t->running_crc32, data, length);
+        t->current_offset += len32;
+        ecat_foe_crc32_update(&t->running_crc32, data, len32);
     }
 
     return ECAT_TRANSFER_COMPLETE;
