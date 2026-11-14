@@ -8,3 +8,15 @@ const ecat_upgrade_async_ops_t *test_upgrade_async_header(void)
 {
     return ecat_foe_core_async_ops();
 }
+
+/* Existing applications may use the old names with only this public header. */
+const ecat_foe_ssc_async_ops_t *test_legacy_async_header(void);
+const ecat_foe_ssc_async_ops_t *test_legacy_async_header(void)
+{
+    return ecat_foe_core_async_ssc_ops();
+}
+ecat_foe_ssc_async_result_t test_legacy_async_result(void);
+ecat_foe_ssc_async_result_t test_legacy_async_result(void)
+{
+    return ECAT_FOE_SSC_ASYNC_COMPLETE;
+}

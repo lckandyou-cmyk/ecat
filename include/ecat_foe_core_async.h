@@ -5,6 +5,7 @@
 #include "ecat_foe_core.h"
 #include "ecat_foe_target_async.h"
 #include "ecat_upgrade_async.h"
+#include "ecat_foe_async_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
