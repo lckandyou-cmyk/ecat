@@ -171,7 +171,7 @@
 
 4. **SOES FoE 文件名路由【已实现，真机待验证】**：
    - 现状事实：
-     1. SOES 源码事实：SOES 协议栈源码 `esc_foe.c` 第 70 到 73 行（已登记为三方引文 Q1）原生采用 `strncmp(foe_cfg->name, filename, strlen(foe_cfg->name))` 进行静态配置前缀比对，仅支持单个静态配置名。
+     1. SOES 源码事实：SOES 协议栈源码 `esc_foe.c` 第 70 到 73 行（已登记为三方引文 Q1）遍历文件配置表，采用 `strncmp (foe_file_name, foe_cfg->files[i].name, num_chars)` 比较请求长度指定的前缀；短前缀或空名称可能命中表项。
      2. 缺少 WRQ 钩子：SOES 原生未向外部暴露 WRQ 文件名解析或动态拦截回调。
      3. 宿主机 C3 复现事实：测试 `test_reproduce_soes_data_callback_without_wrq_stream_rejection` 证实，若未经历 WRQ 文件名解析与会话建立，直接由 SOES 驱动 `write_cb` 灌入首块数据，核心机因未建立有效目标与版本上下文直接拒绝数据流（返回 -1，错误码 `ECAT_FOE_CORE_ERR_INVALID_STATE`，适配层返回非零触发 FoE abort）。
    - 当前实现：前置邮箱钩子只读预检文件名和目标，暂存合法请求并配置文件表；原生 SOES 继续检查密码和 BOOT 状态。后置钩子仅在 SOES 产生 ACK(0) 后激活核心会话；核心激活失败时改写待发送响应并复位 SOES 状态。原生拒绝时不激活核心会话。

@@ -1,5 +1,10 @@
 # SSC FoE asynchronous adapter: stage 1
 
+> Historical stage 1 design note. The repository now also contains an async
+> firmware-upgrade core and target runner, exercised by host integration tests.
+> Real SSC, target Flash and master integration remain to be verified; see
+> [open issues](../open-issues.md) and the [porting workflow](../../.agents/skills/ecat-porting-guide/references/workflow.md).
+
 This stage adds a single-flight packet gate and an SSC callback wrapper. The
 wrapper accepts `bDataFollowing` explicitly and exposes a main-loop poll call.
 The gate copies one packet into caller-owned fixed storage, starts an
@@ -7,16 +12,15 @@ application-owned operation once, returns the configured BUSY code while that
 operation is pending, and only returns success/error when SSC retries the same
 packet.
 
-## Current boundary
+## Stage 1 boundary
 
 `ecat_foe_ssc_async` and `ecat_foe_ssc_on_data_following()` provide the packet
 retry boundary, not an asynchronous firmware-upgrade implementation. The
-wrapper still uses the synchronous core for WRQ validation, while DATA work is
-delegated to application-provided callbacks; it does not yet call
-`ecat_foe_core_on_data()` asynchronously or provide asynchronous Flash
-operations. Do not use this as a complete production upgrade path. The next
-implementation step is an incremental core/driver API connected to this
-wrapper without blocking the SSC main loop.
+wrapper uses the synchronous core for WRQ validation, while DATA work is
+delegated to callbacks. The stage 1 gate alone does not implement firmware
+upgrades. The current repository also provides an asynchronous core and target
+runner that can be connected to this gate; the complete path has host tests,
+but still requires validation on the actual SSC, target and master.
 
 ## Callback contract
 
