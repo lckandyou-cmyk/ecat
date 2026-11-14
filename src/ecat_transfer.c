@@ -137,6 +137,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     t->target = target;
     t->current_transport_id = request->transport_id;
     t->direction = request->direction;
+    t->expected_size = request->expected_size;
     t->current_offset = 0U;
     t->erased_watermark = 0U;
     t->active = true;
@@ -418,9 +419,10 @@ ecat_transfer_result_t ecat_transfer_write(
         t->current_offset += (uint32_t)length;
         ecat_foe_crc32_update(&t->running_crc32, data, length);
     } else {
-        /* DATA 普通数据流导入 */
+        /* DATA 普通数据流导入: 若声明 expected_size 则以此为上限，否则以 max_size 为上限 */
+        uint32_t write_limit = (t->expected_size > 0U) ? t->expected_size : t->target->max_size;
         if ((uint32_t)length > (UINT32_MAX - t->current_offset) ||
-            t->current_offset + (uint32_t)length > t->target->max_size) {
+            t->current_offset + (uint32_t)length > write_limit) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
@@ -521,7 +523,19 @@ ecat_transfer_result_t ecat_transfer_finish(
                 return ECAT_TRANSFER_FAILED;
             }
         } else {
-            /* DATA 模式 */
+            /* DATA 模式: 若声明 expected_size 则必须严格完全对齐 */
+            if (t->expected_size > 0U && t->current_offset != t->expected_size) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                if (t->driver_initialized && t->target->driver.io.abort != NULL) {
+                    t->target->driver.io.abort(t->target->user_ctx);
+                }
+                t->core_started = false;
+                t->driver_initialized = false;
+                t->active = false;
+                release_session(t, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
             if (t->target->driver.io.finalize != NULL) {
                 if (t->target->driver.io.finalize(t->target->user_ctx) != 0) {
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_FINALIZE;

@@ -741,6 +741,60 @@ int main(void)
     assert(fw_manager.session.owner == NULL);
     ecat_target_registry_set_enforce_acl(&reg, false);
 
+    /* ---------------------------------------------------------------------- */
+    /* 7. Issue 7: DATA 导入声明 expected_size 严格执行 (少收/多收/恰好/未知) */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 Issue 7: DATA 导入声明长度约束与完成校验 ---\n");
+    uint8_t data_bytes[64] = {0x55};
+
+    /* 7.1 少收测试: 声明 expected=16，写 4 字节，finish 必须失败并中止驱动 */
+    reset_mock_flags();
+    ecat_transfer_request_t req_data_16 = {
+        .transport_id = 1U,
+        .target_id = 2U, /* Target 2 是 DATA 类型 */
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t data_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_16, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, data_bytes, 4U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, data_tok) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(g_abort_called == true);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 7.2 多收测试: 声明 expected=16，尝试写 32 字节，write 必须失败并中止驱动 */
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_16, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, data_bytes, 32U) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(g_abort_called == true);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 7.3 恰好测试: 声明 expected=16，写入恰好 16 字节，finish 必须成功并 finalize */
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_16, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, data_bytes, 16U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(g_finalize_called == true);
+    assert(fw_manager.session.owner == NULL);
+
+    /* 7.4 未知长度测试: 声明 expected=0，流式写入 24 字节，finish 必须成功并 finalize */
+    reset_mock_flags();
+    ecat_transfer_request_t req_data_unknown = {
+        .transport_id = 1U,
+        .target_id = 2U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 0U,
+        .fw_version = 0U
+    };
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_unknown, &data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, data_tok, data_bytes, 24U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, data_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(g_finalize_called == true);
+    assert(fw_manager.session.owner == NULL);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

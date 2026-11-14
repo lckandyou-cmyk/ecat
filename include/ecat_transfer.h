@@ -81,6 +81,7 @@ typedef struct {
     ecat_transfer_dir_t direction;      /* 当前传输方向 */
     uint32_t current_offset;            /* 当前已处理偏移量 */
     uint32_t total_size;                /* 总大小 (导出时为数据量，导入时为限额) */
+    uint32_t expected_size;             /* 声明的预期总大小 (0 表示未知/流式传输) */
     uint32_t erased_watermark;          /* 已擦除高水位线 */
     uint32_t running_crc32;             /* 传输流实时 CRC32 校验码 */
     bool active;                        /* 会话是否处于激活状态 */
