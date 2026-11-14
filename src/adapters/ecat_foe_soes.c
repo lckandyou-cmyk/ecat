@@ -21,6 +21,7 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
         return;
     }
     adapter->core = core;
+    memset(&adapter->transport, 0, sizeof(adapter->transport));
     adapter->buffer_size = buffer_size;
     adapter->al_error_fn = NULL;
     adapter->foe_reset_fn = NULL;
@@ -40,6 +41,25 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
         adapter->target_to_file_map[i] = (int8_t)(i - 1);
     }
     s_active_adapter = adapter;
+}
+
+int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t *upgrade)
+{
+    if (adapter == NULL || upgrade == NULL || upgrade->core == NULL || adapter->core != upgrade->core ||
+        adapter->transport.upgrade != NULL || adapter->has_staged_wrq) return -1;
+    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
+        if (upgrade->core->cfg.targets[i].enabled && upgrade->core->cfg.targets[i].asynchronous)
+            return -1;
+    }
+    return ecat_foe_transport_init(&adapter->transport, upgrade);
+}
+
+static void soes_abort_core(ecat_foe_soes_adapter_t *adapter)
+{
+    if (adapter->transport.upgrade != NULL)
+        ecat_foe_transport_abort(&adapter->transport);
+    else
+        ecat_foe_core_on_abort(adapter->core);
 }
 
 void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter)
@@ -125,6 +145,8 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     s_active_adapter = adapter;
+    if (adapter->transport.upgrade != NULL)
+        return ecat_foe_transport_begin(&adapter->transport, filename, filename_len);
     return ecat_foe_core_on_wrq(adapter->core, filename, filename_len);
 }
 
@@ -143,6 +165,17 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
         return 1U;
+    }
+
+    if (adapter->transport.upgrade != NULL) {
+        bool more_data = length != 0U &&
+            (adapter->buffer_size == 0U || length >= adapter->buffer_size);
+        if (ecat_foe_transport_start(&adapter->transport, data, length, more_data) != ECAT_UPGRADE_ASYNC_COMPLETE) {
+            ecat_foe_transport_abort(&adapter->transport);
+            adapter->write_callback_failed = true;
+            return 1U;
+        }
+        return 0U;
     }
 
     /* 0 长度包结束路径 */
@@ -194,7 +227,7 @@ void ecat_foe_soes_post_state_hook(ecat_foe_soes_adapter_t *adapter, uint8_t *as
         (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
          adapter->core->state == ECAT_FOE_STATE_DATA || adapter->core->session_active)) {
         /* 同步中止核心和 SOES 会话，保留未完成标记。 */
-        ecat_foe_core_on_abort(adapter->core);
+        soes_abort_core(adapter);
         if (adapter->foe_reset_fn != NULL) {
             adapter->foe_reset_fn();
         }
@@ -355,7 +388,7 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->staged_filename[0] = '\0';
         adapter->staged_target_id = 0;
         if (adapter->core != NULL) {
-            ecat_foe_core_on_abort(adapter->core);
+            soes_abort_core(adapter);
         }
         return 0;
     }
@@ -460,7 +493,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
         if ((rejected || claimed == 0U) &&
             (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
              adapter->core->state == ECAT_FOE_STATE_DATA)) {
-            ecat_foe_core_on_abort(adapter->core);
+            soes_abort_core(adapter);
             if (claimed == 0U && adapter->foe_reset_fn != NULL) adapter->foe_reset_fn();
         }
     }
@@ -486,7 +519,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
              (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
               adapter->core->state == ECAT_FOE_STATE_DATA)) ||
             (claimed == 0U && adapter->core->session_active)) {
-            ecat_foe_core_on_abort(adapter->core);
+            soes_abort_core(adapter);
         }
     }
 
@@ -520,7 +553,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                 }
                 if (adapter->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
                     adapter->core->state == ECAT_FOE_STATE_DATA) {
-                    ecat_foe_core_on_abort(adapter->core);
+                    soes_abort_core(adapter);
                 }
                 if (adapter->foe_reset_fn != NULL) adapter->foe_reset_fn();
                 return -1;
@@ -621,7 +654,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
 
     if (opcode == ECAT_FOE_OP_ACK && packet_num == 0) {
         /* SOES 原生校验通过且已将有效 ACK(0) 置入发送邮箱待发：尝试正式提交核心会话 */
-        int rc = ecat_foe_core_on_wrq(adapter->core,
+        int rc = ecat_foe_soes_on_wrq(adapter,
                                       adapter->staged_filename,
                                       strlen(adapter->staged_filename));
         adapter->has_staged_wrq = false;

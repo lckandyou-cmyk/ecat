@@ -7,6 +7,7 @@
 #define ECAT_FOE_SOES_H
 
 #include "ecat_foe_core.h"
+#include "ecat_foe_transport.h"
 #include "esc_foe.h"
 
 #ifdef __cplusplus
@@ -93,6 +94,7 @@ typedef struct {
 
 typedef struct {
     ecat_foe_core_t        *core;
+    ecat_foe_transport_t    transport;
     uint32_t                buffer_size;        /**< SOES 的 foe_cfg->buffer_size */
     ecat_foe_al_error_fn_t  al_error_fn;        /**< 注入的 AL 错误设置回调 (真实环境接入 ESC_ALerror，单测接入测试桩) */
     ecat_foe_reset_fn_t     foe_reset_fn;       /**< 协议栈状态机复位回调 (如真实环境接入 FOE_init，可为 NULL) */
@@ -116,6 +118,11 @@ typedef struct {
  * @param buffer_size SOES 配置的 fbuffer 尺寸
  */
 void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core, uint32_t buffer_size);
+/* Bind after init, before dispatch. Shared manager must own the same core;
+ * SOES write callbacks support only synchronous targets. Legacy init alone
+ * keeps the existing exclusive-core behavior. */
+int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t *upgrade);
+
 
 /**
  * @brief 设置 AL 错误上报注入回调函数 (真实 SOES 中传入 ESC_ALerror，单测传入桩函数)

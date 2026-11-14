@@ -438,6 +438,20 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, ECAT_FOE_EFW_HEADER_MIN_LEN, true), ECAT_UPGRADE_ASYNC_COMPLETE, "driver active");
     TEST_ASSERT(ecat_foe_transport_begin(&foe, "bad", 3) != 0, "own bad WRQ closes old session");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "old FoE session cleaned");
+    ecat_foe_soes_adapter_t adapter;
+    ecat_foe_soes_init(&adapter, &core, 512U);
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_bind_upgrade(&adapter, &upgrade), 0, "SOES binds shared manager");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &other, &request, &other_token), ECAT_UPGRADE_COMPLETE, "other owns before SOES");
+    TEST_ASSERT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)) != 0, "SOES WRQ rejected while other owns");
+    TEST_ASSERT(ecat_foe_soes_write_cb(NULL, efw, len) != 0, "unsolicited SOES DATA rejected");
+    uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &as, &an);
+    TEST_ASSERT(ecat_upgrade_session_owns(&upgrade.session, &other, other_token), "SOES state hook preserves other owner");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &other, other_token), ECAT_UPGRADE_COMPLETE, "other releases");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)), 0, "SOES acquires shared core");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw, len), 0, "SOES short callback explicitly commits");
+    TEST_ASSERT_EQ_INT(mcu.count_finalize, 2, "SOES committed through manager");
+
 }
 
 static void test_owned_sync_upgrade_stream(void)
