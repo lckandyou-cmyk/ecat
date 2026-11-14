@@ -87,6 +87,12 @@ ecat_transfer_result_t ecat_transfer_begin(
 
     /* 区分方向进行底层准备 */
     if (request->direction == ECAT_TRANSFER_DIR_EXPORT) {
+        if (target->driver.io.read == NULL) {
+            t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
+            (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
+            return ECAT_TRANSFER_FAILED;
+        }
+
         /* 计算可导出数据量 */
         if (target->driver.get_data_size != NULL) {
             t->total_size = target->driver.get_data_size(target->user_ctx);
@@ -104,6 +110,7 @@ ecat_transfer_result_t ecat_transfer_begin(
             if (target->driver.io.init(target->user_ctx) != 0) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
                 t->active = false;
+                t->driver_initialized = false;
                 (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
@@ -115,6 +122,7 @@ ecat_transfer_result_t ecat_transfer_begin(
             if (t->core == NULL) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
+                t->driver_initialized = false;
                 (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
@@ -130,6 +138,7 @@ ecat_transfer_result_t ecat_transfer_begin(
             if (ecat_foe_core_begin_request(t->core, &core_req) != ECAT_FOE_CORE_OK) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
+                t->driver_initialized = false;
                 (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
@@ -141,6 +150,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 if (target->driver.io.init(target->user_ctx) != 0) {
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
                     t->active = false;
+                    t->driver_initialized = false;
                     (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
@@ -154,6 +164,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                         target->driver.io.abort(target->user_ctx);
                     }
                     t->active = false;
+                    t->driver_initialized = false;
                     (void)ecat_upgrade_session_release(&t->session, owner, acquired_token);
                     return ECAT_TRANSFER_FAILED;
                 }
@@ -204,6 +215,7 @@ ecat_transfer_result_t ecat_transfer_read(
         if (t->driver_initialized && t->target->driver.io.abort != NULL) {
             t->target->driver.io.abort(t->target->user_ctx);
         }
+        t->driver_initialized = false;
         t->active = false;
         (void)ecat_upgrade_session_release(&t->session, owner, token);
         return ECAT_TRANSFER_FAILED;
@@ -259,11 +271,13 @@ ecat_transfer_result_t ecat_transfer_write(
         ecat_foe_crc32_update(&t->running_crc32, data, length);
     } else {
         /* DATA 普通数据流导入 */
-        if (t->current_offset + length > t->target->max_size) {
+        if ((uint32_t)length > (UINT32_MAX - t->current_offset) ||
+            t->current_offset + (uint32_t)length > t->target->max_size) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
             }
+            t->driver_initialized = false;
             t->active = false;
             (void)ecat_upgrade_session_release(&t->session, owner, token);
             return ECAT_TRANSFER_FAILED;
@@ -281,6 +295,7 @@ ecat_transfer_result_t ecat_transfer_write(
                     if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                         t->target->driver.io.abort(t->target->user_ctx);
                     }
+                    t->driver_initialized = false;
                     t->active = false;
                     (void)ecat_upgrade_session_release(&t->session, owner, token);
                     return ECAT_TRANSFER_FAILED;
@@ -292,6 +307,12 @@ ecat_transfer_result_t ecat_transfer_write(
         /* 写入介质 */
         if (t->target->driver.io.write == NULL) {
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+            if (t->driver_initialized && t->target->driver.io.abort != NULL) {
+                t->target->driver.io.abort(t->target->user_ctx);
+            }
+            t->driver_initialized = false;
+            t->active = false;
+            (void)ecat_upgrade_session_release(&t->session, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
@@ -302,6 +323,7 @@ ecat_transfer_result_t ecat_transfer_write(
             if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                 t->target->driver.io.abort(t->target->user_ctx);
             }
+            t->driver_initialized = false;
             t->active = false;
             (void)ecat_upgrade_session_release(&t->session, owner, token);
             return ECAT_TRANSFER_FAILED;
@@ -330,6 +352,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                     t->target->driver.io.abort(t->target->user_ctx);
                 }
+                t->driver_initialized = false;
                 t->active = false;
                 (void)ecat_upgrade_session_release(&t->session, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -340,6 +363,7 @@ ecat_transfer_result_t ecat_transfer_finish(
         if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+                t->driver_initialized = false;
                 t->active = false;
                 (void)ecat_upgrade_session_release(&t->session, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -352,6 +376,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     if (t->driver_initialized && t->target->driver.io.abort != NULL) {
                         t->target->driver.io.abort(t->target->user_ctx);
                     }
+                    t->driver_initialized = false;
                     t->active = false;
                     (void)ecat_upgrade_session_release(&t->session, owner, token);
                     return ECAT_TRANSFER_FAILED;
@@ -360,6 +385,7 @@ ecat_transfer_result_t ecat_transfer_finish(
         }
     }
 
+    t->driver_initialized = false;
     t->active = false;
     (void)ecat_upgrade_session_release(&t->session, owner, token);
     return ECAT_TRANSFER_COMPLETE;
@@ -380,6 +406,7 @@ ecat_transfer_result_t ecat_transfer_cancel(
         t->target->driver.io.abort(t->target->user_ctx);
     }
 
+    t->driver_initialized = false;
     t->active = false;
     (void)ecat_upgrade_session_release(&t->session, owner, token);
     return ECAT_TRANSFER_COMPLETE;

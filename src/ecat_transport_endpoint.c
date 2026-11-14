@@ -251,13 +251,17 @@ void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep)
         return;
     }
 
+    bool was_active = (ep->state == ECAT_TRANSPORT_STATE_IMPORTING ||
+                       ep->state == ECAT_TRANSPORT_STATE_EXPORTING ||
+                       ep->current_token != 0U);
+
     if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
         (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
         ep->current_token = 0U;
     }
 
     ep->state = ECAT_TRANSPORT_STATE_IDLE;
-    if (ep->cbs.on_session_abort != NULL) {
+    if (was_active && ep->cbs.on_session_abort != NULL) {
         ep->cbs.on_session_abort(ep->user_ctx, ECAT_TRANSFER_ERR_NONE);
     }
 }

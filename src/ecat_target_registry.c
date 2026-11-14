@@ -34,6 +34,10 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
         return -4;
     }
 
+    if ((desc->permissions & ECAT_PERM_RW) == 0U) {
+        return -1;
+    }
+
     /* 检查驱动基本有效性 */
     if ((desc->permissions & ECAT_PERM_WRITE) != 0U) {
         if (desc->driver.io.write == NULL || desc->driver.io.erase_to == NULL) {
@@ -78,7 +82,7 @@ const ecat_target_desc_t *ecat_target_registry_find_by_name(
     }
 
     for (size_t i = 0; i < reg->target_count; i++) {
-        if (strncmp(reg->targets[i].name, name, ECAT_TARGET_NAME_MAX_LEN) == 0) {
+        if (strcmp(reg->targets[i].name, name) == 0) {
             return &reg->targets[i];
         }
     }
@@ -91,6 +95,15 @@ int ecat_target_registry_add_acl(ecat_target_registry_t *reg,
 {
     if (reg == NULL || allowed_perms == 0U) {
         return -1;
+    }
+
+    /* 检查是否已有相同通道与目标规则，若存在则合并权限 */
+    for (size_t i = 0; i < reg->acl_rule_count; i++) {
+        if (reg->acl_rules[i].transport_id == transport_id &&
+            reg->acl_rules[i].target_id == target_id) {
+            reg->acl_rules[i].allowed_perms |= allowed_perms;
+            return 0;
+        }
     }
 
     if (reg->acl_rule_count >= ECAT_TARGET_REGISTRY_MAX_ACL_RULES) {
@@ -137,18 +150,17 @@ bool ecat_target_registry_check_permission(
         return true;
     }
 
-    /* 匹配 ACL 白名单规则 */
+    /* 匹配并聚合所有适用的 ACL 白名单规则 */
+    uint8_t effective_perms = 0U;
     for (size_t i = 0; i < reg->acl_rule_count; i++) {
         const ecat_target_acl_rule_t *rule = &reg->acl_rules[i];
         bool transport_match = (rule->transport_id == 0U || rule->transport_id == transport_id);
         bool target_match = (rule->target_id == 0U || rule->target_id == target_id);
 
         if (transport_match && target_match) {
-            if ((rule->allowed_perms & required_perm) == required_perm) {
-                return true;
-            }
+            effective_perms |= rule->allowed_perms;
         }
     }
 
-    return false;
+    return ((effective_perms & required_perm) == required_perm);
 }
