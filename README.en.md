@@ -85,6 +85,17 @@ The executable is unsigned and does not support `--overwrite`; specify an output
 
 Start with the [SOES bootloader example](examples/bootloader_soes/README.md) for interfaces, configuration, and integration steps. Its driver is an interface example, not a production-ready board implementation.
 
+## Optional upgrade transports
+
+A shared session manager now exposes begin/write/finish/poll/cancel for synchronous and asynchronous targets. FoE is enabled by default; SOES/SSC can bind to the same manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; EFW validation, signature verification and storage drivers are shared.
+
+```sh
+make build-upgrade
+make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
+```
+
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a reference integration; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md) and [file stream integration](examples/file_stream/README.md).
+
 ## Verification status
 
 | Area | Verified | Not yet verified |

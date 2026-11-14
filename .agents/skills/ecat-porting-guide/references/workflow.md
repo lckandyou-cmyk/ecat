@@ -56,7 +56,7 @@ make test-core-async CC=clang
 
 ## SSC 现有工程接线
 
-输入是可恢复的原 Boot/App 工程、实际 SSC 生成文件及本地分区表。将 `src/ecat_foe_efw.c`、`src/ecat_foe_core.c`、`src/ecat_foe_target_async.c`、`src/ecat_foe_core_async.c`、`src/adapters/ecat_foe_ssc_async.c`、`src/adapters/ecat_foe_ssc.c` 和目标驱动加入 Boot 构建，并把本库 `include/` 加入 include path；确认工程中只存在一个 main。同步路径使用 `ecat_foe_efw.c`、`ecat_foe_core.c` 和 `ecat_foe_ssc.c`，同时链接 SSC adapter 所需的 `ecat_foe_ssc_async.c`。工程文件或 IDE group 的具体位置由现有构建系统决定。
+输入是可恢复的原 Boot/App 工程、实际 SSC 生成文件及本地分区表。将 `src/ecat_foe_efw.c`、`src/ecat_foe_core.c`、`src/ecat_foe_target_async.c`、`src/ecat_foe_core_async.c`、`src/adapters/ecat_foe_ssc_async.c`、`src/adapters/ecat_foe_ssc.c` 和目标驱动加入 Boot 构建，并把本库 `include/` 加入 include path；确认工程中只存在一个 main。同步路径使用 `ecat_foe_efw.c`、`ecat_foe_core.c` 和 `ecat_foe_ssc.c`，同时链接 SSC adapter 所需的 `ecat_foe_ssc_async.c`。新旧 SSC 适配器均还需链接 `src/ecat_upgrade.c`、`src/ecat_upgrade_session.c` 和 `src/adapters/ecat_foe_transport.c`。共享入口按 [统一架构](../../../../docs/architecture/transport-independent-upgrade.md) 完成 bind_upgrade，不能混用未绑定旧 API 操作同一核心。工程文件或 IDE group 的具体位置由现有构建系统决定。
 
 目标 descriptor 的 project ID、project name、hardware ID、硬件版本、目标 ID、容量及写入单位来自板级配置；异步 target 的 `async_ops` 实现 `start/poll/abort/abort_session`。操作可即时完成或 pending；仅在完成时输出擦除水位或读回数据，启用防回滚时 FINALIZE 必须原子提交镜像与版本下限。依次调用 `ecat_foe_core_init`、`ecat_foe_core_async_init`、`ecat_foe_ssc_async_init`（传 `ecat_foe_core_async_ssc_ops()` 与会话指针），再调用 `ecat_foe_ssc_init_async`。检查每个初始化返回值；BUSY 和错误值从实际 SSC 头文件核对，tick 必须单调且与 timeout 单位一致。
 

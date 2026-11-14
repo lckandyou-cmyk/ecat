@@ -93,6 +93,17 @@ cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c s
 
 同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 使用单个整数字面量（例如 `148U`、`256U`），各编译单元的写法和数值都必须一致。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
 
+## 可选升级入口
+
+升级引擎现在提供统一的 begin/write/finish/poll/cancel 会话接口。FoE 默认启用，SOES/SSC 可绑定同一个管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，EFW 校验、验签与存储驱动共用。
+
+```sh
+make build-upgrade
+make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
+```
+
+默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。
+
 ## 验证状态
 
 | 范围 | 已验证 | 尚未验证 |

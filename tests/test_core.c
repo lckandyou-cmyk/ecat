@@ -466,6 +466,7 @@ static void test_optional_file_transport(void)
     TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE adapter ready");
     size_t length = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
                                   request.fw_version, 0U, payload, sizeof(payload));
+    unsigned commits = 0, aborts = 0;
     for (unsigned scenario = 0; scenario < 3U; scenario++) {
         FILE *stream = tmpfile();
         TEST_ASSERT(stream != NULL, "temporary firmware stream");
@@ -485,13 +486,23 @@ static void test_optional_file_transport(void)
         for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
             result = ecat_upgrade_file_step(&file);
         TEST_ASSERT_EQ_INT(result, scenario == 0U ? ECAT_UPGRADE_COMPLETE : ECAT_UPGRADE_FAILED, "file result follows integrity checks");
-        TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "only valid file commits");
+        if (scenario == 0U) commits++; else aborts++;
+        TEST_ASSERT_EQ_INT(mcu.count_finalize, commits, "only valid file commits");
+        ecat_foe_core_err_t file_error = upgrade.last_error;
         TEST_ASSERT(upgrade.session.owner == NULL, "terminal file releases lease");
         TEST_ASSERT_EQ_INT(fseek(stream, 0, SEEK_SET), 0, "caller still owns FILE lifetime");
         fclose(stream);
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "same EFW through FoE");
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, written, false),
+            scenario == 0U ? ECAT_UPGRADE_ASYNC_COMPLETE : ECAT_UPGRADE_ASYNC_FAILED,
+            "same result through FoE");
+        TEST_ASSERT_EQ_INT(upgrade.last_error, file_error, "same detailed diagnostic through FoE");
+        if (scenario == 0U) commits++; else aborts++;
+        TEST_ASSERT_EQ_INT(mcu.count_finalize, commits, "same commit rule");
+        TEST_ASSERT_EQ_INT(mcu.count_abort, aborts, "same abort rule");
         if (scenario == 1U) efw[length - 1U] ^= 1U;
     }
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 2, "corrupt and truncated streams cleaned once");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 4, "corrupt and truncated streams cleaned once");
 }
 
 static void test_foe_transport_shares_upgrade_ownership(void)

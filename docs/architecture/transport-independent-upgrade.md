@@ -46,32 +46,43 @@ FoE 默认启用；宿主文件流入口显式启用。后续硬件传输各自�
 
 每个涉及现有升级路径的步骤运行 make test、make test-asan、make test-sentinels；涉及 SOES/驱动/密码学边界时再运行固定源码的 test-soes、test-bootloader、test-monocypher。最终收尾全部运行。
 
-## 进度
+## 实施状态与接入
 
-- 已完成：设计基线；通用独占会话原语及争用、过期代号、重复释放、溢出测试；目标/版本元数据入口与 WRQ 兼容复用；同步字节流入口及所有权测试；异步公共结果与 SSC 解耦、通用会话 start/poll/cancel 接入和缓冲复用测试。
-- 下一步：FoE 适配器接入统一会话及构建开关。
-- 未实现：步骤 6 至 8，以及 UART/CAN/USB/网络的具体协议实现。
+步骤 1 至 7 已实现。收尾构建矩阵和最终回归记录随步骤 8 更新。硬件 UART/CAN/USB/网络协议没有实现，不能仅凭通用接口宣称已经支持。
 
-通用接口见 `include/ecat_upgrade.h`：普通 init 接受同步目标；init_async 接入已绑定同一核心的异步后端，也可操作同步目标。write/finish 返回等待后只能 poll 或 cancel；等待期间新操作返回忙，输入在返回前已复制。异步 finish 完成必须确认核心已提交成功。
-管理器初始化后独占其核心，禁止直接调用旧事件接口或创建第二个管理器操作同一核心。FoE 适配器在步骤 6 迁移，当前尚未共享此所有权入口。
-异步引擎公开头不再包含 SSC gate；旧 SSC 结果类型和 getter 保留为通用契约的兼容别名。
+- `include/ecat_upgrade_request.h`：只携带目标与候选版本，无物理地址。旧 WRQ 文件名解析复用同一元数据 begin 路径。
+- `include/ecat_upgrade_session.h`：独占所有者和单调会话代号，无协议和硬件依赖。
+- `include/ecat_upgrade.h`：统一 begin/write/finish/poll/cancel。普通 init 接受同步目标；init_async 接入已绑定同一核心的后端，也支持同步目标。等待期间新操作返回忙，输入在返回前已复制。异步 finish 完成必须确认核心提交成功。
+- `include/ecat_upgrade_async.h`：独立异步后端契约；引擎公开头不包含 SSC gate。旧 SSC 类型及 getter 保留兼容别名。
+- `include/ecat_foe_transport.h`：FoE 文件名及结束包桥接。末包提交结果独立保存，防止延迟重试错误读取新所有者的核心状态。
+- `include/ecat_upgrade_file.h`：默认关闭的宿主 FILE 流参考入口，详见 [文件流接入](../../examples/file_stream/README.md)。
 
-步骤 6 的已完成子项：FoE 文件名/结束包桥接层；SOES 在 init 后可调用 bind_upgrade 绑定共享管理器，所有错误清理仅取消自己的会话。当前该绑定要求启用目标均为同步驱动；未绑定的旧接口仍是独占核心的兼容模式。桥接层的异步回调将用于 SSC gate，SSC 适配器绑定与构建开关仍待实施。测试已验证外部入口占用时 SOES WRQ、DATA 和状态退出不会夺取或取消外部会话。
+管理器初始化后独占其核心，禁止直接调用旧事件 API 或创建第二个管理器操作同一核心。所有入口必须共享同一个管理器；未绑定的旧适配器仍是独占核心兼容模式，不能与共享入口混用。
 
-SSC 共享模式：同步适配器先 init，再 bind_upgrade 到同一管理器。异步模式先初始化核心异步引擎、通过 init_async 初始化通用管理器；初始化 SSC adapter（传入 gate 地址），再将 gate 的回调设为 ecat_foe_transport_async_ops()、上下文设为 &adapter.transport，最后调用 bind_upgrade。gate 缓冲与异步核心缓冲仍须独立。每一步检查返回值。未绑定仍保留旧的独占核心模式。
-SSC 末包完成结果由桥接层保存，避免提交后其他入口取得核心时，末包重试错误读取新会话状态。超时释放会话后，旧错误重试只清理旧 FoE 桥接状态，不触碰新所有者。同步、异步 gate 和真实核心的宿主契约测试已覆盖这些边界，真实 SSC/主站仍待验证。
-步骤 6 当前剩余：将示例切换到共享模式，以及默认启用 FoE/关闭 FoE 的独立构建验证。
+SOES：先 init，再 bind_upgrade 到同一管理器；绑定模式目前要求所有启用目标均为同步驱动。邮箱前置、原生 SOES 处理、后置钩子必须串行。所有错误和状态迁移清理只取消 SOES 自己的会话。Bootloader SOES 示例已默认采用共享模式；应用 FoE abort 同样保护其他所有者。
 
-Bootloader SOES 示例已默认创建并绑定统一会话管理器；应用层 FoE abort/结构错误清理同样只取消自己的桥接会话。管理器清理失败会话后保留核心 ERROR 与细分诊断供协议后置钩子读取。固定 SOES 源码宿主测试覆盖了共享模式成功、失败、乱序、结构错误、BOOT 迁移、容量边界与外部入口争用；不代表实板验证。
-步骤 6 当前剩余仅为可选构建入口与关闭 FoE 的独立链接验证。
+SSC 同步：先 init，再 bind_upgrade。SSC 异步：先初始化核心异步引擎和通用管理器，初始化 SSC adapter（传入 gate 地址），再用 ecat_foe_transport_async_ops() 和 &adapter.transport 初始化 gate，最后 bind_upgrade。gate 与引擎缓冲必须独立，每一步检查返回值。密码校验仍在建立会话前执行；超时后的错误重试不取消新所有者。
+
+所有适配器都需链接通用引擎和管理器，FoE 还需链接桥接源文件。失败清理后核心保留 ERROR 与细分诊断供协议后置钩子读取。旧公开事件 API 保留，用户须重新编译应用及适配器对象。
 
 ## 可选静态库构建
 
-`make build-upgrade` 在 `build/upgrade/` 生成静态库，默认 ENABLE_FOE=1、FOE_STACK=ssc，包含 SSC 和 FoE 桥接层，不包含任何第三方协议栈源码或测试桩。
-`make build-upgrade ENABLE_FOE=0 UPGRADE_BUILD_DIR=build/upgrade-base` 仅编译通用会话、EFW 和同步/异步引擎；没有 SOES/SSC 依赖，保留历史命名的核心兼容 API。
-SOES 集成使用 ENABLE_FOE=1、FOE_STACK=soes，并用 SOES_DIR 与 CFLAGS 提供真实 SOES 头和目标 BSP 包含路径；库不提供厂商 BSP 或协议栈实现。
-编译参数和配置头须与调用方保持一致。此目标沿用现有 Make/POSIX 工具链要求，并非 Windows 原生构建或可烧录 MCU 工程。
-目标默认拒绝覆盖既有库；需重新构建时使用新目录，或用 `make clean BUILD_DIR=build/upgrade` 安全清理已登记产物。
-`make test-upgrade-build` 检查默认/关闭模式的 archive 对象、正反链接结果与不覆盖行为，已纳入 make test。
+```sh
+# 默认启用 FoE，选择 SSC 适配器；文件流关闭。
+make build-upgrade
+# 只编译通用引擎与会话管理。
+make build-upgrade ENABLE_FOE=0 UPGRADE_BUILD_DIR=build/upgrade-base
+# 仅文件流入口。
+make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/upgrade-file
+# FoE 与文件流共享同一个引擎。
+make build-upgrade ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/upgrade-shared
+```
 
-步骤 7 已实现：可选宿主 FILE 流入口见 examples/file_stream/README.md，ENABLE_FILE 默认 0。同步/异步、入口争用、CRC/截断/验签失败和取消均有宿主测试；它不宣称实现任何硬件传输协议。六项回归均通过。剩余步骤 8：整理统一接入文档、复核构建矩阵和最终验证。
+库不包含第三方协议栈源码或测试桩。SOES 集成改用 FOE_STACK=soes，并用 SOES_DIR 与 CFLAGS 提供真实 SOES 头和目标 BSP 包含路径。配置头和编译参数须与调用方一致。
+此目标沿用现有 Make/POSIX 工具链要求，不是 Windows 原生构建或可烧录 MCU 工程。默认拒绝覆盖既有库；需重新构建时使用新目录，或用 `make clean BUILD_DIR=build/upgrade` 安全清理已登记产物。
+
+## 验证范围
+
+make test-upgrade-build 覆盖默认 FoE、无传输、仅文件流和两入口同时启用四种 archive 对象与正反链接结果，并检查不覆盖已有产物。已纳入 make test。
+同步/异步测试覆盖入口争用、过期代号、等待时缓冲复用、重复包不重写、显式结束、取消、提交后延迟重试及超时后新所有者保护。相同 EFW 通过 FoE 与文件流的成功、CRC 错误、截断和验签失败结果有对照测试。
+固定 SOES 源码宿主测试覆盖共享模式成功、失败、乱序、结构错误、BOOT 迁移和容量边界；Monocypher 测试验证密码学互操作。真实 SSC、MCU Flash、物理总线和主站仍未验证，宿主测试不证明掉电安全。

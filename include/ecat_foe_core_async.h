@@ -28,7 +28,7 @@ typedef enum {
 } ecat_foe_core_async_phase_t;
 
 /* Buffers are caller-owned, distinct static storage. packet_capacity must
- * cover one SSC DATA payload; operation_capacity must cover the largest
+ * cover one accepted input chunk; operation_capacity must cover the largest
  * write_unit and is at least 64 bytes for readback staging. The session/core
  * pair is non-copyable after binding. */
 typedef struct {
@@ -72,7 +72,7 @@ const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
 /* Legacy getter, same backend and contract; retained for existing SSC users. */
 const ecat_upgrade_async_ops_t *ecat_foe_core_async_ssc_ops(void);
 
-/* Use these as the SSC gate's callbacks, with session as ops_ctx. */
+/* Close the engine and its bound core session. */
 void ecat_foe_core_async_abort(ecat_foe_core_async_t *session);
 
 #ifdef __cplusplus
