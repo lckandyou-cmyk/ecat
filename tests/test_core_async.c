@@ -1,6 +1,7 @@
 #include "ecat_foe_core_async.h"
 #include "ecat_foe_ssc.h"
 #include "mock_driver.h"
+#include "ecat_upgrade.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -350,6 +351,54 @@ int main(void)
     CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
     CHECK(ecat_foe_core_deinit(&core) == 0);
     CHECK(sync_flash.count_abort == 3U);
+
+    /* Generic ownership and explicit finish, with no SSC gate involved. */
+    memset(&flash, 0, sizeof(flash));
+    cfg.targets[0].asynchronous = true;
+    CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+    CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
+          sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
+    ecat_upgrade_t upgrade;
+    int source = 0, contender = 0;
+    uint64_t token = 0, rejected = 0;
+    ecat_upgrade_request_t request = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+    CHECK(ecat_upgrade_init_async(&upgrade, &core, ecat_foe_core_async_ops(), &session) == 0);
+    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    total = make_efw(efw, payload, sizeof(payload));
+    for (size_t pos = 0; pos < total;) {
+        size_t length = total - pos > 128U ? 128U : total - pos;
+        memcpy(packet_storage, efw + pos, length);
+        ecat_upgrade_result_t r = ecat_upgrade_write(&upgrade, &source, token, packet_storage, length);
+        memset(packet_storage, 0xEE, sizeof(packet_storage));
+        if (r == ECAT_UPGRADE_PENDING) {
+            unsigned previous_starts = flash.starts;
+            CHECK(ecat_upgrade_write(&upgrade, &source, token, efw, 1U) == ECAT_UPGRADE_BUSY);
+            CHECK(ecat_upgrade_finish(&upgrade, &source, token) == ECAT_UPGRADE_BUSY);
+            CHECK(ecat_upgrade_poll(&upgrade, &contender, token) == ECAT_UPGRADE_STALE);
+            CHECK(flash.starts == previous_starts);
+        }
+        for (unsigned poll = 0; r == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
+            r = ecat_upgrade_poll(&upgrade, &source, token);
+        CHECK(r == ECAT_UPGRADE_COMPLETE);
+        pos += length;
+    }
+    CHECK(!flash.valid);
+    CHECK(memcmp(flash.flash, payload, core.written_offset) == 0);
+    CHECK(ecat_upgrade_begin(&upgrade, &contender, &request, &rejected) == ECAT_UPGRADE_BUSY);
+    ecat_upgrade_result_t end = ecat_upgrade_finish(&upgrade, &source, token);
+    CHECK(end == ECAT_UPGRADE_PENDING);
+    for (unsigned poll = 0; end == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
+        end = ecat_upgrade_poll(&upgrade, &source, token);
+    CHECK(end == ECAT_UPGRADE_COMPLETE && flash.valid);
+    CHECK(memcmp(flash.flash, payload, sizeof(payload)) == 0);
+    CHECK(ecat_upgrade_poll(&upgrade, &source, token) == ECAT_UPGRADE_STALE);
+    CHECK(ecat_upgrade_begin(&upgrade, &contender, &request, &rejected) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_write(&upgrade, &contender, rejected, efw, 128U) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_write(&upgrade, &contender, rejected, efw + 128U, 20U) == ECAT_UPGRADE_PENDING);
+    CHECK(ecat_upgrade_cancel(&upgrade, &source, rejected) == ECAT_UPGRADE_STALE);
+    CHECK(ecat_upgrade_cancel(&upgrade, &contender, rejected) == ECAT_UPGRADE_COMPLETE);
+    CHECK(flash.aborts == 1U && !flash.pending);
+    CHECK(ecat_upgrade_cancel(&upgrade, &contender, rejected) == ECAT_UPGRADE_STALE);
 
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;

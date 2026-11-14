@@ -151,7 +151,7 @@ test-core-async:
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_core_async" \
 		src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c \
 		src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c \
-		src/adapters/ecat_foe_ssc.c tests/mock_driver.c tests/test_core_async.c && \
+		src/adapters/ecat_foe_ssc.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
 	"$$TMP_ASYNC_DIR/test_core_async"
 
 test-sentinels:
@@ -263,7 +263,7 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_adapter" $(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_target_async" src/ecat_foe_target_async.c tests/test_target_async.c && \
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c tests/mock_driver.c tests/test_core_async.c && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c src/ecat_upgrade.c src/ecat_upgrade_session.c tests/mock_driver.c tests/test_core_async.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \
