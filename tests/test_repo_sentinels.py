@@ -995,7 +995,10 @@ def test_inode_stability_and_clean_race_defense(repo_dir: str):
         shutil.rmtree(build_dir, ignore_errors=True)
 
         # 1. 验证协调锁文件 inode 稳定性：无论构建多少次，宿主协调锁文件不被 unlink，inode 保持稳定
-        coord_path = safe_build.get_host_coordinator_file(build_dir)
+        coord_path = subprocess.check_output(
+            [sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import safe_build; print(safe_build.get_host_coordinator_file(sys.argv[1]))", build_dir],
+            cwd=repo_dir, env=env, text=True).strip()
+        assert os.path.commonpath([isolated_tmp, coord_path]) == isolated_tmp
         fd = os.open(coord_path, os.O_RDWR | os.O_CREAT, 0o600)
         initial_ino = os.fstat(fd).st_ino
         os.close(fd)
