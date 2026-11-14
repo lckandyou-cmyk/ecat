@@ -1,0 +1,273 @@
+/**
+ * @file ecat_transport_endpoint.c
+ * @brief 通用传输端点抽象与自定义通道适配层实现
+ */
+
+#include "ecat_transport_endpoint.h"
+#include <string.h>
+
+int ecat_transport_endpoint_init(
+    ecat_transport_endpoint_t *ep,
+    uint16_t transport_id,
+    const char *name,
+    ecat_transfer_t *mgr,
+    void *user_ctx)
+{
+    if (ep == NULL || mgr == NULL || name == NULL || name[0] == '\0') {
+        return -1;
+    }
+
+    memset(ep, 0, sizeof(*ep));
+    ep->transport_id = transport_id;
+    strncpy(ep->name, name, ECAT_TRANSPORT_NAME_MAX_LEN - 1U);
+    ep->name[ECAT_TRANSPORT_NAME_MAX_LEN - 1U] = '\0';
+    ep->transfer_mgr = mgr;
+    ep->user_ctx = user_ctx;
+    ep->state = ECAT_TRANSPORT_STATE_IDLE;
+
+    return 0;
+}
+
+void ecat_transport_endpoint_set_callbacks(
+    ecat_transport_endpoint_t *ep,
+    const ecat_transport_callbacks_t *cbs)
+{
+    if (ep == NULL) {
+        return;
+    }
+
+    if (cbs != NULL) {
+        ep->cbs = *cbs;
+    } else {
+        memset(&ep->cbs, 0, sizeof(ep->cbs));
+    }
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_begin_import(
+    ecat_transport_endpoint_t *ep,
+    uint16_t target_id,
+    uint32_t expected_size,
+    uint32_t fw_version)
+{
+    if (ep == NULL || ep->transfer_mgr == NULL) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    /* 若之前有残留未完成会话，先安全取消 */
+    if (ep->current_token != 0U) {
+        ecat_transport_endpoint_abort(ep);
+    }
+
+    ecat_transfer_request_t req;
+    req.transport_id = ep->transport_id;
+    req.target_id = target_id;
+    req.direction = ECAT_TRANSFER_DIR_IMPORT;
+    req.expected_size = expected_size;
+    req.fw_version = fw_version;
+
+    uint64_t token = 0U;
+    ecat_transfer_result_t res = ecat_transfer_begin(
+        ep->transfer_mgr, ep, &req, &token);
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        ep->current_token = token;
+        ep->state = ECAT_TRANSPORT_STATE_IMPORTING;
+        ep->total_size = expected_size;
+        if (ep->cbs.on_session_start != NULL) {
+            ep->cbs.on_session_start(ep->user_ctx, ECAT_TRANSFER_DIR_IMPORT, target_id);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
+    ecat_transport_endpoint_t *ep,
+    const uint8_t *data,
+    size_t length)
+{
+    if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_IMPORTING) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ecat_transfer_result_t res = ecat_transfer_write(
+        ep->transfer_mgr, ep, ep->current_token, data, length);
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        if (ep->cbs.on_progress != NULL) {
+            uint32_t cur = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+            ep->cbs.on_progress(ep->user_ctx, cur, ep->total_size);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_finish_import(
+    ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_IMPORTING) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ecat_transfer_result_t res = ecat_transfer_finish(
+        ep->transfer_mgr, ep, ep->current_token);
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        uint32_t total = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+        uint32_t crc = ecat_transfer_get_crc32(ep->transfer_mgr);
+        ep->state = ECAT_TRANSPORT_STATE_IDLE;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_complete != NULL) {
+            ep->cbs.on_session_complete(ep->user_ctx, total, crc);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_begin_export(
+    ecat_transport_endpoint_t *ep,
+    uint16_t target_id,
+    uint32_t *out_total_size)
+{
+    if (ep == NULL || ep->transfer_mgr == NULL) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    if (ep->current_token != 0U) {
+        ecat_transport_endpoint_abort(ep);
+    }
+
+    ecat_transfer_request_t req;
+    req.transport_id = ep->transport_id;
+    req.target_id = target_id;
+    req.direction = ECAT_TRANSFER_DIR_EXPORT;
+    req.expected_size = 0U;
+    req.fw_version = 0U;
+
+    uint64_t token = 0U;
+    ecat_transfer_result_t res = ecat_transfer_begin(
+        ep->transfer_mgr, ep, &req, &token);
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        ep->current_token = token;
+        ep->state = ECAT_TRANSPORT_STATE_EXPORTING;
+        ep->total_size = ecat_transfer_get_total_export_size(ep->transfer_mgr);
+        if (out_total_size != NULL) {
+            *out_total_size = ep->total_size;
+        }
+        if (ep->cbs.on_session_start != NULL) {
+            ep->cbs.on_session_start(ep->user_ctx, ECAT_TRANSFER_DIR_EXPORT, target_id);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
+    ecat_transport_endpoint_t *ep,
+    uint8_t *out_buf,
+    size_t buf_capacity,
+    size_t *actual_read)
+{
+    if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_EXPORTING) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ecat_transfer_result_t res = ecat_transfer_read(
+        ep->transfer_mgr, ep, ep->current_token, out_buf, buf_capacity, actual_read);
+
+    if (res == ECAT_TRANSFER_COMPLETE || res == ECAT_TRANSFER_CONTINUE) {
+        if (ep->cbs.on_progress != NULL) {
+            uint32_t cur = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+            ep->cbs.on_progress(ep->user_ctx, cur, ep->total_size);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_finish_export(
+    ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_EXPORTING) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ecat_transfer_result_t res = ecat_transfer_finish(
+        ep->transfer_mgr, ep, ep->current_token);
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        uint32_t total = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+        uint32_t crc = ecat_transfer_get_crc32(ep->transfer_mgr);
+        ep->state = ECAT_TRANSPORT_STATE_IDLE;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_complete != NULL) {
+            ep->cbs.on_session_complete(ep->user_ctx, total, crc);
+        }
+    } else {
+        ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        if (ep->cbs.on_session_abort != NULL) {
+            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+        }
+    }
+
+    return res;
+}
+
+void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL) {
+        return;
+    }
+
+    if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
+        (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
+        ep->current_token = 0U;
+    }
+
+    ep->state = ECAT_TRANSPORT_STATE_IDLE;
+    if (ep->cbs.on_session_abort != NULL) {
+        ep->cbs.on_session_abort(ep->user_ctx, ECAT_TRANSFER_ERR_NONE);
+    }
+}
+
+bool ecat_transport_endpoint_is_active(const ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL) {
+        return false;
+    }
+    return (ep->current_token != 0U &&
+            (ep->state == ECAT_TRANSPORT_STATE_IMPORTING ||
+             ep->state == ECAT_TRANSPORT_STATE_EXPORTING));
+}

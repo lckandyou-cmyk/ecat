@@ -34,7 +34,7 @@ ENABLE_FOE ?= 1
 ENABLE_FILE ?= 0
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c
+UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c
 ifeq ($(ENABLE_FILE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_upgrade_file.c
 endif
@@ -120,7 +120,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-upgrade-build
+test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-upgrade-build
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -195,7 +195,7 @@ test-core-async:
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
 
-.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional
+.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint
 test-upgrade-session:
 	@TMP_SESSION_DIR=$$(mktemp -d /tmp/ecat_upgrade_session_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SESSION_DIR"' EXIT INT TERM && \
@@ -213,6 +213,12 @@ test-transfer-bidirectional:
 	trap 'rm -rf "$$TMP_XFER_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -o "$$TMP_XFER_DIR/test_transfer_bidirectional" src/ecat_foe_core.c src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transfer_bidirectional.c && \
 	"$$TMP_XFER_DIR/test_transfer_bidirectional"
+
+test-transport-endpoint:
+	@TMP_EP_DIR=$$(mktemp -d /tmp/ecat_ep_XXXXXX) && \
+	trap 'rm -rf "$$TMP_EP_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_EP_DIR/test_transport_endpoint" src/ecat_foe_core.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transport_endpoint.c && \
+	"$$TMP_EP_DIR/test_transport_endpoint"
 
 test-examples:
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_examples_XXXXXX) && \
@@ -301,6 +307,7 @@ test-asan:
 	@$(MAKE) test-upgrade-session CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-target-registry CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-transfer-bidirectional CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
+	@$(MAKE) test-transport-endpoint CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@echo "--- 编译并运行宿主示例套件 (ASan/UBSan 模式) ---"
 	@$(MAKE) test-examples CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
