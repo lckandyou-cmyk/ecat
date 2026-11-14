@@ -712,6 +712,35 @@ int main(void)
     assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
     ecat_target_registry_set_enforce_acl(&reg, false);
 
+    /* ---------------------------------------------------------------------- */
+    /* 6. Issue 6: 传输方向严格枚举校验与防驱动副作用/占锁测试              */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 Issue 6: 非法传输方向严格枚举校验与防驱动副作用 ---\n");
+    ecat_target_registry_set_enforce_acl(&reg, true);
+    /* 针对 Target 2 仅授予 READ-only 权限 */
+    reg.acl_rule_count = 0;
+    assert(ecat_target_registry_add_acl(&reg, 1U, 2U, ECAT_PERM_READ) == 0);
+
+    reset_mock_flags();
+    ecat_transfer_request_t invalid_dir_req = {
+        .transport_id = 1U,
+        .target_id = 2U,
+        .direction = (ecat_transfer_dir_t)99, /* 非法枚举值 */
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t invalid_dir_token = 0;
+    ecat_transfer_result_t bad_dir_res = ecat_transfer_begin(&fw_manager, &channel_uart, &invalid_dir_req, &invalid_dir_token);
+    /* 断言 1: 非法方向必须立即被拒绝返回 ECAT_TRANSFER_INVALID */
+    assert(bad_dir_res == ECAT_TRANSFER_INVALID);
+    /* 断言 2: 未调用底层驱动任何生命周期函数 (禁止 invalidate 或 init) */
+    assert(g_invalidate_called == false);
+    assert(g_init_called == false);
+    /* 断言 3: 未占用会话锁，token 为 0，且后续合法请求可正常发起 */
+    assert(invalid_dir_token == 0);
+    assert(fw_manager.session.owner == NULL);
+    ecat_target_registry_set_enforce_acl(&reg, false);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

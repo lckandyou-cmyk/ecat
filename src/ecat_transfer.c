@@ -65,6 +65,12 @@ ecat_transfer_result_t ecat_transfer_begin(
         return ECAT_TRANSFER_INVALID;
     }
 
+    /* 在任何会话获取、驱动调用或副作用前严格校验方向枚举有效性 */
+    if (request->direction != ECAT_TRANSFER_DIR_IMPORT &&
+        request->direction != ECAT_TRANSFER_DIR_EXPORT) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
     /* 检查 core 是否已被其它入口占用进行升级 */
     if (t->core != NULL) {
         if (t->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
