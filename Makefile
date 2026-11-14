@@ -179,6 +179,8 @@ test-examples:
 	$(PYTHON) tests/test_host_demo_isolation.py "$$TMP_BUILD_DIR/host_demo" "$$TMP_BUILD_DIR/packed_padded.efw" && \
 	echo "--- 静态编译检查驱动模板与 Bootloader 接入参考 (在独立临时构建目录) ---" && \
 	$(CC) $(CFLAGS) -c -o "$$TMP_BUILD_DIR/driver_template.o" $(EXAMPLES_DRIVER_TEMPLATE_SRC) && \
+	$(CC) $(CFLAGS) -Iexamples/driver_template -o "$$TMP_BUILD_DIR/test_driver_template" tests/test_driver_template.c $(EXAMPLES_DRIVER_TEMPLATE_SRC) && \
+	"$$TMP_BUILD_DIR/test_driver_template" && \
 	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_flash_driver.o" examples/bootloader_soes/bootloader_flash_driver.c && \
 	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_app.o" examples/bootloader_soes/bootloader_app.c && \
 	$(CC) $(CFLAGS) -Iexamples/bootloader_soes -c -o "$$TMP_BUILD_DIR/bootloader_master_flow.o" examples/bootloader_soes/bootloader_master_flow.c && \

@@ -44,6 +44,7 @@ typedef struct {
     uint32_t max_size;         /**< 分区最大允许容量 (字节) */
     uint32_t erased_watermark; /**< 当前已擦除的水位线 (字节偏移) */
     bool     is_initialized;   /**< 介质是否已初始化 */
+    bool     is_invalidated;    /**< 本次会话已执行失效操作 */
     bool     is_valid;         /**< 介质有效标记状态 */
 } ecat_foe_driver_template_ctx_t;
 

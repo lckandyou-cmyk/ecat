@@ -31,6 +31,7 @@ static int template_drv_init(void *user_ctx)
      * 然后返回非 0。核心状态机在 init 返回非 0 时不会调用 abort()。
      */
     ctx->is_initialized = true;
+    ctx->is_invalidated = false;
     ctx->erased_watermark = 0;
     return 0;
 }
@@ -50,6 +51,7 @@ static int template_drv_invalidate(void *user_ctx)
      * 该操作必须同步落盘，防止擦除过程中突发掉电导致 Bootloader 误启动半擦除固件。
      */
     ctx->is_valid = false;
+    ctx->is_invalidated = true;
     return 0;
 }
 
@@ -57,7 +59,7 @@ static int template_drv_invalidate(void *user_ctx)
 static int template_drv_erase_to(uint32_t need_end, uint32_t *erased_end, void *user_ctx)
 {
     ecat_foe_driver_template_ctx_t *ctx = (ecat_foe_driver_template_ctx_t *)user_ctx;
-    if (ctx == (void *)0 || erased_end == (void *)0 || !ctx->is_initialized) {
+    if (ctx == (void *)0 || erased_end == (void *)0 || !ctx->is_initialized || !ctx->is_invalidated) {
         return -1;
     }
 
@@ -69,7 +71,7 @@ static int template_drv_erase_to(uint32_t need_end, uint32_t *erased_end, void *
     /* 按扇区对齐向上擦除，直至覆盖 need_end */
     uint32_t current = ctx->erased_watermark;
     while (current < need_end) {
-        if (current + sector_size > ctx->max_size && ctx->max_size > 0) {
+        if (current > ctx->max_size || sector_size > ctx->max_size - current) {
             /* 超过分区容量上限，擦除失败拒绝越界 */
             return -1;
         }
@@ -139,6 +141,7 @@ static int template_drv_finalize(void *user_ctx)
      * Bootloader 启动检测时将依赖此标记决定是否引导新固件。
      */
     ctx->is_valid = true;
+    ctx->is_invalidated = false;
     return 0;
 }
 
@@ -157,6 +160,7 @@ static void template_drv_abort(void *user_ctx)
      * 3. 驱动需保证此函数可被安全调用多次 (幂等性)。
      */
     ctx->is_valid = false;
+    ctx->is_invalidated = false;
     ctx->erased_watermark = 0;
     ctx->is_initialized = false;
 }
