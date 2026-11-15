@@ -3774,11 +3774,15 @@ int main(void)
 
     /* ---------------------------------------------------------------------- */
     /* 10.18 跨层缓冲别名测试 (transfer staging_buf 与 real core packet)      */
-    /* 覆盖前向/后向部分重叠、完全相同与独立缓冲，覆盖立即 COMPLETE 与 PENDING  */
-    /* 逐字节校验真实固件接收、最终 CRC、签名/验收结果与失败不提交状态        */
+    /* 【测试替身与基线说明】: 本测试聚焦于传输层-核心层缓冲区交叠防御、单次稳定捕获、 */
+    /* 候选 CRC 隔离与状态机流转。此处使用模拟 Flash 测试替身 (s_fw_test_flash)，未开启 */
+    /* signature_verify_enable。真实 Monocypher 4.0.3 Ed25519ph 密码学公钥验签与跨层别名 */
+    /* 端到端全量覆盖详见独立外部密码学套件 tests/test_monocypher_interop.c。           */
+    /* 覆盖前向/后向部分重叠、完全相同与独立缓冲，覆盖立即 COMPLETE 与 PENDING          */
+    /* 逐字节校验核心接收、最终 CRC、Flash 载荷写入与失败不提交状态                   */
     /* ---------------------------------------------------------------------- */
     {
-        printf("--- 测试 10.18: 跨层缓冲别名 (transfer staging 与 real core packet) 逐字节校验与 CRC 验证 ---\n");
+        printf("--- 测试 10.18: 跨层缓冲别名 (transfer staging 与 real core packet) 测试替身基线与 CRC 验证 ---\n");
 
         static ecat_target_registry_t fw_reg;
         static ecat_target_desc_t fw_target;
