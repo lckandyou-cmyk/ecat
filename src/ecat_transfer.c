@@ -20,6 +20,39 @@ static bool target_registry_acl_adapter(
         required_perm);
 }
 
+/**
+ * @brief 动态计算固件容器物理上限 (header + payload + padding)
+ *
+ * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕，
+ * 并依据核心实际配置的 max_header_size (支持扩展头) 与 write_unit 计算有界上限。
+ */
+static uint32_t calc_firmware_container_limit(
+    const ecat_target_desc_t *target,
+    const ecat_foe_core_t *core)
+{
+    uint32_t eff_payload = target->max_size;
+    uint32_t max_hdr = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    uint32_t max_pad = 7U;
+
+    if (core != NULL) {
+        if (target->target_id >= 1U && target->target_id <= ECAT_FOE_TARGET_COUNT) {
+            uint32_t target_idx = (uint32_t)target->target_id - 1U;
+            if (core->cfg.targets[target_idx].max_payload_size > 0U &&
+                core->cfg.targets[target_idx].max_payload_size < eff_payload) {
+                eff_payload = core->cfg.targets[target_idx].max_payload_size;
+            }
+            uint32_t wunit = core->cfg.targets[target_idx].write_unit;
+            max_pad = (wunit > 0U) ? (wunit - 1U) : 0U;
+        }
+        if (core->cfg.max_header_size >= ECAT_FOE_EFW_HEADER_MIN_LEN) {
+            max_hdr = core->cfg.max_header_size;
+        }
+    }
+
+    uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr + (uint64_t)max_pad;
+    return (wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap;
+}
+
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core)
 {
     if (t == NULL || reg == NULL) {
@@ -144,8 +177,9 @@ ecat_transfer_result_t ecat_transfer_begin(
     if (request->direction == ECAT_TRANSFER_DIR_IMPORT &&
         target->type == ECAT_TARGET_TYPE_FIRMWARE) {
         if (request->expected_size > 0U) {
-            if (request->expected_size < 148U ||
-                request->expected_size > (target->max_size + 148U + 7U)) {
+            uint32_t limit = calc_firmware_container_limit(target, t->core);
+            if (request->expected_size < ECAT_FOE_EFW_HEADER_MIN_LEN ||
+                request->expected_size > limit) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
@@ -449,24 +483,9 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 固件容器物理上限有界推导: 使用实际配置的 max_header_size 与 write_unit，防止硬编码与溢出 */
-        uint32_t eff_payload = t->target->max_size;
-        uint32_t target_idx = (uint32_t)t->target->target_id - 1U;
-        if (t->core->cfg.targets[target_idx].max_payload_size > 0U &&
-            t->core->cfg.targets[target_idx].max_payload_size < eff_payload) {
-            eff_payload = t->core->cfg.targets[target_idx].max_payload_size;
-        }
-
-        uint32_t max_hdr = t->core->cfg.max_header_size;
-        if (max_hdr < ECAT_FOE_EFW_HEADER_MIN_LEN) {
-            max_hdr = ECAT_FOE_EFW_HEADER_MIN_LEN;
-        }
-        uint32_t wunit = t->core->cfg.targets[target_idx].write_unit;
-        uint32_t max_pad = (wunit > 0U) ? (wunit - 1U) : 0U;
-
-        uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr + (uint64_t)max_pad;
-        uint32_t fw_cap = (t->total_size > 0U) ? t->total_size :
-                          ((wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap);
+        /* 固件容器物理上限有界推导: 统一调用 calc_firmware_container_limit，防止加法溢出与扩展头拒绝 */
+        uint32_t limit = calc_firmware_container_limit(t->target, t->core);
+        uint32_t fw_cap = (t->total_size > 0U) ? t->total_size : limit;
 
         /* 先用 size_t 与减法防环绕拒绝超界长度，保证 32 位与 64 位平台均绝不溢出 */
         if (length > (size_t)UINT32_MAX ||

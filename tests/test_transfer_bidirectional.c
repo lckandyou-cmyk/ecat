@@ -977,6 +977,87 @@ int main(void)
     bool rejected = (test_off > test_limit) || (test_len > (test_limit - test_off));
     assert(rejected == true);
 
+    /* 8.4 针对固件已知 expected_size 在接近 UINT32_MAX 容量时的 32 位溢出回绕防御测试 */
+    ecat_target_desc_t near_max_desc;
+    memset(&near_max_desc, 0, sizeof(near_max_desc));
+    near_max_desc.target_id = 4U;
+    strncpy(near_max_desc.name, "near_max_fw", sizeof(near_max_desc.name));
+    near_max_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    near_max_desc.permissions = ECAT_PERM_WRITE;
+    near_max_desc.max_size = UINT32_MAX - 100U;
+    near_max_desc.enabled = true;
+    near_max_desc.driver.io = param_desc.driver.io;
+    assert(ecat_target_registry_add(&reg, &near_max_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 1U, 4U, ECAT_PERM_WRITE) == 0);
+
+    core.cfg.targets[3].enabled = true;
+    core.cfg.targets[3].max_payload_size = UINT32_MAX - 100U;
+    core.cfg.targets[3].write_unit = 8U;
+    core.cfg.targets[3].driver = &param_desc.driver.io;
+    core.cfg.targets[3].user_ctx = NULL;
+
+    /* 发起合法请求: expected_size = 500U */
+    /* 旧代码中: target->max_size + 148U + 7U 溢出回绕为 54U，导致 500U > 54U 被错误拒绝！ */
+    ecat_transfer_request_t near_max_req = {
+        .transport_id = 1U,
+        .target_id = 4U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 500U,
+        .fw_version = 0x01000000U
+    };
+    uint64_t near_max_tok = 0;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &near_max_req, &near_max_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(near_max_tok != 0);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, near_max_tok) == ECAT_TRANSFER_COMPLETE);
+
+    /* 8.5 针对非最小头长度 (扩展头 max_header_size > 148) 场景的统一容器上限推导测试 */
+    /* Target 1 载荷上限设为 100 字节，核心 max_header_size 设为 256 字节，write_unit 设为 8 字节 */
+    /* 合法容器上限为 100 + 256 + 7 = 363 字节 */
+    core.cfg.max_header_size = 256U;
+    core.cfg.targets[0].max_payload_size = 100U;
+    /* 同时将 registry 中的 Target 1 max_size 也设为 100 字节以保持测试纯粹性 */
+    ecat_target_desc_t *fw_t1 = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
+    assert(fw_t1 != NULL);
+    uint32_t orig_t1_max_size = fw_t1->max_size;
+    fw_t1->max_size = 100U;
+
+    /* 传入扩展头固件期望大小 350 字节 (在核心允许的 363 字节内，但大于硬编码的 100 + 148 + 7 = 255 字节) */
+    /* 旧代码因为硬编码 148U + 7U，会以 350U > 255U 错误拒绝！ */
+    ecat_transfer_request_t ext_hdr_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 350U,
+        .fw_version = 0x01000000U
+    };
+    uint64_t ext_hdr_tok = 0;
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &ext_hdr_req, &ext_hdr_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ext_hdr_tok != 0);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, ext_hdr_tok) == ECAT_TRANSFER_COMPLETE);
+
+    /* 8.6 真正超出核心统一上限 (364 字节 > 363 字节) 的拒绝测试，并核验拒绝前无副作用 */
+    ecat_transfer_request_t oversize_ext_req = {
+        .transport_id = 1U,
+        .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 364U,
+        .fw_version = 0x01000000U
+    };
+    uint64_t oversize_ext_tok = 0;
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_ext_req, &oversize_ext_tok) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(fw_manager.session.owner == NULL); /* 锁已安全释放 */
+    assert(fw_manager.active == false);       /* 状态机未激活 */
+    assert(fw_manager.driver_initialized == false);
+    assert(g_init_called == false && g_invalidate_called == false && g_abort_called == false); /* 无驱动副作用 */
+
+    /* 恢复 Target 1 与 core 配置 */
+    fw_t1->max_size = orig_t1_max_size;
+    core.cfg.max_header_size = 148U;
+    core.cfg.targets[0].max_payload_size = 1024U * 1024U;
+
 #if __SIZEOF_SIZE_T__ > 4
     reset_mock_flags();
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_data_unknown, &data_tok) == ECAT_TRANSFER_COMPLETE);
