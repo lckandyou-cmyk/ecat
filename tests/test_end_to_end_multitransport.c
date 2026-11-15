@@ -926,6 +926,110 @@ int main(void)
     assert(ssc_adp.transport.committed == true);
     assert(ecat_transfer_is_active(&mgr) == false);
 
+    /* ---------------------------------------------------------------------- */
+    /* D3.7.4: 真实 SSC 回调下共享缓存超时重试回归验证 (Codex 问题 1 失败用例)   */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.7.4: 共享缓存下首包等待 begin 期间超时重发错误码验证 ---\n");
+    /* 重新发起 WRQ，进入 pending begin 状态 */
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ssc_adp.transport.begin_pending == true);
+
+    /* 首包到达 (非零 payload): 返回 BUSY 且暂存进共享的 ssc_storage */
+    uint8_t non_zero_first_pkt[32];
+    for (size_t i = 0; i < sizeof(non_zero_first_pkt); i++) {
+        non_zero_first_pkt[i] = (uint8_t)(i + 0x5A);
+    }
+    uint16_t b_res = ecat_foe_ssc_on_data_following(&ssc_adp, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++);
+    assert(b_res == 0x8007U);
+    assert(ssc_gate.pending == true);
+
+    /* 模拟底层驱动持续 PENDING，时间流逝超过 timeout_ticks (100U) */
+    ssc_tick += 150U;
+
+    /* 主站因超时重发同一个非零首包 (相同 payload 内容):
+     * 门控检测到超时并调用 ops->abort；
+     * 随后进行 packet_matches 比对: 必须匹配成功并调用 finish_retry 返回 ECAT_FOE_SSC_ERR_PROGERROR (0x800B)！
+     * 若 abort 过早清零了共享的 packet_storage，比对将失败并错误返回 0x8005 (PACKETNO)！
+     */
+    uint16_t timeout_retry_code = ecat_foe_ssc_on_data_following(&ssc_adp, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++);
+    assert(timeout_retry_code == ECAT_FOE_SSC_ERR_PROGERROR); /* 预期 0x800B */
+    assert(ssc_gate.pending == false);
+    assert(ssc_gate.completed == false); /* finish_retry 已闭环重置 */
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.7.5: 异包重发测试 (数据 payload 被篡改或错包)                        */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.7.5: 超时后异包重发严格返回 PACKETNO (0x8005) 防御 ---\n");
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++) == 0x8007U);
+    ssc_tick += 150U; /* 超时 */
+
+    /* 发送篡改的异包 (首字节篡改为 0xFF) */
+    uint8_t corrupt_pkt[32];
+    memcpy(corrupt_pkt, non_zero_first_pkt, sizeof(corrupt_pkt));
+    corrupt_pkt[0] = 0xFF;
+    uint16_t corrupt_res = ecat_foe_ssc_on_data_following(&ssc_adp, corrupt_pkt, sizeof(corrupt_pkt), true, ssc_tick++);
+    assert(corrupt_res == ECAT_FOE_SSC_ERR_PACKETNO); /* 预期 0x8005 */
+    /* 发生 0x8005 报错后，适配器根据 SSC 规范安全终止会话并调用 clear_packet 释放门控与底层 */
+    assert(ssc_adp.session_active == false);
+    assert(ssc_gate.pending == false);
+    assert(ssc_gate.completed == false);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.7.6: 主循环轮询触发超时后重试到达链路验证                           */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.7.6: 主循环轮询先发现超时后重试握手闭环验证 ---\n");
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++) == 0x8007U);
+    ssc_tick += 150U; /* 超时 */
+
+    /* 由从站主循环轮询率先发现超时: 主循环返回 0x800B 并完成底层中止，门控保留包进入 completed 态 */
+    assert(ecat_foe_ssc_on_main_loop(&ssc_adp, ssc_tick++) == ECAT_FOE_SSC_ERR_PROGERROR);
+    assert(ssc_gate.completed == true);
+    assert(ssc_gate.operation_failed == true);
+
+    /* 随后主站重发同一个首包到达: 门控比对成功，返回 0x800B 并闭环 clear_packet */
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++) == ECAT_FOE_SSC_ERR_PROGERROR);
+    assert(ssc_gate.pending == false);
+    assert(ssc_gate.completed == false);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.7.7: 独立独占暂存区 (非共享) 行为对比与 abort 敏感数据清零验证      */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.7.7: 独立独占暂存区对比与 abort 安全清零验证 ---\n");
+    ecat_foe_ssc_adapter_t ssc_adp_indep;
+    ecat_foe_ssc_async_t ssc_gate_indep;
+    uint8_t gate_storage_indep[128];
+    uint8_t indep_stage_buf[128];
+    ecat_foe_ssc_init_async(&ssc_adp_indep, &core, &ssc_gate_indep);
+    assert(ecat_foe_ssc_async_init(&ssc_gate_indep, ecat_foe_transport_async_ops(), &ssc_adp_indep.transport,
+                                   gate_storage_indep, sizeof(gate_storage_indep), 100U, 0x8007U,
+                                   ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+    assert(ecat_foe_ssc_bind_transfer(&ssc_adp_indep, &mgr) == 0);
+    /* 显式配置独立独占暂存区 (覆盖自动复用，staged_shared 为 false) */
+    assert(ecat_foe_transport_set_staged_buffer(&ssc_adp_indep.transport, indep_stage_buf, sizeof(indep_stage_buf)) == 0);
+    assert(ssc_adp_indep.transport.staged_shared == false);
+
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_foe_ssc_on_write(&ssc_adp_indep, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp_indep, non_zero_first_pkt, sizeof(non_zero_first_pkt), true, ssc_tick++) == 0x8007U);
+    /* 独立暂存区中已被深拷贝首包数据 */
+    assert(memcmp(indep_stage_buf, non_zero_first_pkt, sizeof(non_zero_first_pkt)) == 0);
+
+    /* 显式调用 on_abort 取消 */
+    ecat_foe_ssc_on_abort(&ssc_adp_indep, 0U);
+    /* 独立私有暂存区中暂存的敏感数据已被精准安全清零 */
+    for (size_t i = 0; i < sizeof(non_zero_first_pkt); i++) {
+        assert(indep_stage_buf[i] == 0U);
+    }
+    assert(ecat_transfer_is_active(&mgr) == false);
+
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
 }

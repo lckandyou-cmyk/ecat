@@ -4,6 +4,10 @@
 
 static void clear_packet(ecat_foe_ssc_async_t *a)
 {
+    /* 门控握手闭环 (完成重试、直接失败或成功落盘) 时安全清零暂存数据，擦除敏感负载 */
+    if (a->packet_storage != NULL && a->packet_length > 0U) {
+        memset(a->packet_storage, 0, a->packet_length);
+    }
     a->pending = false;
     a->completed = false;
     a->following = false;

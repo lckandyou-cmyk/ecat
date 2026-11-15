@@ -36,6 +36,18 @@ int ecat_foe_transport_set_staged_buffer(ecat_foe_transport_t *t, uint8_t *buffe
     if (buffer == NULL && capacity != 0U) return -1;
     t->staged_buf = buffer;
     t->staged_cap = capacity;
+    t->staged_shared = false;
+    return 0;
+}
+
+int ecat_foe_transport_set_shared_staged_buffer(ecat_foe_transport_t *t, uint8_t *buffer, size_t capacity)
+{
+    if (t == NULL) return -1;
+    if (ecat_foe_transport_owns(t) || t->pending || t->begin_pending || t->has_staged_packet) return -1;
+    if (buffer == NULL && capacity != 0U) return -1;
+    t->staged_buf = buffer;
+    t->staged_cap = capacity;
+    t->staged_shared = (buffer != NULL);
     return 0;
 }
 
@@ -85,9 +97,10 @@ void ecat_foe_transport_abort(void *ctx)
     t->begin_pending = false;
     t->finish_after_write = false;
     t->finishing = false;
-    /* 仅当首包确实已被深拷贝入暂存区时，精准清零实际暂存的字节数以擦除敏感数据，
-     * 时延严格为 O(staged_length)，杜绝无脑清零整个 capacity 引入不可预测的时钟阻塞 */
-    if (t->has_staged_packet && t->staged_buf != NULL && t->staged_length > 0U) {
+    /* 仅当首包暂存区为独立独占缓冲区时清零实际暂存的字节数；
+     * 若为外部异步门控共享的 packet_storage，严禁在此清零，
+     * 必须保留原始数据供门控进行超时重传比对 (packet_matches)，直到门控握手闭环 (clear_packet) */
+    if (t->has_staged_packet && t->staged_buf != NULL && t->staged_length > 0U && !t->staged_shared) {
         memset(t->staged_buf, 0, t->staged_length);
     }
     t->has_staged_packet = false;
@@ -198,7 +211,10 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
                         ecat_foe_transport_abort(t);
                         return ECAT_UPGRADE_ASYNC_FAILED;
                     }
-                    memcpy(t->staged_buf, data, length);
+                    /* 防范源与目的重叠未定义行为：若共享相同缓冲区 (如自动复用 SSC packet_storage)，跳过冗余拷贝 */
+                    if (t->staged_buf != data) {
+                        memcpy(t->staged_buf, data, length);
+                    }
                 }
                 t->staged_length = length;
                 t->staged_more_data = more_data;
@@ -225,7 +241,10 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
                         ecat_foe_transport_abort(t);
                         return ECAT_UPGRADE_ASYNC_FAILED;
                     }
-                    memcpy(t->staged_buf, data, length);
+                    /* 防范源与目的重叠未定义行为：若共享相同缓冲区 (如自动复用 SSC packet_storage)，跳过冗余拷贝 */
+                    if (t->staged_buf != data) {
+                        memcpy(t->staged_buf, data, length);
+                    }
                 }
                 t->staged_length = length;
                 t->staged_more_data = more_data;
