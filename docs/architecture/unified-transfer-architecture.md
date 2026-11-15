@@ -110,12 +110,11 @@ flowchart TD
 | **IDLE** | 异步 DATA 导入 | `ecat_transfer_begin` | `async_ops->start(INIT)` 返回 PENDING | **STAGE_INIT** | `PENDING` | 锁定 (active=true) | 开始异步介质准备 |
 | **IDLE** | 异步 DATA 导入 | `ecat_transfer_begin` | INIT 立即完成，启动 INVALIDATE 返回 PENDING | **STAGE_INVALIDATE**| `PENDING` | 锁定 (active=true) | 擦写前强制使旧标记失效 |
 | **IDLE** | 异步 DATA 导入 | `ecat_transfer_begin` | INIT 与 INVALIDATE 均立即完成 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 介质已就绪，可开始写分块 |
-| **IDLE** | 异步 固件 导入 | `ecat_transfer_begin` | `fw_async_ops->start(INIT)` 返回 PENDING | **STAGE_INIT** | `PENDING` | 锁定 (active=true) | 固件核心异步准备 |
-| **IDLE** | 异步 固件 导入 | `ecat_transfer_begin` | `fw_async_ops->start(INIT)` 立即完成 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 固件核心就绪 |
+| **IDLE** | 固件导入 (同步/异步后端)| `ecat_transfer_begin` | `ecat_foe_core_begin_request` 同步就绪 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 固件核心同步就绪，重置会话与目标校验 |
 | **IDLE** | 异步 EXPORT 导出 | `ecat_transfer_begin` | `async_ops->start(READ_OPEN)` 返回 PENDING | **STAGE_READ_OPEN** | `PENDING` | 锁定 (active=true) | 异步打开只读介质锁 |
 | **IDLE** | 异步 EXPORT 导出 | `ecat_transfer_begin` | `async_ops->start(READ_OPEN)` 立即完成 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 只读介质就绪，可开始读取 |
-| **IDLE** | 同步 DATA / FIRMWARE | `ecat_transfer_begin` | 驱动阻塞初始化成功 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 经典同步模式快速就绪 |
-| **STAGE_INIT** | 异步 DATA / 固件 | `ecat_transfer_poll` | 硬件处理中 (poll 返回 PENDING) | **STAGE_INIT** | `PENDING` | 锁定 | 保持轮询 |
+| **IDLE** | 同步 DATA 导入 | `ecat_transfer_begin` | 驱动阻塞初始化成功 | **STAGE_NONE** | `COMPLETE` | 锁定 (active=true) | 经典同步模式快速就绪 |
+| **STAGE_INIT** | 异步 DATA 导入 | `ecat_transfer_poll` | 硬件处理中 (poll 返回 PENDING) | **STAGE_INIT** | `PENDING` | 锁定 | 保持轮询 |
 | **STAGE_INIT** | 异步 DATA 导入 | `ecat_transfer_poll` | INIT 轮询完成，自动触发 INVALIDATE | **STAGE_INVALIDATE**| `PENDING` / `COMPLETE`| 锁定 | 无缝自驱动二阶段失效 |
 | **STAGE_INVALIDATE**| 异步 DATA 导入 | `ecat_transfer_poll` | INVALIDATE 轮询完成 | **STAGE_NONE** | `COMPLETE` | 锁定 | 介质失效完成，进入可写态 |
 | **STAGE_READ_OPEN** | 异步 EXPORT 导出 | `ecat_transfer_poll` | READ_OPEN 轮询完成 | **STAGE_NONE** | `COMPLETE` | 锁定 | 只读锁获取完毕，进入可读态 |
@@ -207,15 +206,15 @@ flowchart TD
 
 | 模块分类 | 文件清单 | 文件数 | 代码行数 (LOC) | 职责与技术说明 |
 | :--- | :--- | :---: | :---: | :--- |
-| **公开头文件** | `include/*.h` | 21 | 3,027 | 严格 ANSI C99 / 零 malloc / ABI 强校验 |
-| **核心生产源码** | `src/*.c` | 9 | 4,647 | 权威统一核心、会话仲裁、固件策略机、EFW 解析 |
-| **适配器源码** | `src/adapters/*.c` | 5 | 1,614 | SOES、SSC、FoE 适配桥、本地文件流适配器 |
-| **测试套件** | `tests/*.c` | 17 | 12,698 | 单元测试、端到端多通道集成测试、ASan 契约测试 |
+| **公开头文件** | `include/*.h` | 21 | 3,097 | 严格 ANSI C99 / 零 malloc / ABI 强校验 |
+| **核心生产源码** | `src/*.c` | 9 | 4,658 | 权威统一核心、会话仲裁、固件策略机、EFW 解析 |
+| **适配器源码** | `src/adapters/*.c` | 5 | 1,804 | SOES、SSC、FoE 适配桥、本地文件流适配器 |
+| **测试套件** | `tests/*.c` | 17 | 13,222 | 单元测试、端到端多通道集成测试、ASan 契约测试 |
 | **示例与参考实现**| `examples/**/*.c` | 7 | 2,808 | 最小 Bootloader、驱动模板、Host Demo、Monocypher |
-| **项目 C 源码总计**| 全部源码与测试 | 59 | **24,794** | 编译规范 `-Wall -Wextra -Werror -pedantic` |
+| **项目 C 源码总计**| 全部源码与测试 | 59 | **25,589** | 编译规范 `-Wall -Wextra -Werror -pedantic` |
 
 > **量化质量指标**：
-> - **测试代码比率**：单元与集成测试代码行数（12,698 行）与生产代码行数（6,261 行）之比达 **2.03 : 1**。
+> - **测试代码比率**：单元与集成测试代码行数（13,222 行）与生产代码行数（6,462 行）之比达 **2.05 : 1**。
 > - **测试覆盖矩阵**：包含 562 项断言的 C 单元测试、31 项 PDF 夹具测试、44 项文档规范测试、13 项 SSC 状态机测试、真实 SOES Harness 测试、真实 Monocypher 密码学互操作测试与最小 Bootloader 5 大核心场景测试，全量测试套件通过率 **100% (562/562)**。
 
 ---
@@ -273,6 +272,10 @@ flowchart TD
 1. **静态结构体上下文 (Static Context Overhead)**：
    - 全路径零动态内存分配（Zero heap malloc），所有结构体大小编译期固定，可在 `.bss`、数据段或任务栈分配。
    - `ecat_transfer_t` 新增异步支持增量仅 48 字节；`ecat_transport_endpoint_t` 增量仅 8 字节。
+   - **FoE 首包受控暂存瘦身实测**：移除适配桥内部写死的 512 字节静态数组，改为调用方显式配置外部暂存区；SSC 异步模式自动复用 gate 已有的 `packet_storage`。实测静态上下文瘦身效果：
+     - `ecat_foe_transport_t`：宿主 64-bit 由 576 降至 64 字节（-512B, -88.9%），32-bit Cortex-M ABI 下由 552 降至 40 字节（-512B, -92.8%）；
+     - `ecat_foe_soes_adapter_t`：宿主 64-bit 由 704 降至 192 字节，32-bit Cortex-M 下由 664 降至 152 字节；
+     - `ecat_foe_ssc_adapter_t`：宿主 64-bit 由 608 降至 96 字节，32-bit Cortex-M 下由 576 降至 64 字节。
 2. **调用方数据缓冲区 (Caller Buffers)**：
    - 流式分块传输缓冲（如 `fbuffer`、`staging_buf`）由调用方显式配置传入，核心函数内部绝不定义隐式大数组局部变量。
 3. **运行时调用栈与环境边界 (Runtime Stack & Measurement Boundaries)**：
@@ -285,6 +288,7 @@ flowchart TD
 | **动态堆内存 (Dynamic Heap)** | **0 字节 (严格禁止 malloc)** | **0 字节** | 100% 静态确定，无堆碎片隐患 |
 | **核心结构体增量 (`ecat_transfer_t`)**| 静态固定 | **+48 字节** | 包含异步 ops 指针与 stage 内部枚举 |
 | **端点结构体增量 (`endpoint_t`)** | 静态固定 | **+8 字节** | 包含 pending begin 状态位与目标缓存 |
+| **FoE 适配桥瘦身 (`transport_t`)** | 静态瘦身 | **-512 字节 (-92.8%)** | 移除硬编码 512B 暂存，32-bit ABI 下仅 40 字节 |
 | **函数调用链深度** | 有界调用，禁止递归 | **3~4 层** | 深度稳定可预测 |
 | **限制栈回归测试** | 宿主机受限栈环境 | **1MB 与 8MB 栈通过** | 宿主机环境下运行无栈溢出 (rc=0) |
 | **目标硬件栈开销** | 依赖目标编译器与 ABI | **须板级实测** | 集成方须按目标编译选项评估栈与中断裕量 |
@@ -299,10 +303,10 @@ flowchart TD
    - 本项目交付物包含通用接口、统一传输引擎、适配桥、单元测试套件、以及基于真实 SOES 源码和真实 Monocypher 库的宿主集成测试。
    - **未在此仓库内置**具体的物理芯片硬件外设寄存器驱动（如 STM32/GD32 片上 USART 中断/DMA 驱动、物理 SJA1000/CANopen 控制器寄存器驱动、硬件 QSPI 外设驱动等）。
    - 架构设计中的 UART、CAN 等通道 ID 属于通道规范编号；单元测试中的 `ep_uart`、`ep_can` 属于通用传输端点接口（`ecat_transport_endpoint_t`）的原型验证。实际嵌入式板级工程集成时，须由集成方根据目标芯片 SDK 实现对应外设中断收发与 DMA 回调。
-3. **总线协议栈异步重传能力与纯同步适配器边界**：
-   - **SOES 协议栈**：原生 SOES 缺乏异步重传与暂存重发握手门控机制，其写入回调为纯同步阻塞调用。因此 SOES 适配器在 `ecat_foe_soes_bind_transfer` 与运行时 WRQ 预检钩子中**严格拒绝绑定或接收任何启用的异步目标**（`desc->asynchronous == true`）。若检测到异步目标请求，前置钩子将直接切断条目（`n_files = 0`）并由原生 SOES 向主站回复 0x8001 / 0x8004 拒绝，坚决防止发送 ACK(0) 接收会话后在数据阶段意外失败；
-   - **Beckhoff SSC 纯同步模式**：未挂载异步门（`async_gate == NULL`）的纯同步 SSC 适配器同样缺乏异步暂存推进能力，在 `bind_transfer` 与 `on_write` 阶段同样强制拒绝异步目标，返回 `ECAT_FOE_SSC_ERR_ILLEGAL` (0x8004)；仅在挂载了官方标准异步门控（`ecat_foe_ssc_async_t`）时方可承载异步目标。
-4. **物理 32 位 MCU 动态联调边界**：
+2. **总线协议栈异步重传能力与纯同步适配器边界**：
+   - **SOES 协议栈**：原生 SOES 缺乏异步重传与暂存重发握手门控机制，其写入回调为纯同步阻塞调用。在 `ecat_foe_soes_bind_transfer` 阶段允许包含给其他通道使用的异步目标的混合注册表成功绑定；但在运行时 WRQ 阶段，若主站请求的目标属于异步目标（`desc->asynchronous == true`），前置钩子将直接切断条目（`foe_cfg->n_files = 0`）由原生 SOES 向主站回复 0x8001 拒绝，坚决防止发送 ACK(0) 接收会话后在数据阶段意外失败，且绝不激活会话、不影响其他通道正常读写该异步目标；
+   - **Beckhoff SSC 纯同步模式**：未挂载异步门（`async_gate == NULL`）的纯同步 SSC 适配器在 `bind_transfer` 同样允许混合注册表绑定；而在 `on_write` 阶段当请求目标为异步目标时返回 `ECAT_FOE_SSC_ERR_ILLEGAL` (0x8004) 拦截，不发 ACK(0) 且不激活会话；仅在挂载了官方标准异步门控（`ecat_foe_ssc_async_t`）时方可承载异步目标。
+3. **物理 32 位 MCU 动态联调边界**：
    - 当前所有测试（562 项单元测试、SOES Harness、Bootloader 集成）均在宿主机仿真环境下 100% 绿灯通过，并通过了 32 位静态编译检查（`sizeof(size_t) == 4` 编译检查）；
    - **尚未在真实物理 32 位 MCU 硬件上进行动态烧录与在线双向传输实测**；
    - 真实硬件部署前，集成方须针对具体芯片进行底层驱动移植验证（特别是 Flash 擦写时钟周期、看门狗喂狗间隔、中断优先级配置以及 Flash 读写期间的总线互斥）。
