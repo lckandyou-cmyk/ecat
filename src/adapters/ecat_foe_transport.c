@@ -211,9 +211,9 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
                         ecat_foe_transport_abort(t);
                         return ECAT_UPGRADE_ASYNC_FAILED;
                     }
-                    /* 防范源与目的重叠未定义行为：若共享相同缓冲区 (如自动复用 SSC packet_storage)，跳过冗余拷贝 */
+                    /* 防范源与目的重叠未定义行为：若相同跳过拷贝，若部分重叠使用 memmove 安全搬移 */
                     if (t->staged_buf != data) {
-                        memcpy(t->staged_buf, data, length);
+                        memmove(t->staged_buf, data, length);
                     }
                 }
                 t->staged_length = length;
@@ -241,9 +241,9 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
                         ecat_foe_transport_abort(t);
                         return ECAT_UPGRADE_ASYNC_FAILED;
                     }
-                    /* 防范源与目的重叠未定义行为：若共享相同缓冲区 (如自动复用 SSC packet_storage)，跳过冗余拷贝 */
+                    /* 防范源与目的重叠未定义行为：若相同跳过拷贝，若部分重叠使用 memmove 安全搬移 */
                     if (t->staged_buf != data) {
-                        memcpy(t->staged_buf, data, length);
+                        memmove(t->staged_buf, data, length);
                     }
                 }
                 t->staged_length = length;

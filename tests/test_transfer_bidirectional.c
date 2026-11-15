@@ -235,6 +235,41 @@ static const ecat_async_data_ops_t s_foe_staged_ops = {
     .abort = foe_staged_abort
 };
 
+typedef struct {
+    ecat_upgrade_async_result_t poll_res;
+    uint8_t received[128];
+    size_t received_len;
+    unsigned write_calls;
+} foe_staged_upg_mock_t;
+
+static foe_staged_upg_mock_t s_mock_staged_upg_ctx;
+
+static ecat_upgrade_async_result_t foe_staged_upg_start(void *ctx, const uint8_t *data, size_t length, bool more_data) {
+    foe_staged_upg_mock_t *m = (foe_staged_upg_mock_t *)ctx;
+    (void)more_data;
+    m->write_calls++;
+    m->received_len = length;
+    if (length <= sizeof(m->received) && data != NULL) {
+        memcpy(m->received, data, length);
+    }
+    return ECAT_UPGRADE_ASYNC_COMPLETE;
+}
+
+static ecat_upgrade_async_result_t foe_staged_upg_poll(void *ctx) {
+    foe_staged_upg_mock_t *m = (foe_staged_upg_mock_t *)ctx;
+    return m->poll_res;
+}
+
+static void foe_staged_upg_abort(void *ctx) {
+    (void)ctx;
+}
+
+static const ecat_upgrade_async_ops_t s_foe_staged_upg_ops = {
+    .start = foe_staged_upg_start,
+    .poll = foe_staged_upg_poll,
+    .abort = foe_staged_upg_abort
+};
+
 static test_async_data_hardware_t s_hw_stage_test;
 
 static ecat_async_op_result_t stage_driver_poll(void *ctx, ecat_async_data_op_t *op);
@@ -2817,6 +2852,235 @@ int main(void)
         assert(foe_tr.has_staged_packet == true);
         ecat_foe_transport_abort(&foe_tr);
         assert(ecat_foe_transport_owns(&foe_tr) == false);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 10.16 FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支) */
+    /* ---------------------------------------------------------------------- */
+    {
+        printf("--- 测试 10.16: FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支) ---\n");
+
+        ecat_foe_core_t local_core;
+        ecat_foe_core_cfg_t local_cfg;
+        memset(&local_cfg, 0, sizeof(local_cfg));
+        local_cfg.project_name = "DRIVE_SERVO";
+        local_cfg.hardware_id = 0x0001U;
+        local_cfg.local_hw_ver = 0x0100U;
+        local_cfg.max_header_size = 148U;
+        local_cfg.targets[0].enabled = true;
+        local_cfg.targets[0].max_payload_size = 1024U * 1024U;
+        local_cfg.targets[0].write_unit = 8U;
+        local_cfg.targets[0].driver = &param_desc.driver.io;
+        assert(ecat_foe_core_init(&local_core, &local_cfg) == 0);
+
+        /* 1. Transfer 模式下的重叠/相同/独立缓冲区测试 */
+        {
+            memset(&s_mock_staged_ctx, 0, sizeof(s_mock_staged_ctx));
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+
+            ecat_target_registry_t reg;
+            assert(ecat_target_registry_init(&reg) == 0);
+            ecat_target_desc_t target_desc = {
+                .target_id = 95U,
+                .name = "stg_overlap",
+                .type = ECAT_TARGET_TYPE_DATA,
+                .permissions = ECAT_PERM_WRITE,
+                .max_size = 2048U,
+                .enabled = true,
+                .asynchronous = true,
+                .user_ctx = &s_mock_staged_ctx,
+                .driver = {
+                    .async_ops = &s_foe_staged_ops
+                }
+            };
+            assert(ecat_target_registry_add(&reg, &target_desc) == 0);
+
+            ecat_transfer_t mgr;
+            assert(ecat_transfer_init(&mgr, &reg, &local_core) == 0);
+            uint8_t mgr_staging[256];
+            assert(ecat_transfer_set_staging_buffer(&mgr, mgr_staging, sizeof(mgr_staging)) == 0);
+
+            ecat_foe_transport_t foe_tr;
+            assert(ecat_foe_transport_init_transfer(&foe_tr, &mgr) == 0);
+
+            ecat_transfer_request_t req = {
+                .transport_id = 1U,
+                .target_id = 95U,
+                .direction = ECAT_TRANSFER_DIR_IMPORT,
+                .expected_size = 64U
+            };
+
+            uint8_t buffer[256];
+            uint8_t expected[64];
+            uint8_t separate[64];
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            for (size_t i = 0; i < 64; i++) separate[i] = (uint8_t)(0x80 + i);
+
+            /* Case 1A: 前向部分重叠 (staged_buf < data && staged_buf + len > data)
+             * staged_buf = &buffer[0], data = &buffer[16], length = 64
+             * 重叠区间: [buffer + 16, buffer + 64) */
+            memcpy(expected, &buffer[16], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr, &buffer[0], 128) == 0);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+            assert(ecat_transfer_begin(&mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+            foe_tr.pending = true;
+            foe_tr.begin_pending = true;
+
+            assert(ecat_foe_transport_start(&foe_tr, &buffer[16], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr.has_staged_packet == true);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr);
+
+            /* Case 1B: 后向部分重叠 (data < staged_buf && data + len > staged_buf)
+             * staged_buf = &buffer[16], data = &buffer[0], length = 64
+             * 重叠区间: [buffer + 16, buffer + 64) */
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            memcpy(expected, &buffer[0], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr, &buffer[16], 128) == 0);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+            assert(ecat_transfer_begin(&mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+            foe_tr.pending = true;
+            foe_tr.begin_pending = true;
+
+            assert(ecat_foe_transport_start(&foe_tr, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr.has_staged_packet == true);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr);
+
+            /* Case 1C: 完全相同地址 (staged_buf == data) */
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            memcpy(expected, &buffer[0], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr, &buffer[0], 128) == 0);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+            assert(ecat_transfer_begin(&mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+            foe_tr.pending = true;
+            foe_tr.begin_pending = true;
+
+            assert(ecat_foe_transport_start(&foe_tr, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr.has_staged_packet == true);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr);
+
+            /* Case 1D: 完全独立不重叠缓冲区 */
+            memcpy(expected, separate, 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr, &buffer[0], 128) == 0);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+            assert(ecat_transfer_begin(&mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+            foe_tr.pending = true;
+            foe_tr.begin_pending = true;
+
+            assert(ecat_foe_transport_start(&foe_tr, separate, 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr.has_staged_packet == true);
+            s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr);
+        }
+
+        /* 2. Upgrade 分支下的重叠/相同/独立缓冲区测试 */
+        {
+            memset(&s_mock_staged_upg_ctx, 0, sizeof(s_mock_staged_upg_ctx));
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
+
+            ecat_upgrade_t upg;
+            memset(&upg, 0, sizeof(upg));
+            upg.core = &local_core;
+            upg.asynchronous = true;
+            upg.pending = true;
+            upg.async_ops = &s_foe_staged_upg_ops;
+            upg.async_ctx = &s_mock_staged_upg_ctx;
+
+            ecat_foe_transport_t foe_tr_upg;
+            memset(&foe_tr_upg, 0, sizeof(foe_tr_upg));
+            foe_tr_upg.upgrade = &upg;
+
+            uint8_t buffer[256];
+            uint8_t expected[64];
+            uint8_t separate[64];
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            for (size_t i = 0; i < 64; i++) separate[i] = (uint8_t)(0x90 + i);
+
+            /* Case 2A: 前向部分重叠 (staged_buf < data && staged_buf + len > data) */
+            memcpy(expected, &buffer[16], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
+            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
+            foe_tr_upg.pending = true;
+            foe_tr_upg.begin_pending = true;
+            upg.pending = true;
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
+
+            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[16], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr_upg.has_staged_packet == true);
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_upg_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr_upg);
+
+            /* Case 2B: 后向部分重叠 (data < staged_buf && data + len > staged_buf) */
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            memcpy(expected, &buffer[0], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[16], 128) == 0);
+            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
+            foe_tr_upg.pending = true;
+            foe_tr_upg.begin_pending = true;
+            upg.pending = true;
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
+
+            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr_upg.has_staged_packet == true);
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_upg_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr_upg);
+
+            /* Case 2C: 完全相同地址 (staged_buf == data) */
+            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
+            memcpy(expected, &buffer[0], 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
+            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
+            foe_tr_upg.pending = true;
+            foe_tr_upg.begin_pending = true;
+            upg.pending = true;
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
+
+            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr_upg.has_staged_packet == true);
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_upg_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr_upg);
+
+            /* Case 2D: 完全独立不重叠缓冲区 */
+            memcpy(expected, separate, 64);
+            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
+            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
+            foe_tr_upg.pending = true;
+            foe_tr_upg.begin_pending = true;
+            upg.pending = true;
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
+
+            assert(ecat_foe_transport_start(&foe_tr_upg, separate, 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+            assert(foe_tr_upg.has_staged_packet == true);
+            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
+            assert(s_mock_staged_upg_ctx.received_len == 64U);
+            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
+            ecat_foe_transport_abort(&foe_tr_upg);
+        }
+        printf("  [PASS] FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支 8 项场景) 全部通过\n");
     }
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
