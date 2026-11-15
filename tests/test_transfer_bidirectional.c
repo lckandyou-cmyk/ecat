@@ -307,6 +307,7 @@ typedef struct {
     bool pending;
     int starts;
     int polls;
+    int abort_calls;
 } test_flash_async_t;
 
 static test_flash_async_t s_fw_test_flash;
@@ -360,11 +361,16 @@ static ecat_foe_target_async_result_t fw_flash_poll(void *ctx, ecat_foe_target_a
     return ECAT_FOE_TARGET_ASYNC_COMPLETE;
 }
 
-static void fw_flash_abort(void *ctx) { ((test_flash_async_t *)ctx)->pending = false; }
+static void fw_flash_abort(void *ctx) {
+    test_flash_async_t *f = (test_flash_async_t *)ctx;
+    f->pending = false;
+    f->abort_calls++;
+}
 static void fw_flash_abort_session(void *ctx) {
     test_flash_async_t *f = (test_flash_async_t *)ctx;
     f->pending = false;
     f->valid = false;
+    f->abort_calls++;
 }
 
 static const ecat_foe_target_async_ops_t s_fw_flash_ops = {
@@ -1779,6 +1785,8 @@ int main(void)
 
     /* 10.4.1 无 staging buffer 或分块超容量时异步固件写必须明确拒绝并安全释放 */
     ecat_foe_core_on_abort(&core);
+    s_fw_test_flash.abort_calls = 0;
+    g_abort_called = false;
     ecat_transfer_t mgr_fw_nostaging;
     assert(ecat_transfer_init(&mgr_fw_nostaging, &reg, &core) == 0);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
@@ -1789,6 +1797,22 @@ int main(void)
     assert(ecat_transfer_write(&mgr_fw_nostaging, &client_owner1, tok_nostage, fw_efw, 100U) == ECAT_TRANSFER_FAILED);
     assert(ecat_transfer_get_last_error(&mgr_fw_nostaging) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(!mgr_fw_nostaging.active);
+    assert(g_abort_called == false); /* 关键断言: 拒绝时绝不冗余调用同步 io.abort */
+
+    /* 10.4.2 异步固件升级中途 cancel 时，硬件 abort 恰好执行一次且同步 io.abort 绝不被调用 */
+    ecat_foe_core_on_abort(&core);
+    s_fw_test_flash.abort_calls = 0;
+    g_abort_called = false;
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 200U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    /* 关键断言: 硬件 abort 恰好 1 次，同步驱动 io.abort 绝不被触碰 */
+    assert(s_fw_test_flash.abort_calls == 1);
+    assert(g_abort_called == false);
+    assert(!mgr_first.active);
 
     /* 10.5 异步 DATA 完整驱动生命周期验证 (纯非阻塞状态机与各阶段 PENDING 推进) */
     printf("--- 测试 10.5: 异步 DATA 完整驱动生命周期与失败安全回退 ---\n");
