@@ -1116,6 +1116,103 @@ int main(void)
     assert(ecat_transfer_finish(&fw_manager, &channel_uart, exp_tok) == ECAT_TRANSFER_COMPLETE);
 #endif
 
+    /* 9. 共享会话跨管理器实例身份绑定与隔离测试 (Manager Identity Binding in Shared Session) */
+    printf("--- 测试跨管理器会话身份绑定与隔离防御 ---\n");
+    reset_mock_flags();
+
+    /* 9.1 两个 transfer 管理器共享同一个 core: 非发起管理器调用各操作必须返回 STALE，且不破坏原管理器会话与驱动 */
+    ecat_transfer_t mgr_first, mgr_second;
+    assert(ecat_transfer_init(&mgr_first, &reg, &core) == 0);
+    assert(ecat_transfer_init(&mgr_second, &reg, &core) == 0);
+
+    int client_owner1 = 100, client_owner2 = 200;
+    ecat_transfer_request_t shared_req = {
+        .transport_id = 1U,
+        .target_id = 2U, /* Target 2 为数据区块，支持读写 */
+        .direction = ECAT_TRANSFER_DIR_IMPORT,
+        .expected_size = 16U,
+        .fw_version = 0U
+    };
+    uint64_t lease_tok1 = 0;
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &shared_req, &lease_tok1) == ECAT_TRANSFER_COMPLETE);
+    assert(lease_tok1 != 0);
+    assert(mgr_first.active == true);
+    assert(g_init_called == true);
+    reset_mock_flags();
+
+    /* 在非发起的 mgr_second 上用同 owner 同 token 尝试 write/read/finish/cancel 均必须返回 STALE */
+    uint8_t dummy_buf[16] = {0};
+    size_t dummy_actual = 0;
+    assert(ecat_transfer_write(&mgr_second, &client_owner1, lease_tok1, dummy_buf, sizeof(dummy_buf)) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_read(&mgr_second, &client_owner1, lease_tok1, dummy_buf, sizeof(dummy_buf), &dummy_actual) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_finish(&mgr_second, &client_owner1, lease_tok1) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_cancel(&mgr_second, &client_owner1, lease_tok1) == ECAT_TRANSFER_STALE);
+
+    /* 在非发起的 mgr_second 上用不同 owner 尝试亦必须返回 STALE */
+    assert(ecat_transfer_write(&mgr_second, &client_owner2, lease_tok1, dummy_buf, sizeof(dummy_buf)) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_cancel(&mgr_second, &client_owner2, lease_tok1) == ECAT_TRANSFER_STALE);
+
+    /* 验证第一管理器的会话与底层驱动完好无损 */
+    assert(mgr_first.active == true);
+    assert(g_abort_called == false);
+    assert(g_finalize_called == false);
+
+    /* 此时在 mgr_second 上尝试 begin 必须返回 BUSY，绝不能二次初始化驱动 */
+    uint64_t lease_tok2 = 0;
+    assert(ecat_transfer_begin(&mgr_second, &client_owner2, &shared_req, &lease_tok2) == ECAT_TRANSFER_BUSY);
+    assert(lease_tok2 == 0);
+    assert(g_init_called == false);
+
+    /* 原管理器正常 cancel 成功释放租约与底层驱动 */
+    assert(ecat_transfer_cancel(&mgr_first, &client_owner1, lease_tok1) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.active == false);
+
+    /* 原管理器释放后，mgr_second 才能成功获取会话并初始化驱动 (验证复用) */
+    assert(ecat_transfer_begin(&mgr_second, &client_owner2, &shared_req, &lease_tok2) == ECAT_TRANSFER_COMPLETE);
+    assert(lease_tok2 != 0);
+    assert(mgr_second.active == true);
+    assert(ecat_transfer_cancel(&mgr_second, &client_owner2, lease_tok2) == ECAT_TRANSFER_COMPLETE);
+
+    /* 9.2 transfer 管理器与 upgrade 管理器交叉调用隔离 */
+    ecat_upgrade_t upg_mgr;
+    assert(ecat_upgrade_init(&upg_mgr, &core) == 0);
+
+    /* 场景 A: transfer 管理器持租，在 upgrade 管理器上调用全部操作必须返回 STALE */
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &shared_req, &lease_tok1) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_upgrade_write(&upg_mgr, &client_owner1, lease_tok1, dummy_buf, sizeof(dummy_buf)) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_finish(&upg_mgr, &client_owner1, lease_tok1) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, lease_tok1) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner2, lease_tok1) == ECAT_UPGRADE_STALE);
+
+    /* upgrade 管理器尝试 begin 必须返回 BUSY */
+    ecat_upgrade_request_t upg_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    uint64_t upg_tok = 0;
+    assert(ecat_upgrade_begin(&upg_mgr, &client_owner2, &upg_req, &upg_tok) == ECAT_UPGRADE_BUSY);
+    assert(mgr_first.active == true);
+    assert(ecat_transfer_cancel(&mgr_first, &client_owner1, lease_tok1) == ECAT_TRANSFER_COMPLETE);
+
+    /* 场景 B: upgrade 管理器持租，在 transfer 管理器上调用全部操作必须返回 STALE */
+    assert(ecat_upgrade_begin(&upg_mgr, &client_owner1, &upg_req, &upg_tok) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf)) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_read(&mgr_first, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf), &dummy_actual) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_finish(&mgr_first, &client_owner1, upg_tok) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_cancel(&mgr_first, &client_owner1, upg_tok) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner2, &shared_req, &lease_tok1) == ECAT_TRANSFER_BUSY);
+    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, upg_tok) == ECAT_UPGRADE_COMPLETE);
+
+    /* 9.3 两个 upgrade 管理器共享同一个 core: 非发起管理器调用必须返回 STALE */
+    ecat_upgrade_t upg_second;
+    assert(ecat_upgrade_init(&upg_second, &core) == 0);
+    assert(ecat_upgrade_begin(&upg_mgr, &client_owner1, &upg_req, &upg_tok) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_upgrade_write(&upg_second, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf)) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_finish(&upg_second, &client_owner1, upg_tok) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_cancel(&upg_second, &client_owner1, upg_tok) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_cancel(&upg_second, &client_owner2, upg_tok) == ECAT_UPGRADE_STALE);
+    assert(ecat_upgrade_begin(&upg_second, &client_owner2, &upg_req, &lease_tok2) == ECAT_UPGRADE_BUSY);
+    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, upg_tok) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_upgrade_begin(&upg_second, &client_owner2, &upg_req, &lease_tok2) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_upgrade_cancel(&upg_second, &client_owner2, lease_tok2) == ECAT_UPGRADE_COMPLETE);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

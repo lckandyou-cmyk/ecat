@@ -102,14 +102,14 @@ static void release_session(ecat_transfer_t *t, const void *owner, uint64_t toke
         }
         ecat_upgrade_session_t *s = get_transfer_session(t);
         if (s != NULL) {
-            (void)ecat_upgrade_session_release(s, owner, token);
+            (void)ecat_upgrade_session_release_mgr(s, t, owner, token);
         }
     }
 }
 
 static bool is_owned(const ecat_transfer_t *t, const void *owner, uint64_t token)
 {
-    return (t != NULL && ecat_upgrade_session_owns(get_transfer_session_const(t), owner, token));
+    return (t != NULL && ecat_upgrade_session_owns_mgr(get_transfer_session_const(t), t, owner, token));
 }
 
 ecat_transfer_result_t ecat_transfer_begin(
@@ -142,7 +142,7 @@ ecat_transfer_result_t ecat_transfer_begin(
 
     uint64_t acquired_token = 0;
     ecat_upgrade_session_result_t session_res =
-        ecat_upgrade_session_acquire(get_transfer_session(t), owner, &acquired_token);
+        ecat_upgrade_session_acquire_mgr(get_transfer_session(t), t, owner, &acquired_token);
 
     if (session_res == ECAT_UPGRADE_SESSION_BUSY) {
         return ECAT_TRANSFER_BUSY;
