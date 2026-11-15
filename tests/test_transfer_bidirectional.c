@@ -139,9 +139,11 @@ static void mock_async_io_abort(void *ctx) {
     g_async_io_abort_called = true;
 }
 
+static const uint8_t *s_fw_async_last_data = NULL;
 static ecat_upgrade_async_result_t test_fw_async_start(void *ctx, const uint8_t *data, size_t len, bool more)
 {
-    (void)ctx; (void)data; (void)len; (void)more;
+    (void)ctx; (void)len; (void)more;
+    s_fw_async_last_data = data;
     s_fw_async_start_called = true;
     return s_fw_async_next_res;
 }
@@ -1499,9 +1501,14 @@ int main(void)
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
     assert(s_fw_async_start_called == true);
     assert(ecat_transfer_is_pending(&mgr_first) == true);
+    /* 断言传给异步固件后端的数据指针必须是深拷贝后的 fw_staging，绝非易变的外部 fw_chunk 指针 */
+    assert(s_fw_async_last_data == fw_staging);
 
     /* pending 期间新写入返回 BUSY */
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_BUSY);
+
+    /* 立即篡改外部输入缓冲区: 模拟调用方修改/清零外部缓冲区，验证深拷贝与 CRC 不可变性 */
+    memset(fw_chunk, 0x00, sizeof(fw_chunk));
 
     /* poll 推进 write 完成 */
     s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
@@ -1510,8 +1517,10 @@ int main(void)
     assert(s_fw_async_poll_called == true);
     assert(ecat_transfer_is_pending(&mgr_first) == false);
 
-    /* 关键断言 1: 异步固件写入经 poll 完成后，CRC32 必须正确更新并与计算值一致 */
-    uint32_t expected_fw_crc = ecat_foe_crc32_calc(fw_chunk, sizeof(fw_chunk));
+    /* 关键断言 1: 异步固件写入经 poll 完成后，CRC32 必须匹配原始数据的 CRC，不受外部篡改影响 */
+    uint8_t orig_chunk[100];
+    memset(orig_chunk, 0xEE, sizeof(orig_chunk));
+    uint32_t expected_fw_crc = ecat_foe_crc32_calc(orig_chunk, sizeof(orig_chunk));
     assert(ecat_transfer_get_crc32(&mgr_first) == expected_fw_crc);
 
     /* 关键断言 2: expected_size 为 200，目前仅写入 100，finish 必须被拒绝且报 BOUNDARY_EXCEEDED */
@@ -1541,6 +1550,17 @@ int main(void)
     assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(mgr_first.active == false);
     assert(!ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, fw_tok));
+
+    /* 10.4.1 无 staging buffer 或分块超容量时异步固件写必须明确拒绝并安全释放 */
+    ecat_foe_core_on_abort(&core);
+    ecat_transfer_t mgr_fw_nostaging;
+    assert(ecat_transfer_init(&mgr_fw_nostaging, &reg, &core) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_fw_nostaging, &fw_ops, &fw_dummy_ctx) == 0);
+    uint64_t tok_nostage = 0;
+    assert(ecat_transfer_begin(&mgr_fw_nostaging, &client_owner1, &fw_async_req, &tok_nostage) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&mgr_fw_nostaging, &client_owner1, tok_nostage, orig_chunk, 100U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr_fw_nostaging) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!mgr_fw_nostaging.active);
 
     /* 10.5 异步 DATA 完整驱动生命周期验证 (init, invalidate, erase_to, finalize, abort) */
     printf("--- 测试 10.5: 异步 DATA 完整驱动生命周期与失败安全回退 ---\n");

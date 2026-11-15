@@ -629,10 +629,16 @@ ecat_transfer_result_t ecat_transfer_write(
         }
 
         if (t->is_async && t->fw_async_ops != NULL) {
-            if (t->staging_buf != NULL && length <= t->staging_capacity) {
-                memcpy(t->staging_buf, data, length);
+            if (t->staging_buf == NULL || length > t->staging_capacity) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                if (t->fw_async_ops->abort) t->fw_async_ops->abort(t->fw_async_ctx);
+                t->core_started = false;
+                t->active = false;
+                release_session(t, owner, token);
+                return ECAT_TRANSFER_FAILED;
             }
-            ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, data, length, true);
+            memcpy(t->staging_buf, data, length);
+            ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, t->staging_buf, length, true);
             if (res == ECAT_UPGRADE_ASYNC_PENDING) {
                 t->pending = true;
                 t->stage = ECAT_TRANSFER_STAGE_WRITE;
@@ -640,7 +646,7 @@ ecat_transfer_result_t ecat_transfer_write(
                 return ECAT_TRANSFER_PENDING;
             } else if (res == ECAT_UPGRADE_ASYNC_COMPLETE) {
                 t->current_offset += (uint32_t)length;
-                ecat_foe_crc32_update(&t->running_crc32, data, (uint32_t)length);
+                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)length);
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
