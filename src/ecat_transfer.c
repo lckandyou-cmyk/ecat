@@ -782,10 +782,22 @@ ecat_transfer_result_t ecat_transfer_write(
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
                 }
-                t->current_offset += (uint32_t)actual;
-                if (actual > 0U) {
-                    ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
+                if (actual < length) {
+                    /* 原子完整写入契约: 短写或 0 字节写入属于非法驱动行为，必须明确报错以防止数据截断丢失 */
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+                    if (t->target->driver.async_ops && t->target->driver.async_ops->abort) {
+                        t->target->driver.async_ops->abort(t->target->user_ctx);
+                    }
+                    if (t->driver_initialized && t->target->driver.io.abort != NULL) {
+                        t->target->driver.io.abort(t->target->user_ctx);
+                    }
+                    t->driver_initialized = false;
+                    t->active = false;
+                    release_session(t, owner, token);
+                    return ECAT_TRANSFER_FAILED;
                 }
+                t->current_offset += (uint32_t)actual;
+                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
@@ -1167,10 +1179,23 @@ ecat_transfer_result_t ecat_transfer_poll(
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
                 }
-                t->current_offset += (uint32_t)actual;
-                if (actual > 0U) {
-                    ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
+                if (actual < (size_t)t->pending_length) {
+                    /* 轮询完成时短写或 0 字节写入同样必须明确拒绝并安全释放，杜绝静默截断 */
+                    t->stage = ECAT_TRANSFER_STAGE_NONE;
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+                    if (t->target->driver.async_ops && t->target->driver.async_ops->abort) {
+                        t->target->driver.async_ops->abort(t->target->user_ctx);
+                    }
+                    if (t->driver_initialized && t->target->driver.io.abort != NULL) {
+                        t->target->driver.io.abort(t->target->user_ctx);
+                    }
+                    t->driver_initialized = false;
+                    t->active = false;
+                    release_session(t, owner, token);
+                    return ECAT_TRANSFER_FAILED;
                 }
+                t->current_offset += (uint32_t)actual;
+                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 return ECAT_TRANSFER_COMPLETE;
             } else if (t->stage == ECAT_TRANSFER_STAGE_READ) {

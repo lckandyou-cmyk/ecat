@@ -1767,14 +1767,22 @@ int main(void)
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(!async_xfer.active);
 
-    /* 10.6.2 写入立即完成零字节短写契约: actual_length == 0 时不得退回为 64 */
+    /* 10.6.2a 写入立即完成零字节短写拦截: actual_length == 0 必须明确失败返回 DRIVER_WRITE */
     assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
     s_override_actual_length = 0;
-    uint32_t prev_offset = ecat_transfer_get_bytes_transferred(&async_xfer);
-    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_transfer_get_bytes_transferred(&async_xfer) == prev_offset); /* 零字节短写，偏移量不变 */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_WRITE);
+    assert(!async_xfer.active);
+
+    /* 10.6.2b 写入立即完成部分短写拦截: actual_length == 30 (< 64) 必须明确失败返回 DRIVER_WRITE */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
+    s_override_actual_length = 30;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_WRITE);
+    assert(!async_xfer.active);
 
     /* 10.6.3 写入 poll 完成越界拦截: actual_length > pending_length */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
     s_override_actual_length = -1;
     s_next_async_result = ECAT_ASYNC_OP_PENDING;
     assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
@@ -1782,6 +1790,28 @@ int main(void)
     s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
     assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_11) == ECAT_TRANSFER_FAILED);
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!async_xfer.active);
+
+    /* 10.6.3a 写入 poll 完成零字节短写拦截: poll 返回 actual_length == 0 必须明确失败返回 DRIVER_WRITE */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
+    s_override_actual_length = -1;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    s_override_actual_length = 0; /* poll 返回 0 字节短写 */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_11) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_WRITE);
+    assert(!async_xfer.active);
+
+    /* 10.6.3b 写入 poll 完成部分短写拦截: poll 返回 actual_length == 30 (< 64) 必须明确失败返回 DRIVER_WRITE */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
+    s_override_actual_length = -1;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    s_override_actual_length = 30; /* poll 返回 30 字节部分短写 */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_11) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_WRITE);
     assert(!async_xfer.active);
 
     /* 10.6.4 读取 poll 完成零字节短读契约与越界拦截 */
