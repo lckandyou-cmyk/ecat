@@ -73,11 +73,27 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_import(
         ep->current_token = token;
         ep->state = ECAT_TRANSPORT_STATE_IMPORTING;
         ep->total_size = expected_size;
+        ep->begin_pending = false;
+        ep->finishing = false;
         if (ep->cbs.on_session_start != NULL) {
             ep->cbs.on_session_start(ep->user_ctx, ECAT_TRANSFER_DIR_IMPORT, target_id);
         }
+    } else if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步启动挂起 (如 INIT/INVALIDATE 异步执行): 保存 token 并保持挂起导入状态，等待 poll 推进 */
+        ep->current_token = token;
+        ep->state = ECAT_TRANSPORT_STATE_IMPORTING;
+        ep->total_size = expected_size;
+        ep->begin_pending = true;
+        ep->pending_target_id = target_id;
+        ep->finishing = false;
+    } else if (res == ECAT_TRANSFER_BUSY) {
+        /* 繁忙/冲突: 保留原端点状态与 token，不触发 abort 回调 */
+        return res;
     } else {
         ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        ep->begin_pending = false;
+        ep->finishing = false;
         if (ep->cbs.on_session_abort != NULL) {
             ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
         }
@@ -93,6 +109,11 @@ ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
 {
     if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_IMPORTING) {
         return ECAT_TRANSFER_INVALID;
+    }
+
+    if (ep->begin_pending) {
+        /* 会话启动尚未就绪: 禁止分块写入，直接返回 BUSY 保留会话与状态 */
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_result_t res = ecat_transfer_write(
@@ -139,6 +160,11 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
 {
     if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_IMPORTING) {
         return ECAT_TRANSFER_INVALID;
+    }
+
+    if (ep->begin_pending) {
+        /* 会话启动尚未就绪: 禁止终结，直接返回 BUSY */
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_result_t res = ecat_transfer_finish(
@@ -208,14 +234,32 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
         ep->current_token = token;
         ep->state = ECAT_TRANSPORT_STATE_EXPORTING;
         ep->total_size = ecat_transfer_get_total_export_size(ep->transfer_mgr);
+        ep->begin_pending = false;
+        ep->finishing = false;
         if (out_total_size != NULL) {
             *out_total_size = ep->total_size;
         }
         if (ep->cbs.on_session_start != NULL) {
             ep->cbs.on_session_start(ep->user_ctx, ECAT_TRANSFER_DIR_EXPORT, target_id);
         }
+    } else if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步导出只读打开挂起 (如 READ_OPEN 异步执行): 保存 token 并保持挂起导出状态，等待 poll 推进 */
+        ep->current_token = token;
+        ep->state = ECAT_TRANSPORT_STATE_EXPORTING;
+        ep->total_size = ecat_transfer_get_total_export_size(ep->transfer_mgr);
+        ep->begin_pending = true;
+        ep->pending_target_id = target_id;
+        ep->finishing = false;
+        if (out_total_size != NULL) {
+            *out_total_size = ep->total_size;
+        }
+    } else if (res == ECAT_TRANSFER_BUSY) {
+        return res;
     } else {
         ep->state = ECAT_TRANSPORT_STATE_ERROR;
+        ep->current_token = 0U;
+        ep->begin_pending = false;
+        ep->finishing = false;
         if (ep->cbs.on_session_abort != NULL) {
             ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
         }
@@ -232,6 +276,11 @@ ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
 {
     if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_EXPORTING) {
         return ECAT_TRANSFER_INVALID;
+    }
+
+    if (ep->begin_pending) {
+        /* 只读会话启动尚未就绪: 禁止分块读取，直接返回 BUSY */
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_result_t res = ecat_transfer_read(
@@ -278,6 +327,11 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_export(
 {
     if (ep == NULL || ep->state != ECAT_TRANSPORT_STATE_EXPORTING) {
         return ECAT_TRANSFER_INVALID;
+    }
+
+    if (ep->begin_pending) {
+        /* 会话启动尚未就绪: 禁止终结，直接返回 BUSY */
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_result_t res = ecat_transfer_finish(
@@ -330,6 +384,7 @@ void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep)
                        ep->current_token != 0U);
 
     ep->finishing = false;
+    ep->begin_pending = false;
     if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
         (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
         ep->current_token = 0U;
@@ -379,6 +434,17 @@ ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *e
     }
 
     if (res == ECAT_TRANSFER_COMPLETE) {
+        if (ep->begin_pending) {
+            /* 启动阶段推进完成: 清除 begin_pending 并单次触发 on_session_start */
+            ep->begin_pending = false;
+            if (ep->cbs.on_session_start != NULL) {
+                ecat_transfer_dir_t dir = (ep->state == ECAT_TRANSPORT_STATE_IMPORTING) ?
+                                          ECAT_TRANSFER_DIR_IMPORT : ECAT_TRANSFER_DIR_EXPORT;
+                ep->cbs.on_session_start(ep->user_ctx, dir, ep->pending_target_id);
+            }
+            return ECAT_TRANSFER_COMPLETE;
+        }
+
         if (ep->finishing) {
             /* 终结阶段完成: 派发单次完成通知，恢复 IDLE */
             uint32_t total = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
@@ -408,7 +474,12 @@ ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *e
         return ECAT_TRANSFER_CONTINUE;
     }
 
-    /* 异步发生错误 */
+    if (res == ECAT_TRANSFER_BUSY) {
+        return ECAT_TRANSFER_BUSY;
+    }
+
+    /* 异步发生错误: 清理挂起标记，取消会话并派发中止回调 */
+    ep->begin_pending = false;
     ep->finishing = false;
     if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
         (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);

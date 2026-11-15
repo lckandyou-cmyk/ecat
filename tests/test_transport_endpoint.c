@@ -367,6 +367,90 @@ int main(void)
     assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
     assert(s_cb_completed_count == 1);
 
+    /* --- 测试 Issue 9: 异步 begin (导入/导出) 处于 PENDING 时的生命周期、防租约泄漏与并发拦截 --- */
+    printf("--- 测试 Issue 9: 异步 begin PENDING 生命周期、事件时序与防租约泄漏 ---\n");
+
+    /* 9.1 begin_import 处于 PENDING，保存 token，保持 IMPORTING，延迟触发 on_session_start */
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 64U, 0) == ECAT_TRANSFER_PENDING);
+    assert(ep_uart.current_token != 0U);
+    assert(ep_uart.begin_pending == true);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_IMPORTING);
+    assert(s_cb_started == false); /* 未真正就绪，绝不提前触发启动回调 */
+    assert(s_cb_aborted == false);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* 9.2 在 begin_pending 期间调用分块写入与终结: 必须返回 BUSY 拦截，保留会话与令牌 */
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_BUSY);
+    assert(ep_uart.current_token != 0U);
+    assert(ep_uart.begin_pending == true);
+
+    /* 9.3 poll 推进直到就绪: 单次派发 on_session_start */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_PENDING);
+    assert(s_cb_started == false);
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ep_uart.begin_pending == false);
+    assert(s_cb_started == true);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    /* 写入并正常结束 */
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(!ecat_transport_endpoint_is_active(&ep_uart));
+
+    /* 9.4 begin_import 处于 PENDING 时执行 abort: 必须安全取消会话并释放租约，杜绝泄漏 */
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 128U, 0) == ECAT_TRANSFER_PENDING);
+    assert(ep_uart.current_token != 0U);
+    assert(ep_uart.begin_pending == true);
+
+    /* 中途调用端点 abort */
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ep_uart.current_token == 0U);
+    assert(ep_uart.begin_pending == false);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_IDLE);
+    assert(!ecat_transport_endpoint_is_active(&ep_uart));
+    assert(s_cb_aborted == true);
+    /* 关键验证: 底层 transfer 管理器会话已完全释放，允许新会话立即获取 */
+    assert(mgr.active == false);
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 64U, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+
+    /* 9.5 begin_export 处于 PENDING 生命周期与 poll 推进 */
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    uint32_t exp_total = 0;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &exp_total) == ECAT_TRANSFER_PENDING);
+    assert(ep_uart.current_token != 0U);
+    assert(ep_uart.begin_pending == true);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_EXPORTING);
+    assert(s_cb_started == false);
+
+    /* 在 begin_pending 期间调用 read_chunk / finish_export: 必须返回 BUSY */
+    uint8_t exp_buf[64];
+    size_t actual_exp = 0;
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, exp_buf, sizeof(exp_buf), &actual_exp) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_BUSY);
+
+    /* poll 推进就绪 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ep_uart.begin_pending == false);
+    assert(s_cb_started == true);
+
+    /* 正常读取并完成 */
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, exp_buf, sizeof(exp_buf), &actual_exp) == ECAT_TRANSFER_CONTINUE);
+    assert(actual_exp == sizeof(exp_buf));
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(!ecat_transport_endpoint_is_active(&ep_uart));
+
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;
 }

@@ -62,6 +62,8 @@ typedef struct {
     ecat_transport_callbacks_t cbs;                     /* 可选状态通知回调 */
     void *user_ctx;                                     /* 用户自定义上下文 */
     bool finishing;                                     /* 是否处于异步终结提交阶段 */
+    bool begin_pending;                                 /* 是否处于异步会话启动就绪阶段 */
+    uint16_t pending_target_id;                         /* 挂起启动时的目标 ID */
 } ecat_transport_endpoint_t;
 
 /* -------------------------------------------------------------------------- */
