@@ -16,6 +16,33 @@
 #define MOCK_PARAM_SIZE 4096U
 #define MOCK_LOG_SIZE   1234U
 
+static void put16_le(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put32_le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+static size_t make_test_efw(uint8_t *out, const uint8_t *payload, uint32_t length, uint16_t target_id)
+{
+    memset(out, 0, ECAT_FOE_EFW_HEADER_MIN_LEN + length);
+    put32_le(out, ECAT_FOE_EFW_MAGIC);
+    put16_le(out + 4, ECAT_FOE_EFW_FORMAT_VERSION);
+    put16_le(out + 6, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    put32_le(out + 8, 0x10010001U);
+    put32_le(out + 12, 1U);
+    put16_le(out + 16, 1U);
+    put16_le(out + 18, 2U);
+    put16_le(out + 20, target_id);
+    put32_le(out + 24, 0x01000000U);
+    put32_le(out + 28, 0U);
+    put32_le(out + 32, length);
+    put32_le(out + 36, ecat_foe_crc32_calc(payload, length));
+    memcpy(out + 60, "SIG2", 4U);
+    out[64] = 1U;
+    put32_le(out + 144, ecat_foe_crc32_calc(out, 144U));
+    memcpy(out + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, length);
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + length;
+}
+
 int port_get_version_floor(uint16_t id, uint32_t *v)
 {
     (void)id;
@@ -158,6 +185,77 @@ static void test_fw_async_abort(void *ctx)
     (void)ctx;
     s_fw_async_abort_called = true;
 }
+
+typedef struct {
+    uint8_t flash[1024];
+    uint32_t erased_watermark;
+    bool valid;
+    bool pending;
+    int starts;
+    int polls;
+} test_flash_async_t;
+
+static test_flash_async_t s_fw_test_flash;
+
+static ecat_foe_target_async_result_t fw_flash_poll(void *ctx, ecat_foe_target_async_op_t *op);
+
+static ecat_foe_target_async_result_t fw_flash_start(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    test_flash_async_t *f = (test_flash_async_t *)ctx;
+    f->starts++;
+    f->pending = true;
+    return fw_flash_poll(ctx, op);
+}
+
+static ecat_foe_target_async_result_t fw_flash_poll(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    test_flash_async_t *f = (test_flash_async_t *)ctx;
+    f->polls++;
+    switch (op->kind) {
+    case ECAT_FOE_TARGET_OP_INIT:
+        f->erased_watermark = 0U;
+        break;
+    case ECAT_FOE_TARGET_OP_INVALIDATE:
+        f->valid = false;
+        break;
+    case ECAT_FOE_TARGET_OP_ERASE_TO: {
+        uint32_t end = (op->need_end + 7U) & ~7U;
+        if (end > sizeof(f->flash)) return ECAT_FOE_TARGET_ASYNC_FAILED;
+        if (end > f->erased_watermark) {
+            memset(f->flash + f->erased_watermark, 0xFF, end - f->erased_watermark);
+            f->erased_watermark = end;
+        }
+        op->erased_end = end;
+        break;
+    }
+    case ECAT_FOE_TARGET_OP_WRITE:
+        if (op->offset > sizeof(f->flash) || op->length > sizeof(f->flash) - op->offset)
+            return ECAT_FOE_TARGET_ASYNC_FAILED;
+        memcpy(f->flash + op->offset, op->data, op->length);
+        break;
+    case ECAT_FOE_TARGET_OP_READ:
+        if (op->offset > sizeof(f->flash) || op->length > sizeof(f->flash) - op->offset)
+            return ECAT_FOE_TARGET_ASYNC_FAILED;
+        memcpy(op->data, f->flash + op->offset, op->length);
+        break;
+    case ECAT_FOE_TARGET_OP_FINALIZE:
+        f->valid = true;
+        break;
+    }
+    f->pending = false;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+
+static void fw_flash_abort(void *ctx) { ((test_flash_async_t *)ctx)->pending = false; }
+static void fw_flash_abort_session(void *ctx) {
+    test_flash_async_t *f = (test_flash_async_t *)ctx;
+    f->pending = false;
+    f->valid = false;
+}
+
+static const ecat_foe_target_async_ops_t s_fw_flash_ops = {
+    fw_flash_start, fw_flash_poll, fw_flash_abort, fw_flash_abort_session
+};
 
 static int lifecycle_read_open(void *ctx)
 {
@@ -1472,10 +1570,28 @@ int main(void)
     int fw_dummy_ctx = 0;
     /* 核心未关联或伪造的 fake ops 必须被明确拒绝，防止绕过验签与权限检查 */
     assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == -1);
-    /* 正确挂钩到 core 的 async_abort_hook 与 async_abort_ctx */
+    /* 即使把 abort 和 ctx 挂到 core 上，但由于 start/poll 不是权威核心，依然必须被严格拒绝 */
     core.async_abort_hook = fw_ops.abort;
     core.async_abort_ctx = &fw_dummy_ctx;
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == -1);
+
+    /* 真实异步固件核心初始化并完成权威强绑定 */
+    static uint8_t s_fw10_packet[512];
+    static uint8_t s_fw10_op[256];
+    static ecat_foe_core_async_t s_fw10_session;
+    core.cfg.project_id = 0x10010001U;
+    core.cfg.hardware_id = 1U;
+    core.cfg.local_hw_ver = 1U;
+    core.cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    core.cfg.targets[0].target_id = 1U;
+    core.cfg.targets[0].enabled = true;
+    core.cfg.targets[0].asynchronous = true;
+    core.cfg.targets[0].async_ops = &s_fw_flash_ops;
+    core.cfg.targets[0].async_user_ctx = &s_fw_test_flash;
+    core.cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
     uint8_t fw_staging[256];
     assert(ecat_transfer_set_staging_buffer(&mgr_first, fw_staging, sizeof(fw_staging)) == 0);
 
@@ -1483,44 +1599,31 @@ int main(void)
     ecat_target_desc_t *fw_t1_desc = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
     assert(fw_t1_desc != NULL);
     fw_t1_desc->asynchronous = true;
-    core.cfg.targets[0].asynchronous = true;
+
+    /* 构造真实合法的 200 字节固件包 (148 字节 EFW 头部 + 52 字节载荷) */
+    uint8_t fw_payload[52];
+    memset(fw_payload, 0xEE, sizeof(fw_payload));
+    uint8_t fw_efw[200];
+    assert(make_test_efw(fw_efw, fw_payload, sizeof(fw_payload), 1U) == 200U);
 
     ecat_transfer_request_t fw_async_req = {
-        .transport_id = 1U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 200U
+        .transport_id = 1U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 200U,
+        .fw_version = 0x01000000U
     };
     uint64_t fw_tok = 0;
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(mgr_first.active == true);
     assert(mgr_first.is_async == true);
 
-    /* write 触发异步固件 start */
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
-    s_fw_async_start_called = false;
-    uint8_t fw_chunk[100];
-    memset(fw_chunk, 0xEE, sizeof(fw_chunk));
-    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
-    assert(s_fw_async_start_called == true);
-    assert(ecat_transfer_is_pending(&mgr_first) == true);
-    /* 断言传给异步固件后端的数据指针必须是深拷贝后的 fw_staging，绝非易变的外部 fw_chunk 指针 */
-    assert(s_fw_async_last_data == fw_staging);
+    /* write 第 1 块 100 字节 (EFW 前半头部): 写入完成，深拷贝暂存保证不可变性 */
+    uint8_t fw_chunk_copy[100];
+    memcpy(fw_chunk_copy, fw_efw, 100U);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk_copy, 100U) == ECAT_TRANSFER_COMPLETE);
+    /* 立即篡改外部输入缓冲区: 验证深拷贝与 CRC 不可变性 */
+    memset(fw_chunk_copy, 0x00, sizeof(fw_chunk_copy));
 
-    /* pending 期间新写入返回 BUSY */
-    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_BUSY);
-
-    /* 立即篡改外部输入缓冲区: 模拟调用方修改/清零外部缓冲区，验证深拷贝与 CRC 不可变性 */
-    memset(fw_chunk, 0x00, sizeof(fw_chunk));
-
-    /* poll 推进 write 完成 */
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-    s_fw_async_poll_called = false;
-    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
-    assert(s_fw_async_poll_called == true);
-    assert(ecat_transfer_is_pending(&mgr_first) == false);
-
-    /* 关键断言 1: 异步固件写入经 poll 完成后，CRC32 必须匹配原始数据的 CRC，不受外部篡改影响 */
-    uint8_t orig_chunk[100];
-    memset(orig_chunk, 0xEE, sizeof(orig_chunk));
-    uint32_t expected_fw_crc = ecat_foe_crc32_calc(orig_chunk, sizeof(orig_chunk));
+    /* 关键断言 1: 异步固件写入完成后，CRC32 必须匹配原始 EFW 数据的 CRC，不受外部篡改影响 */
+    uint32_t expected_fw_crc = ecat_foe_crc32_calc(fw_efw, 100U);
     assert(ecat_transfer_get_crc32(&mgr_first) == expected_fw_crc);
 
     /* 关键断言 2: expected_size 为 200，目前仅写入 100，finish 必须被拒绝且报 BOUNDARY_EXCEEDED */
@@ -1528,26 +1631,36 @@ int main(void)
     assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(!mgr_first.active);
 
-    /* 重新发起正常固件升级: expected_size 为 200，完整分块写入 200 字节后 finish */
+    /* 重新发起完整固件升级: expected_size 为 200，完整分块写入 200 字节后 finish */
+    ecat_foe_core_on_abort(&core);
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
-    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
-    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 100U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw + 100U, 100U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_get_bytes_transferred(&mgr_first) == 200U);
+    ecat_transfer_result_t fin_res = ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok);
+    if (fin_res == ECAT_TRANSFER_PENDING) {
+        assert(ecat_transfer_is_pending(&mgr_first) == true);
+        assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    } else {
+        assert(fin_res == ECAT_TRANSFER_COMPLETE);
+    }
+    assert(s_fw_test_flash.valid == true); /* 真实固件核心 finalize 执行，介质成功生效 */
 
-    /* finish 触发异步固件提交 */
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
-    assert(ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_PENDING);
-    assert(ecat_transfer_is_pending(&mgr_first) == true);
-
-    /* poll 推进 finish 完成并释放会话 */
-    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    /* 验证真实篡改固件被真实核心拦截 */
+    uint8_t bad_efw[200];
+    memcpy(bad_efw, fw_efw, 200U);
+    bad_efw[0] = 0x00; /* 破坏 Magic */
+    ecat_foe_core_on_abort(&core);
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    /* 第 1 包头部 Magic 被篡改，真实核心当场检测到非法头部 Magic 并返回 FAILED 拦截 */
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, bad_efw, 100U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_CORE_UPGRADE);
     assert(mgr_first.active == false);
     assert(!ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, fw_tok));
 
@@ -1555,10 +1668,12 @@ int main(void)
     ecat_foe_core_on_abort(&core);
     ecat_transfer_t mgr_fw_nostaging;
     assert(ecat_transfer_init(&mgr_fw_nostaging, &reg, &core) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_fw_nostaging, &fw_ops, &fw_dummy_ctx) == 0);
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_fw_nostaging, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
     uint64_t tok_nostage = 0;
     assert(ecat_transfer_begin(&mgr_fw_nostaging, &client_owner1, &fw_async_req, &tok_nostage) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_transfer_write(&mgr_fw_nostaging, &client_owner1, tok_nostage, orig_chunk, 100U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_write(&mgr_fw_nostaging, &client_owner1, tok_nostage, fw_efw, 100U) == ECAT_TRANSFER_FAILED);
     assert(ecat_transfer_get_last_error(&mgr_fw_nostaging) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(!mgr_fw_nostaging.active);
 
@@ -1751,6 +1866,15 @@ int main(void)
 
     /* 10.8.4: 真实已初始化的异步固件核心与合法 ops 绑定成功 */
     assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &real_fw_async_core) == 0);
+
+    /* 10.8.5: 反例测试：复制合法 ops 但篡改 start 或 poll 的伪造操作集必须被当场拒绝 */
+    ecat_upgrade_async_ops_t fake_start_ops = *ecat_foe_core_async_ops();
+    fake_start_ops.start = test_fw_async_start; /* 篡改 start */
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_start_ops, &real_fw_async_core) == -1);
+
+    ecat_upgrade_async_ops_t fake_poll_ops = *ecat_foe_core_async_ops();
+    fake_poll_ops.poll = test_fw_async_poll; /* 篡改 poll */
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_poll_ops, &real_fw_async_core) == -1);
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;

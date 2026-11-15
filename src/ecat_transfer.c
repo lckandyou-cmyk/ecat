@@ -5,6 +5,7 @@
 
 #include "ecat_transfer.h"
 #include "ecat_foe_efw.h"
+#include "ecat_foe_core_async.h"
 #include <string.h>
 
 static bool target_registry_acl_adapter(
@@ -105,11 +106,20 @@ int ecat_transfer_init_async_firmware(
     void *ctx)
 {
     if (t == NULL || t->core == NULL || ops == NULL || ops->start == NULL ||
-        ops->poll == NULL || ops->abort == NULL || ctx == NULL ||
-        t->core->async_abort_hook != ops->abort ||
+        ops->poll == NULL || ops->abort == NULL || ctx == NULL) {
+        return -1;
+    }
+
+    const ecat_upgrade_async_ops_t *auth_ops = ecat_foe_core_async_ops();
+    if (auth_ops == NULL ||
+        ops->start != auth_ops->start ||
+        ops->poll != auth_ops->poll ||
+        ops->abort != auth_ops->abort ||
+        t->core->async_abort_hook != auth_ops->abort ||
         t->core->async_abort_ctx != ctx) {
         return -1;
     }
+
     t->fw_async_ops = ops;
     t->fw_async_ctx = ctx;
     return 0;

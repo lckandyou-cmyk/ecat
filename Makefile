@@ -218,13 +218,13 @@ test-transfer-bidirectional:
 test-transport-endpoint:
 	@TMP_EP_DIR=$$(mktemp -d /tmp/ecat_ep_XXXXXX) && \
 	trap 'rm -rf "$$TMP_EP_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_EP_DIR/test_transport_endpoint" src/ecat_foe_core.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transport_endpoint.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_EP_DIR/test_transport_endpoint" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transport_endpoint.c && \
 	"$$TMP_EP_DIR/test_transport_endpoint"
 
 test-end-to-end:
 	@TMP_E2E_DIR=$$(mktemp -d /tmp/ecat_e2e_XXXXXX) && \
 	trap 'rm -rf "$$TMP_E2E_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ecat_upgrade.c tests/test_end_to_end_multitransport.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ecat_upgrade.c tests/test_end_to_end_multitransport.c && \
 	"$$TMP_E2E_DIR/test_end_to_end"
 
 test-examples:
