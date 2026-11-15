@@ -1671,6 +1671,35 @@ int main(void)
     assert(!async_xfer.active);
     s_override_actual_length = -1;
 
+    /* 10.7 异步 poll 阶段失败错误分类与取消单次精确中止验证 */
+    printf("--- 测试 10.7: 异步 poll 阶段失败分类与取消单次精确清理 ---\n");
+    /* 10.7.1: poll 处于 READ 阶段失败时，last_error 必须准确为 DRIVER_READ (而非被清 stage 误判为 WRITE) */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_rd, &tok_rd) == ECAT_TRANSFER_COMPLETE);
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_rd, rd_buf_test, sizeof(rd_buf_test), &actual_rd_test) == ECAT_TRANSFER_PENDING);
+    s_next_async_result = ECAT_ASYNC_OP_FAILED;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_rd) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_READ);
+    assert(!async_xfer.active);
+
+    /* 10.7.2: cancel 处于 PENDING 的异步写入时，驱动 abort 恰好执行一次，绝不重复调用同步 io.abort */
+    ecat_transfer_request_t req_12_cancel = {
+        .transport_id = 1U, .target_id = 12U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 128U
+    };
+    uint64_t tok_12_c = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12_cancel, &tok_12_c) == ECAT_TRANSFER_COMPLETE);
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12_c, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+
+    s_async_abort_called = false;
+    g_async_io_abort_called = false;
+    assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_12_c) == ECAT_TRANSFER_COMPLETE);
+    /* 严格断言: 异步 abort 执行且仅执行 1 次，同步 io.abort 绝不重复调用 */
+    assert(s_async_abort_called == true);
+    assert(g_async_io_abort_called == false);
+    assert(!async_xfer.active);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

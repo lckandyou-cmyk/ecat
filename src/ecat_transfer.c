@@ -1036,15 +1036,18 @@ ecat_transfer_result_t ecat_transfer_cancel(
         return ECAT_TRANSFER_STALE;
     }
 
+    bool async_aborted = false;
     /* 若处于 pending，先中止后台异步操作并确保硬件停用暂存区 */
     if (t->pending) {
         if (t->target != NULL && t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             if (t->fw_async_ops != NULL && t->fw_async_ops->abort != NULL) {
                 t->fw_async_ops->abort(t->fw_async_ctx);
+                async_aborted = true;
             }
         } else if (t->target != NULL && t->target->driver.async_ops != NULL) {
             if (t->target->driver.async_ops->abort != NULL) {
                 t->target->driver.async_ops->abort(t->target->user_ctx);
+                async_aborted = true;
             }
         }
         t->pending = false;
@@ -1056,7 +1059,7 @@ ecat_transfer_result_t ecat_transfer_cancel(
     } else if (t->driver_initialized && t->target != NULL) {
         if (t->direction == ECAT_TRANSFER_DIR_EXPORT && t->target->driver.read_close != NULL) {
             t->target->driver.read_close(t->target->user_ctx);
-        } else if (t->target->driver.io.abort != NULL) {
+        } else if (!async_aborted && t->target->driver.io.abort != NULL) {
             t->target->driver.io.abort(t->target->user_ctx);
         }
     }
@@ -1205,9 +1208,10 @@ ecat_transfer_result_t ecat_transfer_poll(
             }
         } else {
             t->pending = false;
+            ecat_transfer_stage_t failed_stage = t->stage;
             t->stage = ECAT_TRANSFER_STAGE_NONE;
-            t->last_error = (t->stage == ECAT_TRANSFER_STAGE_READ) ? ECAT_TRANSFER_ERR_DRIVER_READ :
-                            ((t->stage == ECAT_TRANSFER_STAGE_FINALIZE) ? ECAT_TRANSFER_ERR_DRIVER_FINALIZE : ECAT_TRANSFER_ERR_DRIVER_WRITE);
+            t->last_error = (failed_stage == ECAT_TRANSFER_STAGE_READ) ? ECAT_TRANSFER_ERR_DRIVER_READ :
+                            ((failed_stage == ECAT_TRANSFER_STAGE_FINALIZE) ? ECAT_TRANSFER_ERR_DRIVER_FINALIZE : ECAT_TRANSFER_ERR_DRIVER_WRITE);
             if (t->direction == ECAT_TRANSFER_DIR_EXPORT) {
                 if (t->target->driver.read_close != NULL) {
                     t->target->driver.read_close(t->target->user_ctx);
