@@ -106,6 +106,11 @@ ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
         return res;
     }
 
+    if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步操作挂起中: 保持 IMPORTING 状态，等待 poll 推进 */
+        return res;
+    }
+
     if (res == ECAT_TRANSFER_INVALID) {
         /* 可重试参数错误: 保留会话与 IMPORTING 状态，允许调用方更正参数重试或调用 abort 清理 */
         return res;
@@ -139,18 +144,27 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
         uint32_t crc = ecat_transfer_get_crc32(ep->transfer_mgr);
         ep->state = ECAT_TRANSPORT_STATE_IDLE;
         ep->current_token = 0U;
+        ep->finishing = false;
         if (ep->cbs.on_session_complete != NULL) {
             ep->cbs.on_session_complete(ep->user_ctx, total, crc);
         }
-    } else {
-        if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
-            (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
-        }
-        ep->state = ECAT_TRANSPORT_STATE_ERROR;
-        ep->current_token = 0U;
-        if (ep->cbs.on_session_abort != NULL) {
-            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
-        }
+        return res;
+    }
+
+    if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步提交进行中: 标记 finishing，保持 IMPORTING 等待 poll 推进终结 */
+        ep->finishing = true;
+        return res;
+    }
+
+    ep->finishing = false;
+    if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
+        (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
+    }
+    ep->state = ECAT_TRANSPORT_STATE_ERROR;
+    ep->current_token = 0U;
+    if (ep->cbs.on_session_abort != NULL) {
+        ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
     }
 
     return res;
@@ -221,6 +235,11 @@ ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
         return res;
     }
 
+    if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步挂起: 保持 EXPORTING 状态，等待 poll 推进 */
+        return res;
+    }
+
     if (res == ECAT_TRANSFER_INVALID) {
         /* 可重试参数错误: 保留会话与 EXPORTING 状态，允许调用方更正参数重试或调用 abort 清理 */
         return res;
@@ -254,18 +273,27 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_export(
         uint32_t crc = ecat_transfer_get_crc32(ep->transfer_mgr);
         ep->state = ECAT_TRANSPORT_STATE_IDLE;
         ep->current_token = 0U;
+        ep->finishing = false;
         if (ep->cbs.on_session_complete != NULL) {
             ep->cbs.on_session_complete(ep->user_ctx, total, crc);
         }
-    } else {
-        if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
-            (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
-        }
-        ep->state = ECAT_TRANSPORT_STATE_ERROR;
-        ep->current_token = 0U;
-        if (ep->cbs.on_session_abort != NULL) {
-            ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
-        }
+        return res;
+    }
+
+    if (res == ECAT_TRANSFER_PENDING) {
+        /* 异步提交进行中: 标记 finishing，保持 EXPORTING 等待 poll 推进终结 */
+        ep->finishing = true;
+        return res;
+    }
+
+    ep->finishing = false;
+    if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
+        (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
+    }
+    ep->state = ECAT_TRANSPORT_STATE_ERROR;
+    ep->current_token = 0U;
+    if (ep->cbs.on_session_abort != NULL) {
+        ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
     }
 
     return res;
@@ -281,6 +309,7 @@ void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep)
                        ep->state == ECAT_TRANSPORT_STATE_EXPORTING ||
                        ep->current_token != 0U);
 
+    ep->finishing = false;
     if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
         (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
         ep->current_token = 0U;
@@ -300,4 +329,74 @@ bool ecat_transport_endpoint_is_active(const ecat_transport_endpoint_t *ep)
     return (ep->current_token != 0U &&
             (ep->state == ECAT_TRANSPORT_STATE_IMPORTING ||
              ep->state == ECAT_TRANSPORT_STATE_EXPORTING));
+}
+
+bool ecat_transport_endpoint_is_pending(const ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL || ep->transfer_mgr == NULL) {
+        return false;
+    }
+    if (!ecat_transport_endpoint_is_active(ep)) {
+        return false;
+    }
+    return ecat_transfer_is_pending(ep->transfer_mgr);
+}
+
+ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *ep)
+{
+    if (ep == NULL || ep->transfer_mgr == NULL) {
+        return ECAT_TRANSFER_INVALID;
+    }
+    if (!ecat_transport_endpoint_is_active(ep)) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ecat_transfer_result_t res = ecat_transfer_poll(
+        ep->transfer_mgr, ep, ep->current_token);
+
+    if (res == ECAT_TRANSFER_PENDING) {
+        return ECAT_TRANSFER_PENDING;
+    }
+
+    if (res == ECAT_TRANSFER_COMPLETE) {
+        if (ep->finishing) {
+            /* 终结阶段完成: 派发单次完成通知，恢复 IDLE */
+            uint32_t total = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+            uint32_t crc = ecat_transfer_get_crc32(ep->transfer_mgr);
+            ep->state = ECAT_TRANSPORT_STATE_IDLE;
+            ep->current_token = 0U;
+            ep->finishing = false;
+            if (ep->cbs.on_session_complete != NULL) {
+                ep->cbs.on_session_complete(ep->user_ctx, total, crc);
+            }
+            return ECAT_TRANSFER_COMPLETE;
+        }
+
+        /* 普通分块 I/O 推进完成 */
+        if (ep->cbs.on_progress != NULL) {
+            uint32_t cur = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+            ep->cbs.on_progress(ep->user_ctx, cur, ep->total_size);
+        }
+        return ECAT_TRANSFER_COMPLETE;
+    }
+
+    if (res == ECAT_TRANSFER_CONTINUE) {
+        if (ep->cbs.on_progress != NULL) {
+            uint32_t cur = ecat_transfer_get_bytes_transferred(ep->transfer_mgr);
+            ep->cbs.on_progress(ep->user_ctx, cur, ep->total_size);
+        }
+        return ECAT_TRANSFER_CONTINUE;
+    }
+
+    /* 异步发生错误 */
+    ep->finishing = false;
+    if (ep->current_token != 0U && ep->transfer_mgr != NULL) {
+        (void)ecat_transfer_cancel(ep->transfer_mgr, ep, ep->current_token);
+    }
+    ep->state = ECAT_TRANSPORT_STATE_ERROR;
+    ep->current_token = 0U;
+    if (ep->cbs.on_session_abort != NULL) {
+        ep->cbs.on_session_abort(ep->user_ctx, ecat_transfer_get_last_error(ep->transfer_mgr));
+    }
+    return res;
 }

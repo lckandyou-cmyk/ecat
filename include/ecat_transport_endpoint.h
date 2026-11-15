@@ -61,6 +61,7 @@ typedef struct {
     uint32_t total_size;                                /* 当前会话预估或实际总量 */
     ecat_transport_callbacks_t cbs;                     /* 可选状态通知回调 */
     void *user_ctx;                                     /* 用户自定义上下文 */
+    bool finishing;                                     /* 是否处于异步终结提交阶段 */
 } ecat_transport_endpoint_t;
 
 /* -------------------------------------------------------------------------- */
@@ -170,6 +171,24 @@ void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep);
  * @brief 判断当前端点是否持有激活会话
  */
 bool ecat_transport_endpoint_is_active(const ecat_transport_endpoint_t *ep);
+
+/**
+ * @brief 判断当前端点是否有未完成的底层异步 I/O 正在进行
+ * @param ep 端点句柄
+ * @return true 正在等待异步驱动推进，false 无异步挂起
+ */
+bool ecat_transport_endpoint_is_pending(const ecat_transport_endpoint_t *ep);
+
+/**
+ * @brief 轮询并推进端点底层异步操作
+ * @param ep 端点句柄
+ * @return ECAT_TRANSFER_PENDING 驱动仍在处理;
+ *         ECAT_TRANSFER_COMPLETE 异步阶段或终结操作完成;
+ *         ECAT_TRANSFER_CONTINUE 异步读取阶段完成但后续仍有数据;
+ *         ECAT_TRANSFER_INVALID 无活动会话或参数非法;
+ *         其他为错误码 (同时触发 abort 事件通知并清理会话)
+ */
+ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *ep);
 
 #ifdef __cplusplus
 }

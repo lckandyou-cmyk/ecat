@@ -53,6 +53,8 @@ static uint32_t s_cb_progress_last = 0;
 static bool s_cb_completed = false;
 static bool s_cb_aborted = false;
 static uint32_t s_cb_completed_crc = 0;
+static int s_cb_completed_count = 0;
+static int s_cb_aborted_count = 0;
 
 static void on_start(void *ctx, ecat_transfer_dir_t dir, uint16_t target_id)
 {
@@ -71,12 +73,14 @@ static void on_complete(void *ctx, uint32_t total, uint32_t crc)
     (void)ctx; (void)total;
     s_cb_completed = true;
     s_cb_completed_crc = crc;
+    s_cb_completed_count++;
 }
 
 static void on_abort(void *ctx, ecat_transfer_err_t err)
 {
     (void)ctx; (void)err;
     s_cb_aborted = true;
+    s_cb_aborted_count++;
 }
 
 static void reset_cb_flags(void)
@@ -86,7 +90,23 @@ static void reset_cb_flags(void)
     s_cb_completed = false;
     s_cb_aborted = false;
     s_cb_completed_crc = 0;
+    s_cb_completed_count = 0;
+    s_cb_aborted_count = 0;
 }
+
+/* Mock 异步端点数据驱动 */
+static ecat_async_op_result_t s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+static ecat_async_op_result_t ep_mock_async_start(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return s_ep_async_next_res;
+}
+static ecat_async_op_result_t ep_mock_async_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return s_ep_async_next_res;
+}
+static void ep_mock_async_abort(void *ctx) { (void)ctx; }
 
 int main(void)
 {
@@ -252,6 +272,74 @@ int main(void)
         &ep_uart, rd_buf, sizeof(rd_buf), &actual_rd);
     assert(retry_rd == ECAT_TRANSFER_CONTINUE || retry_rd == ECAT_TRANSFER_COMPLETE);
     ecat_transport_endpoint_abort(&ep_uart);
+
+    /* ---------------------------------------------------------------------- */
+    /* 5. 异步传输端点推进、轮询与单次事件通知保障验证 (Endpoint Async Testing) */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试端点异步推进、非阻塞轮询与单次完成通知保障 ---\n");
+    ecat_async_data_ops_t ep_async_ops = {
+        .start = ep_mock_async_start,
+        .poll = ep_mock_async_poll,
+        .abort = ep_mock_async_abort
+    };
+    ecat_target_desc_t async_target_desc;
+    memset(&async_target_desc, 0, sizeof(async_target_desc));
+    async_target_desc.target_id = 10U;
+    strncpy(async_target_desc.name, "ep_async", sizeof(async_target_desc.name));
+    async_target_desc.type = ECAT_TARGET_TYPE_DATA;
+    async_target_desc.permissions = ECAT_PERM_RW;
+    async_target_desc.max_size = 1024U;
+    async_target_desc.enabled = true;
+    async_target_desc.asynchronous = true;
+    async_target_desc.driver.async_ops = &ep_async_ops;
+    assert(ecat_target_registry_add(&reg, &async_target_desc) == 0);
+
+    /* 绑定暂存区 */
+    uint8_t ep_staging[256];
+    assert(ecat_transfer_set_staging_buffer(&mgr, ep_staging, sizeof(ep_staging)) == 0);
+
+    reset_cb_flags();
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 64, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(s_cb_started == true);
+    assert(ecat_transport_endpoint_is_active(&ep_uart));
+
+    /* write 触发异步 PENDING，端点必须保持 IMPORTING 状态，不误调 abort 回调 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    uint8_t ep_chunk[64];
+    memset(ep_chunk, 0xCC, sizeof(ep_chunk));
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, sizeof(ep_chunk)) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+
+    /* 端点 poll 推进: 驱动保持 PENDING 时返回 PENDING */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* 驱动完成时 poll 推进返回 COMPLETE，触发 on_progress */
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(s_cb_progress_last == 64U);
+
+    /* 异步 finish_import: 返回 PENDING */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* poll 推进 finish 终结提交 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+
+    /* 关键断言: 完成通知回调有且仅有触发 1 次 */
+    assert(s_cb_completed_count == 1);
+    assert(s_cb_aborted_count == 0);
+
+    /* 重复调用 poll 必须返回 INVALID，且绝不重复触发完成通知 */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(s_cb_completed_count == 1);
 
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;
