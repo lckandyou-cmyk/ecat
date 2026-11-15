@@ -212,7 +212,7 @@ static void core_reset_session(ecat_foe_core_t *core)
     core->residual_len = 0;
 
     core->state = ECAT_FOE_STATE_IDLE;
-    core->last_error = ECAT_FOE_CORE_OK;
+    /* 保留 core->last_error，供中止/失败后查询具体错误类型；新会话由 begin_request 重置 */
 }
 
 int ecat_foe_core_deinit(ecat_foe_core_t *core)
@@ -415,6 +415,7 @@ ecat_foe_core_err_t ecat_foe_core_begin_request(
     core->req_target_id = request->target_id;
     core->req_fw_version = request->fw_version;
     core->state = ECAT_FOE_STATE_WRQ_ACKED;
+    core->last_error = ECAT_FOE_CORE_OK;
     return ECAT_FOE_CORE_OK;
 }
 
