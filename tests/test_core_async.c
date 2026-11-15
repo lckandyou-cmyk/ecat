@@ -511,6 +511,7 @@ int main(void)
 
         uint8_t shared_arr[512];
         ecat_foe_core_async_t test_session;
+        ecat_upgrade_t test_upg;
 
         /* Case 1: 后向部分重叠拒绝 (packet = &shared_arr[0..255], op = &shared_arr[64..127]) */
         CHECK(ecat_foe_core_async_init(&test_session, &test_core,
@@ -541,11 +542,11 @@ int main(void)
                                        (uint8_t *)(UINTPTR_MAX - 10U), 20U) == -1);
 
         /* Case 6: 边界相接合法放行 (packet = &shared_arr[0..255], op = &shared_arr[256..319]) */
+        test_core.shared_session = NULL;
         CHECK(ecat_foe_core_async_init(&test_session, &test_core,
                                        &shared_arr[0], 256U,
                                        &shared_arr[256], 64U) == 0);
         {
-            ecat_upgrade_t test_upg;
             CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
             int src = 1;
             ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
@@ -570,11 +571,11 @@ int main(void)
         memset(&big_flash, 0, sizeof(big_flash));
         big_flash.immediate = true;
         ecat_foe_core_on_abort(&test_core);
+        test_core.shared_session = NULL;
         CHECK(ecat_foe_core_async_init(&test_session, &test_core,
                                        &shared_arr[64], 256U,
                                        &shared_arr[0], 64U) == 0);
         {
-            ecat_upgrade_t test_upg;
             CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
             int src = 1;
             ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
