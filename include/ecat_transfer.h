@@ -20,6 +20,7 @@
 #include "ecat_upgrade_session.h"
 #include "ecat_target_registry.h"
 #include "ecat_foe_core.h"
+#include "ecat_upgrade_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +60,16 @@ typedef enum {
     ECAT_TRANSFER_ERR_CORE_UPGRADE
 } ecat_transfer_err_t;
 
+/* 异步传输阶段 */
+typedef enum {
+    ECAT_TRANSFER_STAGE_NONE = 0,
+    ECAT_TRANSFER_STAGE_INIT,
+    ECAT_TRANSFER_STAGE_WRITE,
+    ECAT_TRANSFER_STAGE_READ,
+    ECAT_TRANSFER_STAGE_FINALIZE,
+    ECAT_TRANSFER_STAGE_CLOSING
+} ecat_transfer_stage_t;
+
 /* 传输请求结构体 */
 typedef struct {
     uint16_t transport_id;          /* 发起请求的传输通道 ID */
@@ -90,6 +101,19 @@ typedef struct {
     uint32_t saved_core_max_payload;    /* 会话期间暂存的 core 原始容量，防止永久污染配置 */
     uint32_t saved_core_target_idx;     /* 暂存容量对应的目标索引 */
     bool core_cap_overridden;           /* 是否暂存并临时重写了 core 容量限额 */
+
+    /* 异步操作与固定暂存控制 */
+    bool is_async;                          /* 当前会话是否由异步驱动执行 */
+    bool pending;                           /* 当前是否有异步操作正在后台执行 */
+    ecat_transfer_stage_t stage;            /* 当前 pending 的操作阶段 */
+    ecat_async_data_op_t async_data_op;     /* 当前 DATA 异步操作描述符 */
+    uint8_t *staging_buf;                   /* 调用方提供的固定暂存缓冲区指针 */
+    size_t staging_capacity;                /* 暂存缓冲区容量 (字节) */
+    size_t pending_length;                  /* 当前 pending 写入或读取的数据长度 */
+    uint8_t *user_read_out_buf;             /* READ 异步操作时调用方的接收缓冲区 */
+    size_t *user_read_actual;               /* READ 异步操作时传出实际读取字节数的指针 */
+    const ecat_upgrade_async_ops_t *fw_async_ops; /* 可选固件异步 ops (针对 FIRMWARE 目标) */
+    void *fw_async_ctx;                     /* 固件异步上下文 */
 
     ecat_transfer_err_t last_error;     /* 最近一次错误码 */
 } ecat_transfer_t;
@@ -188,6 +212,59 @@ ecat_transfer_result_t ecat_transfer_cancel(
     ecat_transfer_t *t,
     const void *owner,
     uint64_t token);
+
+/**
+ * @brief 绑定调用方拥有的固定静态暂存区 (供异步写/读操作使用)
+ * @param t 管理器上下文指针
+ * @param buf 缓冲区首地址 (必须非空)
+ * @param capacity 缓冲区物理容量 (字节)
+ * @return 0 成功，-1 参数非法或处于 pending 状态时禁止更换
+ */
+int ecat_transfer_set_staging_buffer(
+    ecat_transfer_t *t,
+    uint8_t *buf,
+    size_t capacity);
+
+/**
+ * @brief 绑定可选的固件异步核心操作集 (针对 FIRMWARE 类异步目标)
+ * @param t 管理器上下文指针
+ * @param ops 固件异步操作接口
+ * @param ctx 固件异步上下文指针
+ * @return 0 成功，-1 参数非法
+ */
+int ecat_transfer_init_async_firmware(
+    ecat_transfer_t *t,
+    const ecat_upgrade_async_ops_t *ops,
+    void *ctx);
+
+/**
+ * @brief 推进当前处于 PENDING 的异步操作进度
+ *
+ * 【状态机与生命周期推进契约】：
+ * - 仅允许由当前会话拥有者持有有效令牌调用；非拥有者返回 ECAT_TRANSFER_STALE；
+ * - 若当前无 pending 操作，返回 ECAT_TRANSFER_INVALID；
+ * - 底层硬件/驱动仍在执行时返回 ECAT_TRANSFER_PENDING；
+ * - 操作完成时：
+ *   - WRITE / READ 分块操作：更新 offset 与 running_crc32，重置 pending = false，返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE；
+ *   - FINALIZE / 导出关闭：完成提交并安全释放租约，转移至 IDLE 态，返回 ECAT_TRANSFER_COMPLETE；
+ * - 若底层驱动报告错误：安全中止驱动并释放租约，记录错误码，返回 ECAT_TRANSFER_FAILED。
+ *
+ * @param t 管理器上下文指针
+ * @param owner 调用方唯一标识
+ * @param token 会话令牌
+ * @return 传输结果码
+ */
+ecat_transfer_result_t ecat_transfer_poll(
+    ecat_transfer_t *t,
+    const void *owner,
+    uint64_t token);
+
+/**
+ * @brief 查询当前会话是否有处于后台执行的 pending 操作
+ * @param t 管理器上下文指针
+ * @return true 处于 pending，false 处于空闲或就绪态
+ */
+bool ecat_transfer_is_pending(const ecat_transfer_t *t);
 
 /**
  * @brief 获取当前会话已计算的 IEEE 802.3 CRC32

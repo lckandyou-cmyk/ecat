@@ -53,6 +53,66 @@ static void reset_mock_flags(void)
     g_fail_init = false;
 }
 
+static bool s_async_start_called = false;
+static bool s_async_poll_called = false;
+static bool s_async_abort_called = false;
+static ecat_async_op_result_t s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+static uint32_t s_async_written_bytes = 0;
+static uint8_t s_async_flash[1024];
+
+static ecat_async_op_result_t test_data_async_start(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx;
+    s_async_start_called = true;
+    if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        if (op->offset + op->length > sizeof(s_async_flash)) return ECAT_ASYNC_OP_FAILED;
+        memcpy(&s_async_flash[op->offset], op->buffer, op->length);
+        s_async_written_bytes += op->length;
+        op->actual_length = op->length;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ) {
+        if (op->offset + op->length > sizeof(s_async_flash)) return ECAT_ASYNC_OP_FAILED;
+        memcpy(op->buffer, &s_async_flash[op->offset], op->length);
+        op->actual_length = op->length;
+    }
+    return s_next_async_result;
+}
+
+static ecat_async_op_result_t test_data_async_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    s_async_poll_called = true;
+    return s_next_async_result;
+}
+
+static void test_data_async_abort(void *ctx)
+{
+    (void)ctx;
+    s_async_abort_called = true;
+}
+
+static bool s_fw_async_start_called = false;
+static bool s_fw_async_poll_called = false;
+static bool s_fw_async_abort_called = false;
+static ecat_upgrade_async_result_t s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+
+static ecat_upgrade_async_result_t test_fw_async_start(void *ctx, const uint8_t *data, size_t len, bool more)
+{
+    (void)ctx; (void)data; (void)len; (void)more;
+    s_fw_async_start_called = true;
+    return s_fw_async_next_res;
+}
+static ecat_upgrade_async_result_t test_fw_async_poll(void *ctx)
+{
+    (void)ctx;
+    s_fw_async_poll_called = true;
+    return s_fw_async_next_res;
+}
+static void test_fw_async_abort(void *ctx)
+{
+    (void)ctx;
+    s_fw_async_abort_called = true;
+}
+
 static int lifecycle_read_open(void *ctx)
 {
     (void)ctx;
@@ -1214,6 +1274,201 @@ int main(void)
     assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, upg_tok) == ECAT_UPGRADE_COMPLETE);
     assert(ecat_upgrade_begin(&upg_second, &client_owner2, &upg_req, &lease_tok2) == ECAT_UPGRADE_COMPLETE);
     assert(ecat_upgrade_cancel(&upg_second, &client_owner2, lease_tok2) == ECAT_UPGRADE_COMPLETE);
+
+    printf("--- 测试 Section 10: 真正非阻塞异步双向传输与统一状态机 (Async DATA / FIRMWARE) ---\n");
+    /* 10.1 异步目标缺失异步驱动时在 begin 阶段必须被严格拒绝，无任何副作用 */
+    ecat_target_registry_t async_reg;
+    assert(ecat_target_registry_init(&async_reg) == 0);
+    ecat_target_desc_t fake_async_desc;
+    memset(&fake_async_desc, 0, sizeof(fake_async_desc));
+    fake_async_desc.target_id = 10U;
+    strncpy(fake_async_desc.name, "fake_async", sizeof(fake_async_desc.name));
+    fake_async_desc.type = ECAT_TARGET_TYPE_DATA;
+    fake_async_desc.permissions = ECAT_PERM_RW;
+    fake_async_desc.max_size = 1024U;
+    fake_async_desc.enabled = true;
+    fake_async_desc.asynchronous = true;
+    /* 提供同步驱动使 registry_add 通过，但未配置 async_ops */
+    fake_async_desc.driver.io.write = param_write;
+    fake_async_desc.driver.io.erase_to = param_erase_to;
+    fake_async_desc.driver.io.read = param_read;
+    fake_async_desc.driver.io.init = param_init;
+    assert(ecat_target_registry_add(&async_reg, &fake_async_desc) == 0);
+
+    ecat_transfer_t async_xfer;
+    assert(ecat_transfer_init(&async_xfer, &async_reg, NULL) == 0);
+    ecat_transfer_request_t fake_req = {
+        .transport_id = 1U, .target_id = 10U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 100U
+    };
+    uint64_t fake_tok = 0;
+    /* begin 必须拒绝假异步目标并返回 FAILED，last_error 明确为 DRIVER_INIT */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &fake_req, &fake_tok) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_INIT);
+    assert(!async_xfer.active);
+
+    /* 10.2 真正异步 DATA 目标导入 (WRITE) 与轮询推进 */
+    ecat_async_data_ops_t real_async_ops = {
+        .start = test_data_async_start,
+        .poll = test_data_async_poll,
+        .abort = test_data_async_abort
+    };
+    ecat_target_desc_t real_async_desc;
+    memset(&real_async_desc, 0, sizeof(real_async_desc));
+    real_async_desc.target_id = 11U;
+    strncpy(real_async_desc.name, "real_async", sizeof(real_async_desc.name));
+    real_async_desc.type = ECAT_TARGET_TYPE_DATA;
+    real_async_desc.permissions = ECAT_PERM_RW;
+    real_async_desc.max_size = 1024U;
+    real_async_desc.enabled = true;
+    real_async_desc.asynchronous = true;
+    real_async_desc.driver.async_ops = &real_async_ops;
+    real_async_desc.driver.read_open = lifecycle_read_open;
+    real_async_desc.driver.read_close = lifecycle_read_close;
+    assert(ecat_target_registry_add(&async_reg, &real_async_desc) == 0);
+
+    /* 配置固定暂存区 */
+    uint8_t staging_mem[256];
+    assert(ecat_transfer_set_staging_buffer(&async_xfer, staging_mem, sizeof(staging_mem)) == 0);
+
+    ecat_transfer_request_t async_write_req = {
+        .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 64U
+    };
+    uint64_t async_tok = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &async_write_req, &async_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(async_xfer.active == true);
+
+    /* 设置下一次驱动返回 PENDING */
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    s_async_start_called = false;
+    uint8_t test_chunk[64];
+    memset(test_chunk, 0xAB, sizeof(test_chunk));
+
+    /* write 必须返回 ECAT_TRANSFER_PENDING */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, async_tok, test_chunk, sizeof(test_chunk)) == ECAT_TRANSFER_PENDING);
+    assert(s_async_start_called == true);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+
+    /* PENDING 期间：新 write 与 finish 必须返回 BUSY */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, async_tok, test_chunk, sizeof(test_chunk)) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transfer_finish(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_BUSY);
+
+    /* 错误 owner 或错误 token poll 必须返回 STALE */
+    assert(ecat_transfer_poll(&async_xfer, &client_owner2, async_tok) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, async_tok + 99) == ECAT_TRANSFER_STALE);
+
+    /* 合法 owner poll 推进：驱动仍为 PENDING 时返回 PENDING */
+    s_async_poll_called = false;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_PENDING);
+    assert(s_async_poll_called == true);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+
+    /* 驱动变为 COMPLETE 时 poll 推进并返回 COMPLETE */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_is_pending(&async_xfer) == false);
+    assert(ecat_transfer_get_bytes_transferred(&async_xfer) == 64U);
+
+    /* 对已完成的操作重复 poll 必须返回 INVALID */
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_INVALID);
+
+    /* 异步 finish 流程 */
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_finish(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+
+    /* poll 推进 finish 完成 */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, async_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(async_xfer.active == false);
+    assert(!ecat_upgrade_session_owns_mgr(async_xfer.session_ptr, &async_xfer, &client_owner1, async_tok)); /* 租约已释放 */
+
+    /* 10.2B 暂存区容量超限校验: 请求写入 300 字节，暂存区只有 256 字节，必须立即拒绝 */
+    ecat_transfer_request_t async_over_req = {
+        .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 1000U
+    };
+    uint64_t over_tok = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &async_over_req, &over_tok) == ECAT_TRANSFER_COMPLETE);
+    uint8_t oversized_chunk[300];
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, over_tok, oversized_chunk, sizeof(oversized_chunk)) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!async_xfer.active); /* 超界错误释放会话 */
+
+    /* 10.3 真正异步 DATA 目标导出 (READ) 与取消 */
+    ecat_transfer_request_t async_read_req = {
+        .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_EXPORT, .expected_size = 64U
+    };
+    uint64_t read_tok = 0;
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &async_read_req, &read_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(g_read_open_called == true);
+
+    uint8_t read_out[64];
+    size_t actual_read = 0;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, read_tok, read_out, sizeof(read_out), &actual_read) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+
+    /* 在 PENDING 期间执行 cancel: 触发驱动 abort，调用 read_close，释放租约，绝不触碰写 finalize */
+    s_async_abort_called = false;
+    assert(ecat_transfer_cancel(&async_xfer, &client_owner1, read_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(s_async_abort_called == true);
+    assert(g_read_close_called == true);
+    assert(g_finalize_called == false);
+    assert(async_xfer.active == false);
+    assert(ecat_transfer_is_pending(&async_xfer) == false);
+
+    /* 10.4 固件升级复用异步核心验证 (FIRMWARE Async) */
+    ecat_upgrade_async_ops_t fw_ops = {
+        .start = test_fw_async_start,
+        .poll = test_fw_async_poll,
+        .abort = test_fw_async_abort
+    };
+    int fw_dummy_ctx = 0;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == 0);
+
+    /* 注册固件异步目标 */
+    ecat_target_desc_t *fw_t1_desc = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
+    assert(fw_t1_desc != NULL);
+    fw_t1_desc->asynchronous = true;
+    core.cfg.targets[0].asynchronous = true;
+
+    ecat_transfer_request_t fw_async_req = {
+        .transport_id = 1U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 200U
+    };
+    uint64_t fw_tok = 0;
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.active == true);
+    assert(mgr_first.is_async == true);
+
+    /* write 触发异步固件 start */
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
+    s_fw_async_start_called = false;
+    uint8_t fw_chunk[100];
+    memset(fw_chunk, 0xEE, sizeof(fw_chunk));
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
+    assert(s_fw_async_start_called == true);
+    assert(ecat_transfer_is_pending(&mgr_first) == true);
+
+    /* pending 期间新写入返回 BUSY */
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_BUSY);
+
+    /* poll 推进 write 完成 */
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+    s_fw_async_poll_called = false;
+    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(s_fw_async_poll_called == true);
+    assert(ecat_transfer_is_pending(&mgr_first) == false);
+
+    /* finish 触发异步固件提交 */
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
+    assert(ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&mgr_first) == true);
+
+    /* poll 推进 finish 完成并释放会话 */
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.active == false);
+    assert(!ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, fw_tok));
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
