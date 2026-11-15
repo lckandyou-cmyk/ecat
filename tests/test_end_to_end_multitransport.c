@@ -505,29 +505,52 @@ int main(void)
     /* ---------------------------------------------------------------------- */
     printf("--- 测试阶段 D: SOES、SSC 与文件流直接接入统一传输核心真实调用链验证 ---\n");
 
-    /* D0: 异步目标前置拒绝验证：当注册表中存在启用的异步目标 5 时，纯同步 SOES 绑定必须被严格拒绝 */
-    ecat_foe_soes_adapter_t soes_adapter;
-    ecat_foe_soes_init(&soes_adapter, &core, 128U);
-    assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
+    /* D0: 混合配置集成测试：当注册表中存在启用的异步目标 (目标 2 与目标 5) 时，
+     * 纯同步 SOES 适配器与无 gate SSC 适配器必须能够顺利绑定传输核心；
+     * FoE 请求同步目标正常完成，请求异步目标在发 ACK 前被拦截且不泄露会话；
+     * 其他有异步能力的通道 (如 UART) 仍可正常访问异步目标。
+     */
+    ecat_target_desc_t fpga_desc;
+    memset(&fpga_desc, 0, sizeof(fpga_desc));
+    fpga_desc.target_id = 2U;
+    strncpy(fpga_desc.name, "fpga_async", sizeof(fpga_desc.name));
+    fpga_desc.type = ECAT_TARGET_TYPE_DATA;
+    fpga_desc.permissions = ECAT_PERM_WRITE;
+    fpga_desc.max_size = 512U * 1024U;
+    fpga_desc.enabled = true;
+    fpga_desc.asynchronous = true;
+    fpga_desc.driver.async_ops = &e2e_async_ops;
+    assert(ecat_target_registry_add(&reg, &fpga_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 1U, 2U, ECAT_PERM_WRITE) == 0);
 
-    /* 阶段 C 结束：禁用阶段 C 临时注册的异步数据目标 5，转入纯同步协议栈直连验证 */
-    const ecat_target_desc_t *d5 = ecat_target_registry_find_by_id(&reg, 5U);
-    if (d5 != NULL) {
-        ((ecat_target_desc_t *)d5)->enabled = false;
-    }
-
-    /* D1: SOES 适配器直连统一传输核心 (ecat_foe_soes_bind_transfer) */
     /* 开启 core 目标 3 (SII，固件) 用于 ACL 权限拦截对比 */
     core.cfg.targets[2].enabled = true;
     core.cfg.targets[2].max_payload_size = 64U * 1024U;
     core.cfg.targets[2].write_unit = 8U;
     core.cfg.targets[2].driver = &param_desc.driver.io;
 
+    ecat_foe_soes_adapter_t soes_adapter;
+    ecat_foe_soes_init(&soes_adapter, &core, 128U);
+    /* D0.1: 混合目标共存下，纯同步 SOES 适配器成功绑定 transfer 核心 */
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == 0);
     /* 重复绑定防御拦截 */
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
     assert(ecat_foe_soes_bind_upgrade(&soes_adapter, &legacy_upgrade) == -1);
 
+    /* D0.2: 纯同步 SOES 请求异步目标 2，在发 ACK 前必须被拦截 (返回 -1)，不激活会话 */
+    const char *soes_fpga_fn = "DRIVE_SERVO_FPGA_V1.0.0.0.efw";
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_fpga_fn, strlen(soes_fpga_fn)) != 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    /* 重复请求异步目标依然被拒绝，无租约泄漏 */
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_fpga_fn, strlen(soes_fpga_fn)) != 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D0.3: 在 FoE 拒绝异步目标的同时，其他有能力的通道 (UART 端点) 仍可正常异步访问目标 5 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D1: SOES 适配器直连统一传输核心功能验证 */
     /* D1.1: ACL 越权拦截 - FoE (通道 1) 未获权写入目标 3 (SII) */
     const char *soes_sii_fn = "DRIVE_SERVO_SII_V1.0.0.0.efw";
     assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_sii_fn, strlen(soes_sii_fn)) != 0);
@@ -580,8 +603,16 @@ int main(void)
     /* ---------------------------------------------------------------------- */
     ecat_foe_ssc_adapter_t ssc_adapter;
     ecat_foe_ssc_init(&ssc_adapter, &core, 128U);
+    /* D2.0: 纯同步 SSC 适配器成功绑定混合目标注册表 */
     assert(ecat_foe_ssc_bind_transfer(&ssc_adapter, &mgr) == 0);
     assert(ecat_foe_ssc_bind_transfer(&ssc_adapter, &mgr) == -1);
+
+    /* D2.0.1: 纯同步 SSC 请求异步目标 2，在发 ACK 前返回 ECAT_FOE_SSC_ERR_ILLEGAL 拦截 */
+    assert(ecat_foe_ssc_on_write(&ssc_adapter, soes_fpga_fn, (uint16_t)strlen(soes_fpga_fn), 0U) == ECAT_FOE_SSC_ERR_ILLEGAL);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    /* 重复请求异步目标防御，无租约泄漏 */
+    assert(ecat_foe_ssc_on_write(&ssc_adapter, soes_fpga_fn, (uint16_t)strlen(soes_fpga_fn), 0U) == ECAT_FOE_SSC_ERR_ILLEGAL);
+    assert(ecat_transfer_is_active(&mgr) == false);
 
     /* D2.1: SSC 同步模式固件写入与全流程校验 */
     assert(ecat_foe_ssc_on_write(&ssc_adapter, soes_mcu_fn, (uint16_t)strlen(soes_mcu_fn), 0U) == 0);
@@ -719,9 +750,6 @@ int main(void)
     /* D3.5: 异步 begin PENDING 生命周期、step 推进与防租约泄漏验证            */
     /* ---------------------------------------------------------------------- */
     printf("--- 测试 D3.5: 文件流适配器异步 begin PENDING 生命周期与防租约泄漏 ---\n");
-    if (d5 != NULL) {
-        ((ecat_target_desc_t *)d5)->enabled = true;
-    }
     ecat_upgrade_request_t upg_async_data_req = { .target_id = 5U, .fw_version = 0U };
     uint8_t async_file_data[128];
     memset(async_file_data, 0x33, sizeof(async_file_data));
@@ -817,19 +845,6 @@ int main(void)
     /* D3.7: 真实 SSC 协议回调验证 FoE 适配器 pending begin、首包 BUSY 握手时序 */
     /* ---------------------------------------------------------------------- */
     printf("--- 测试 D3.7: 真实 SSC 协议栈回调验证 pending begin、首包 BUSY 与重复 WRQ ---\n");
-    ecat_target_desc_t fpga_desc;
-    memset(&fpga_desc, 0, sizeof(fpga_desc));
-    fpga_desc.target_id = 2U;
-    strncpy(fpga_desc.name, "fpga_async", sizeof(fpga_desc.name));
-    fpga_desc.type = ECAT_TARGET_TYPE_DATA;
-    fpga_desc.permissions = ECAT_PERM_WRITE;
-    fpga_desc.max_size = 512U * 1024U;
-    fpga_desc.enabled = true;
-    fpga_desc.asynchronous = true;
-    fpga_desc.driver.async_ops = &e2e_async_ops;
-    assert(ecat_target_registry_add(&reg, &fpga_desc) == 0);
-    assert(ecat_target_registry_add_acl(&reg, 1U, 2U, ECAT_PERM_WRITE) == 0);
-
     ecat_foe_ssc_adapter_t ssc_adp;
     ecat_foe_ssc_async_t ssc_gate;
     uint8_t ssc_storage[128];

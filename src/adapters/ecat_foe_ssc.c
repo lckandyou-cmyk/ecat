@@ -70,20 +70,14 @@ int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *a, ecat_transfer_t *trans
     if (a->async_gate != NULL && (a->async_gate->pending || a->async_gate->completed ||
         a->async_gate->ops != ecat_foe_transport_async_ops() ||
         a->async_gate->ops_ctx != &a->transport)) return -1;
-    if (a->async_gate == NULL) {
-        for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-            if (transfer->core->cfg.targets[i].enabled && transfer->core->cfg.targets[i].asynchronous)
-                return -1;
-        }
-        if (transfer->registry != NULL) {
-            for (size_t i = 0; i < transfer->registry->target_count; i++) {
-                if (transfer->registry->targets[i].enabled && transfer->registry->targets[i].asynchronous) {
-                    return -1;
-                }
-            }
-        }
+    int rc = ecat_foe_transport_init_transfer(&a->transport, transfer);
+    if (rc == 0 && a->async_gate != NULL && a->transport.staged_buf == NULL) {
+        /* 自动复用 SSC 异步门控已有稳定分配的 packet_storage，避免重复占用 RAM */
+        (void)ecat_foe_transport_set_staged_buffer(&a->transport,
+                                                   a->async_gate->packet_storage,
+                                                   a->async_gate->packet_capacity);
     }
-    return ecat_foe_transport_init_transfer(&a->transport, transfer);
+    return rc;
 }
 
 static bool ssc_target_is_async(const ecat_foe_ssc_adapter_t *a, uint16_t target_id)

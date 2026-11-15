@@ -378,21 +378,34 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    /* [TEST 14] 无异步 gate 的纯同步 SSC 适配器必须在 bind 与 on_write 阶段拒绝异步目标 */
+    /* [TEST 14] 混合配置共存与无 gate SSC 适配器在 on_write 阶段精准拦截异步目标 */
     {
-        printf("[TEST 14] 验证无异步 gate 的纯同步 SSC 适配器拒绝异步目标 (bind 与 on_write)...");
+        printf("[TEST 14] 验证混合配置共存与无 gate SSC 在 on_write 阶段拒绝异步目标...");
         setup_core_and_adapter(&core, &adapter, 0U);
         assert(adapter.async_gate == NULL);
 
-        /* 1. 注册表中配置了启用的异步目标时，bind_transfer 必须返回 -1 拒绝 */
+        /* 1. 混合注册表：包含同步目标 1 (MCU) 与异步数据目标 2 (LOG) */
         ecat_target_registry_t reg;
         assert(ecat_target_registry_init(&reg) == 0);
-        ecat_target_desc_t async_desc = {
+        ecat_target_desc_t sync_desc = {
             .target_id = 1U,
             .name = "mcu",
             .type = ECAT_TARGET_TYPE_FIRMWARE,
             .permissions = ECAT_PERM_WRITE,
             .max_size = TEST_MAX_SIZE,
+            .enabled = true,
+            .asynchronous = false,
+            .driver = { .io = s_mock_drv.driver },
+            .user_ctx = &s_mock_drv
+        };
+        assert(ecat_target_registry_add(&reg, &sync_desc) == 0);
+
+        ecat_target_desc_t async_desc = {
+            .target_id = 2U,
+            .name = "log",
+            .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_RW,
+            .max_size = 1024U,
             .enabled = true,
             .asynchronous = true,
             .driver = { .io = s_mock_drv.driver },
@@ -403,16 +416,31 @@ int main(void)
         ecat_transfer_t transfer;
         assert(ecat_transfer_init(&transfer, &reg, &core) == 0);
 
-        /* 无 gate 的纯同步 SSC 试图绑定含有异步目标的 transfer，必须被严格拒绝 */
-        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == -1);
+        /* 纯同步 SSC 绑定包含无关异步目标的 transfer：必须顺利成功绑定 (返回 0) */
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
 
-        /* 2. 纯 core 模式下，若目标被配置为异步，on_write 必须直接返回 0x8004 拒绝建立会话 */
-        core.cfg.targets[0].asynchronous = true;
-        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
-        uint16_t err = ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U);
+        /* 2. 请求同步目标 1: on_write 成功返回 0，会话激活 */
+        const char *name_sync = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
+        assert(adapter.session_active == true);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(adapter.session_active == false);
+
+        /* 3. 请求异步目标 2: on_write 精准识别该实际目标为异步，直接返回 0x8004 拦截且绝不发 ACK！ */
+        core.cfg.targets[1].target_id = 2U;
+        core.cfg.targets[1].enabled = true;
+        core.cfg.targets[1].max_payload_size = 1024U;
+        core.cfg.targets[1].driver = &s_mock_drv.driver;
+        const char *name_async = "SERVO_DRV_FPGA_V1.0.0.0.efw"; /* target_id 2 */
+        uint16_t err = ecat_foe_ssc_on_write(&adapter, name_async, (uint16_t)strlen(name_async), 0U);
         assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
         assert(adapter.session_active == false);
-        core.cfg.targets[0].asynchronous = false;
+
+        /* 4. 重复下发同步目标 1，会话自愈无状态残留 */
+        assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
+        assert(adapter.session_active == true);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(adapter.session_active == false);
         printf(" [PASS]\n");
     }
 

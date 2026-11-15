@@ -66,18 +66,6 @@ int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_
         soes_has_transport(adapter) || adapter->has_staged_wrq) {
         return -1;
     }
-    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-        if (transfer->core->cfg.targets[i].enabled && transfer->core->cfg.targets[i].asynchronous) {
-            return -1;
-        }
-    }
-    if (transfer->registry != NULL) {
-        for (size_t i = 0; i < transfer->registry->target_count; i++) {
-            if (transfer->registry->targets[i].enabled && transfer->registry->targets[i].asynchronous) {
-                return -1;
-            }
-        }
-    }
     return ecat_foe_transport_init_transfer(&adapter->transport, transfer);
 }
 
