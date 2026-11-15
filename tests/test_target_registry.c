@@ -8,7 +8,18 @@
 #include <assert.h>
 #include <string.h>
 
-/* Mock 驱动函数 */
+/* Mock 异步驱动函数 */
+static ecat_async_op_result_t mock_async_start(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+static ecat_async_op_result_t mock_async_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+static void mock_async_abort(void *ctx) { (void)ctx; }
 static int mock_init(void *ctx) { (void)ctx; return 0; }
 static int mock_invalidate(void *ctx) { (void)ctx; return 0; }
 static int mock_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx)
@@ -135,6 +146,39 @@ int main(void)
     assert(ecat_target_registry_check_permission(&reg, 1U, 3U, ECAT_PERM_READ) == true);
     assert(ecat_target_registry_check_permission(&reg, 2U, 3U, ECAT_PERM_READ) == true);
     assert(ecat_target_registry_check_permission(&reg, 99U, 3U, ECAT_PERM_READ) == true);
+
+    /* 5. 真正异步驱动 (Async Data Driver) 能力声明与校验测试 */
+    ecat_target_desc_t async_desc;
+    memset(&async_desc, 0, sizeof(async_desc));
+    async_desc.target_id = 4U;
+    strncpy(async_desc.name, "async_log", sizeof(async_desc.name));
+    async_desc.type = ECAT_TARGET_TYPE_DATA;
+    async_desc.permissions = ECAT_PERM_RW;
+    async_desc.max_size = 128U * 1024U;
+    async_desc.enabled = true;
+    async_desc.asynchronous = true;
+
+    /* 声明为异步目标，但未提供任何同步驱动且 async_ops 为 NULL 时必须拦截拒绝 (-5) */
+    assert(ecat_target_registry_add(&reg, &async_desc) == -5);
+
+    /* async_ops 缺少 start 或 poll 必须拦截拒绝 (-5) */
+    ecat_async_data_ops_t bad_ops = {0};
+    async_desc.driver.async_ops = &bad_ops;
+    assert(ecat_target_registry_add(&reg, &async_desc) == -5);
+
+    /* 提供合法的真正异步驱动 ops */
+    static ecat_async_data_ops_t good_ops = {
+        .start = mock_async_start,
+        .poll = mock_async_poll,
+        .abort = mock_async_abort
+    };
+    async_desc.driver.async_ops = &good_ops;
+    assert(ecat_target_registry_add(&reg, &async_desc) == 0);
+    assert(reg.target_count == 4);
+
+    const ecat_target_desc_t *found_async = ecat_target_registry_find_by_id(&reg, 4U);
+    assert(found_async != NULL && found_async->asynchronous == true);
+    assert(found_async->driver.async_ops == &good_ops);
 
     printf(">>> 目标注册表与权限控制单元测试全部通过！<<<\n");
     return 0;

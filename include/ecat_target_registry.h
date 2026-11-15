@@ -57,7 +57,62 @@ typedef enum {
     ECAT_TARGET_TYPE_DATA           /* 普通数据区块: 参数、日志、配置、字库等纯数据流 */
 } ecat_target_type_t;
 
-/* 扩展目标驱动定义: 包含标准写入回调、可选导出尺寸获取以及只读生命周期回调 */
+/* 真正非阻塞异步数据操作结果码 */
+typedef enum {
+    ECAT_ASYNC_OP_FAILED = -1,
+    ECAT_ASYNC_OP_COMPLETE = 0,
+    ECAT_ASYNC_OP_PENDING = 1
+} ecat_async_op_result_t;
+
+/* 真正非阻塞异步数据操作类型 */
+typedef enum {
+    ECAT_ASYNC_DATA_OP_INIT = 0,
+    ECAT_ASYNC_DATA_OP_INVALIDATE,
+    ECAT_ASYNC_DATA_OP_ERASE_TO,
+    ECAT_ASYNC_DATA_OP_WRITE,
+    ECAT_ASYNC_DATA_OP_READ,
+    ECAT_ASYNC_DATA_OP_FINALIZE,
+    ECAT_ASYNC_DATA_OP_READ_OPEN,
+    ECAT_ASYNC_DATA_OP_READ_CLOSE
+} ecat_async_data_op_kind_t;
+
+/* 真正非阻塞异步数据操作描述符 (生命周期保持稳定直至 COMPLETE 或 FAILED) */
+typedef struct {
+    ecat_async_data_op_kind_t kind; /* 操作种类 */
+    uint32_t offset;                /* 操作起始偏移量 (WRITE/READ) */
+    uint32_t need_end;              /* 需要擦除到的结束边界 (ERASE_TO) */
+    uint32_t erased_end;            /* 驱动反馈的实际已擦除边界 (ERASE_TO) */
+    uint32_t length;                /* 缓冲区数据长度 */
+    uint8_t *buffer;                /* 数据暂存区指针 (WRITE 输入暂存或 READ 输出暂存) */
+    size_t actual_length;           /* 驱动反馈的实际处理字节数 (READ/WRITE) */
+} ecat_async_data_op_t;
+
+/* 真正非阻塞异步数据驱动操作接口 */
+typedef struct {
+    /**
+     * @brief 启动异步操作
+     * @param user_ctx 用户自定义上下文
+     * @param op 操作描述符
+     * @return COMPLETE(0) 立即完成, PENDING(1) 后台执行中需轮询, FAILED(-1) 失败
+     */
+    ecat_async_op_result_t (*start)(void *user_ctx, ecat_async_data_op_t *op);
+
+    /**
+     * @brief 轮询异步操作进度
+     * @param user_ctx 用户自定义上下文
+     * @param op 操作描述符
+     * @return COMPLETE(0) 完成, PENDING(1) 仍需继续轮询, FAILED(-1) 失败
+     */
+    ecat_async_op_result_t (*poll)(void *user_ctx, ecat_async_data_op_t *op);
+
+    /**
+     * @brief 取消/中止后台异步操作并确保硬件释放暂存缓冲访问
+     * @param user_ctx 用户自定义上下文
+     */
+    void (*abort)(void *user_ctx);
+} ecat_async_data_ops_t;
+
+/* 扩展目标驱动定义: 包含标准写入回调、可选导出尺寸获取、只读生命周期回调以及真正非阻塞异步驱动 */
 typedef struct {
     ecat_foe_target_driver_t io;
     /**
@@ -85,6 +140,11 @@ typedef struct {
      * @param user_ctx 用户自定义上下文指针
      */
     void (*read_close)(void *user_ctx);
+
+    /**
+     * @brief 可选真正非阻塞异步数据驱动接口 (针对 DATA 类型的异步操作)
+     */
+    const ecat_async_data_ops_t *async_ops;
 } ecat_target_driver_t;
 
 /* 单个目标区块描述符 */
