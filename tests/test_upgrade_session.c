@@ -48,7 +48,7 @@ int main(void)
     CHECK(ecat_upgrade_session_acquire_mgr(&mgr_sess, &mgr1, &foe, &mgr_tok) == ECAT_UPGRADE_SESSION_OK);
     CHECK(mgr_sess.manager == &mgr1 && mgr_sess.owner == &foe && mgr_tok != 0);
 
-    /* 2. 验证旧接口 release 无法释放 manager-bound 租约，锁依然安全持有 */
+    /* 2. 验证旧接口 owns 支持只读观察 (owner, token) 但不代表 manager 身份；旧 release 无法释放 manager-bound 租约 */
     CHECK(ecat_upgrade_session_owns(&mgr_sess, &foe, mgr_tok));
     CHECK(ecat_upgrade_session_release(&mgr_sess, &foe, mgr_tok) == ECAT_UPGRADE_SESSION_STALE);
     CHECK(mgr_sess.owner == &foe && mgr_sess.manager == &mgr1); /* 锁依然安全持有 */
