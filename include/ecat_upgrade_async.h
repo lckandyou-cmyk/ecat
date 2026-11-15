@@ -16,9 +16,12 @@ typedef enum {
     ECAT_UPGRADE_ASYNC_PENDING = 1
 } ecat_upgrade_async_result_t;
 
-/* start copies data before returning; more_data=false requests end/commit.
+/* start copies or owns data before returning; more_data=false requests end/commit.
  * Only one operation may be pending. poll advances it, never restarts it.
- * abort cancels backend work; the owner closes the entire core session too.
+ * abort cancels backend work and MUST synchronously terminate all hardware/DMA
+ * access to the staging buffer before returning. Drivers unable to stop hardware
+ * synchronously must not use this contract without double buffering.
+ * COMPLETE indicates all hardware I/O to the buffer has fully finished.
  * All callbacks and the owning session manager must run serially. */
 typedef struct {
     ecat_upgrade_async_result_t (*start)(void *ctx, const uint8_t *data,

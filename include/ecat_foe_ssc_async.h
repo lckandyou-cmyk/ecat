@@ -6,6 +6,23 @@
  * caller-driven asynchronous operation is pending. It does not implement the
  * ECAT core or a storage driver; applications must connect the callbacks to a
  * stateful asynchronous core before using it for firmware updates.
+ *
+ * Lifecycle and hardware synchronization contract:
+ * 1. Buffer overlap safety:
+ *    - If caller input data equals packet_storage, redundant copies are skipped;
+ *    - If data and packet_storage point to overlapping offsets within the same
+ *      memory array, safe memmove is used, eliminating memcpy undefined behavior.
+ * 2. Hardware synchronous abort requirement:
+ *    - ops->abort(ctx) MUST synchronously terminate all hardware (DMA, bus)
+ *      access to packet_storage before returning. Drivers unable to stop hardware
+ *      synchronously must not use this shared contract without double buffering.
+ * 3. Status transitions and clear_packet timing:
+ *    - COMPLETE: Hardware I/O has completely ceased. packet_storage is safely
+ *      zeroed via clear_packet once handshake closes or on final ACK.
+ *    - FAILED / TIMEOUT: ops->abort(ctx) is synchronously called first to stop
+ *      hardware. packet_storage retains payload for master packet-match retry
+ *      comparison and is zeroed upon retry completion or protocol termination.
+ *    - Cancel / duplicate WRQ: ops->abort(ctx) stops hardware before clear_packet.
  */
 #ifndef ECAT_FOE_SSC_ASYNC_H
 #define ECAT_FOE_SSC_ASYNC_H
