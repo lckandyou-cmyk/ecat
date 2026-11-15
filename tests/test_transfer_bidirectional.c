@@ -60,6 +60,8 @@ static ecat_async_op_result_t s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
 static uint32_t s_async_written_bytes = 0;
 static uint8_t s_async_flash[1024];
 
+static int s_override_actual_length = -1;
+
 static ecat_async_op_result_t test_data_async_start(void *ctx, ecat_async_data_op_t *op)
 {
     (void)ctx;
@@ -68,19 +70,22 @@ static ecat_async_op_result_t test_data_async_start(void *ctx, ecat_async_data_o
         if (op->offset + op->length > sizeof(s_async_flash)) return ECAT_ASYNC_OP_FAILED;
         memcpy(&s_async_flash[op->offset], op->buffer, op->length);
         s_async_written_bytes += op->length;
-        op->actual_length = op->length;
+        op->actual_length = (s_override_actual_length >= 0) ? (uint32_t)s_override_actual_length : op->length;
     } else if (op->kind == ECAT_ASYNC_DATA_OP_READ) {
         if (op->offset + op->length > sizeof(s_async_flash)) return ECAT_ASYNC_OP_FAILED;
         memcpy(op->buffer, &s_async_flash[op->offset], op->length);
-        op->actual_length = op->length;
+        op->actual_length = (s_override_actual_length >= 0) ? (uint32_t)s_override_actual_length : op->length;
     }
     return s_next_async_result;
 }
 
 static ecat_async_op_result_t test_data_async_poll(void *ctx, ecat_async_data_op_t *op)
 {
-    (void)ctx; (void)op;
+    (void)ctx;
     s_async_poll_called = true;
+    if (s_override_actual_length >= 0 && op != NULL) {
+        op->actual_length = (uint32_t)s_override_actual_length;
+    }
     return s_next_async_result;
 }
 
@@ -1582,6 +1587,66 @@ int main(void)
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_FINALIZE);
     assert(!async_xfer.active);
     g_fail_async_finalize = false;
+
+    /* 10.6 驱动 actual_length 边界核验与短读短写契约 */
+    printf("--- 测试 10.6: 驱动 actual_length 越界防御与短读短写契约 ---\n");
+    ecat_transfer_request_t req_11_test = {
+        .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 500U
+    };
+    uint64_t tok_11 = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
+
+    /* 10.6.1 写入立即完成越界拦截: actual_length > length */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    s_override_actual_length = 70; /* 请求 64 字节，驱动谎报 70 字节 */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!async_xfer.active);
+
+    /* 10.6.2 写入立即完成零字节短写契约: actual_length == 0 时不得退回为 64 */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_test, &tok_11) == ECAT_TRANSFER_COMPLETE);
+    s_override_actual_length = 0;
+    uint32_t prev_offset = ecat_transfer_get_bytes_transferred(&async_xfer);
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_get_bytes_transferred(&async_xfer) == prev_offset); /* 零字节短写，偏移量不变 */
+
+    /* 10.6.3 写入 poll 完成越界拦截: actual_length > pending_length */
+    s_override_actual_length = -1;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_11, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    s_override_actual_length = 80; /* poll 返回 80 字节越界 */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_11) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!async_xfer.active);
+
+    /* 10.6.4 读取 poll 完成零字节短读契约与越界拦截 */
+    ecat_transfer_request_t req_11_rd = {
+        .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_EXPORT, .expected_size = 128U
+    };
+    uint64_t tok_rd = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_rd, &tok_rd) == ECAT_TRANSFER_COMPLETE);
+    uint8_t rd_buf_test[64];
+    size_t actual_rd_test = 999;
+    s_override_actual_length = -1;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_rd, rd_buf_test, sizeof(rd_buf_test), &actual_rd_test) == ECAT_TRANSFER_PENDING);
+    /* poll 返回 0 字节短读: 必须正确写入 actual_read = 0，不可被当成 64 */
+    s_override_actual_length = 0;
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_rd) == ECAT_TRANSFER_CONTINUE);
+    assert(actual_rd_test == 0);
+
+    /* 再次发起读取并注入越界 actual_length */
+    s_override_actual_length = -1;
+    s_next_async_result = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_rd, rd_buf_test, sizeof(rd_buf_test), &actual_rd_test) == ECAT_TRANSFER_PENDING);
+    s_override_actual_length = 100; /* 64 字节缓冲区，谎报 100 字节 */
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_rd) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!async_xfer.active);
+    s_override_actual_length = -1;
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
