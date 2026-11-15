@@ -15,15 +15,17 @@
 ```mermaid
 flowchart TD
     subgraph Transports["传输接入层 (Transports & Endpoints)"]
-        FoE["FoE 工业总线适配桥\n(ecat_foe_transport)\n支持直连 transfer 或兼容 upgrade"]
-        Endpoint["通用传输端点\n(ecat_transport_endpoint_t)"]
-        File["本地文件流适配\n(ecat_upgrade_file)"]
+        SOES["SOES 协议栈适配器\n(ecat_foe_soes_bind_transfer)\n直连统一传输核心，受管于 ACL"]
+        SSC["SSC 协议栈适配器\n(ecat_foe_ssc_bind_transfer)\n同步 & 异步重试门直连统一核心"]
+        FoE["FoE 工业总线适配桥\n(ecat_foe_transport)\n统一核心模式 vs 遗留兼容模式"]
+        Endpoint["通用传输端点\n(ecat_transport_endpoint_t)\n支持 pending begin / poll / abort"]
+        File["本地文件流适配\n(ecat_upgrade_file_init_transfer)\n直连统一传输核心"]
         Custom["用户自定义通道\n(UART / CAN / ...)"]
         Legacy["固件升级兼容层\n(ecat_upgrade_t)"]
     end
 
     subgraph Core["权威统一传输核心 (Authoritative Transfer Core)"]
-        TransferMgr["双向传输引擎 (ecat_transfer_t)\n- 统一双向 (IMPORT / EXPORT)\n- 统一完整生命周期 (INIT/ERASE/WRITE/FINALIZE/READ/CLOSE)\n- 统一状态机 (IDLE / PENDING / COMPLETE / ...)\n- 单一持有者令牌 (manager + owner + token)\n- 统一权限矩阵 (ACL Check)"]
+        TransferMgr["双向传输引擎 (ecat_transfer_t)\n- 统一双向 (IMPORT / EXPORT)\n- 统一完整生命周期 (INIT/INVALIDATE/ERASE/WRITE/FINALIZE/READ_OPEN/READ_CLOSE)\n- 统一状态机 (IDLE / PENDING / COMPLETE / ...)\n- 单一持有者令牌 (manager + owner + token)\n- 统一权限矩阵 (ACL Check)"]
         SharedSession["统一会话仲裁器 (ecat_upgrade_session_t)\n- 跨管理器身份绑定 (manager + owner + token)\n- 全局单一租约排他互斥"]
     end
 
@@ -33,15 +35,17 @@ flowchart TD
 
     subgraph Drivers["后端存储与核心驱动层 (Backends & Drivers)"]
         SyncDrv["同步驱动 (ecat_target_driver_t)\n- 经典阻塞读写/擦除/生效"]
-        AsyncDataDrv["异步数据驱动 (ecat_async_data_ops_t)\n- 真正非阻塞 start / poll / abort\n- 链式状态机推进 (ERASE_TO -> WRITE)"]
+        AsyncDataDrv["异步数据驱动 (ecat_async_data_ops_t)\n- 真正非阻塞 start / poll / abort\n- 完整生命周期链路 (INIT -> INVALIDATE -> ERASE_TO -> WRITE)"]
         AsyncFwCore["真实异步固件核心 (ecat_foe_core_async)\n- 严格强绑定 core->async_abort_hook/ctx\n- EFW 校验 / 签名 / 回读 CRC / 防回滚"]
     end
 
+    SOES -->|直连统一传输核心| FoE
+    SSC -->|直连统一传输核心| FoE
     FoE -->|原生接入: init_transfer| TransferMgr
     FoE -.->|兼容接入: init| Legacy
     Legacy --> SharedSession
     Endpoint --> TransferMgr
-    File --> TransferMgr
+    File -->|原生接入: init_transfer| TransferMgr
     Custom --> Endpoint
 
     TransferMgr --> SharedSession
@@ -183,22 +187,30 @@ typedef struct {
 1. **统一会话仲裁核心 (Authoritative Session Core)**：
    - `ecat_upgrade_session_t` 为全系统唯一的会话租约仲裁器，跨管理器（`ecat_transfer_t` 与 `ecat_upgrade_t`）、跨传输通道（FoE、文件、自定义通道）实现严格的互斥与所有权绑定。
    - 杜绝双重租约与跨管理器非法取消：非持有者无法释放或操作其他管理器的激活租约。
-2. **FoE 工业总线适配桥 (`ecat_foe_transport.c`) 双模式接入与迁移成果**：
-   - **权威统一核心接入 (`ecat_foe_transport_init_transfer`)**：
-     FoE 传输适配器现已完全原生接入权威统一双向传输核心 `ecat_transfer_t`。在该模式下，FoE 通道直接受管于统一状态机、统一目标注册表 ACL 访问矩阵与完整驱动生命周期，消除了 FoE 与其它通道割裂维护的双重状态机；
-   - **遗留兼容模式 (`ecat_foe_transport_init`)**：
-     保留通过 `ecat_upgrade_t` 接入的兼容路径，底层通过全局唯一的 `ecat_upgrade_session_t` 与主管理器强绑定且互斥排他；
-   - **保证现存协议栈 100% 行为零回归**：
-     现有 Beckhoff SSC / SOES 协议栈无需任何上层改动即可无缝运行，全部测试套件与 Bootloader 验证均零破坏保持向后兼容。
-3. **原子完整写入与错误安全处理契约 (All-or-Nothing Full Write Semantics)**：
+2. **多协议适配器直接传输绑定全打通 (Direct Transfer Binding for Adapters)**：
+   - **SOES 协议栈直连 (`ecat_foe_soes_bind_transfer`)**：
+     SOES 适配器支持直接绑定权威统一传输核心 `ecat_transfer_t`。在该模式下，SOES 协议栈直接受管于统一状态机、会话仲裁与目标注册表 ACL 访问矩阵（越权请求如写未授权数据区直接被拦截）；
+   - **SSC 协议栈直连 (`ecat_foe_ssc_bind_transfer`)**：
+     SSC 适配器同时支持同步模式与配有 `async_gate` 的异步重试门模式，直接受管于统一传输核心，打通端到端完整流转；
+   - **本地文件流直连 (`ecat_upgrade_file_init_transfer`)**：
+     文件流传输适配器全面支持直接接入统一双向传输核心，自动转换请求并对齐结果状态码，支持流式逐块写入与中途安全取消；
+   - **遗留兼容模式保留**：
+     保留通过 `ecat_upgrade_t` 接入的兼容路径（`ecat_foe_soes_bind_upgrade`、`ecat_foe_ssc_bind_upgrade`、`ecat_upgrade_file_init`），底层通过全局唯一的 `ecat_upgrade_session_t` 与主管理器强绑定且排他互斥，保证现有协议栈部署 100% 零破坏平滑过渡。
+3. **完整生命周期与擦写前介质失效 (Full Invalidation Lifecycle)**：
+   - 异步 DATA 导入强制执行 `INIT -> INVALIDATE -> ERASE_TO -> WRITE -> FINALIZE` 完整生命周期流转，失效操作必须发生在任何擦除与写入之前，杜绝旧固件/数据在写入中途被非法执行；
+   - 异步 EXPORT 模式严格建立 `READ_OPEN -> READ -> READ_CLOSE` 独立只读闭环，禁止调用写驱动的使能失效、擦除或写入，防止读操作破坏存储介质。
+4. **端点 Pending Begin 生命周期与防租约泄漏 (Endpoint Pending Begin Contract)**：
+   - 通用传输端点 `ecat_transport_endpoint_t` 全面支持启动挂起生命周期（`begin_import` / `begin_export` 遇到异步挂起返回 `ECAT_TRANSFER_PENDING`）；
+   - 正确持有会话租约令牌 `token`，并在 `poll` 阶段推进就绪时触发 `on_session_start` 事件；挂起期间任何并发写入/读取操作一律返回 `ECAT_TRANSFER_BUSY` 拦截，支持中途 `abort` 安全中止并彻底释放会话租约，防范租约泄漏。
+5. **原子完整写入与错误安全处理契约 (All-or-Nothing Full Write Semantics)**：
    - `ecat_transfer_write` 与端点写接口要求分块原子完整落盘；
    - 驱动实际写入长度 `actual_length < length`（包括零写入或部分短写）一律被严格裁定为 `ECAT_TRANSFER_ERR_DRIVER_WRITE`，立即中止并安全回退释放租约，绝不发生数据静默截断或丢失；
    - 异步擦除 `ERASE_TO` 作为显式非阻塞驱动阶段执行，擦除完成后由内部状态机自动无缝开启第二阶段 `WRITE`，对外保持透明推进。
-4. **真实固件核心安全复用与单次精确中止契约**：
+6. **真实固件核心安全复用与单次精确中止契约 (Single Hardware Abort Semantics)**：
    - 固件异步传输通过 `ecat_transfer_init_async_firmware` 强制绑定权威固件核心（`core->async_abort_hook == ops->abort && core->async_abort_ctx == ctx`），拦截伪造 ops 绕过验签；
    - 写入固件时强制深拷贝至独立暂存区，确保调用方输入缓冲区被修改或释放时数据完整性与 CRC32 绝对稳定；
-   - 中止时严格遵循单次精确清理：针对异步目标仅调用 `async_ops->abort`，针对固件异步目标同时复位底层核心与驱动，杜绝重复同步中止与状态机悬挂。
-5. **真实硬件边界声明**：
+   - 确立统一的单一硬件中止语义：针对异步目标仅触发单次 `async_ops->abort`，针对固件目标由固件核心统一调度中止链条，杜绝重复同步中止与状态机悬挂。
+7. **真实硬件边界声明**：
    - 本项目交付物包含通用接口、统一核心、端点适配器、Mock 验证与真实 SOES/Monocypher 宿主集成测试。
    - **明确边界**：本项目未虚构真实 UART/CAN 硬件寄存器驱动，尚未在真实物理 32 位 MCU 硬件上进行动态在线升级联调，真实硬件部署时需挂载对应芯片的外设驱动。
 
