@@ -2750,6 +2750,25 @@ int main(void)
         foe_tr.begin_pending = true;
         assert(ecat_foe_transport_owns(&foe_tr) == true);
 
+        /* 1.1 未配置暂存区时严格安全失败验证: 纯同步默认不分配 RAM，异步首包暂存必须被拒绝并 abort */
+        uint8_t unconfigured_pkt[64];
+        memset(unconfigured_pkt, 0x11, sizeof(unconfigured_pkt));
+        assert(ecat_foe_transport_start(&foe_tr, unconfigured_pkt, sizeof(unconfigured_pkt), true) == ECAT_UPGRADE_ASYNC_FAILED);
+        assert(ecat_foe_transport_owns(&foe_tr) == false);
+
+        /* 1.2 配置 256 字节受控暂存区 */
+        uint8_t tr_stage_buf[256];
+        assert(ecat_foe_transport_set_staged_buffer(&foe_tr, tr_stage_buf, sizeof(tr_stage_buf)) == 0);
+
+        /* 重新发起 begin 进入 begin_pending */
+        assert(ecat_transfer_begin(&test_mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+        foe_tr.pending = true;
+        foe_tr.begin_pending = true;
+        assert(ecat_foe_transport_owns(&foe_tr) == true);
+
+        /* 1.3 活跃期间禁止更换暂存区校验 */
+        assert(ecat_foe_transport_set_staged_buffer(&foe_tr, tr_stage_buf, sizeof(tr_stage_buf)) == -1);
+
         /* 2. 在堆上动态分配 volatile 输入缓冲，填入特征字节 0xA5 */
         uint8_t *volatile_pkt = (uint8_t *)malloc(64);
         assert(volatile_pkt != NULL);
@@ -2776,14 +2795,14 @@ int main(void)
             assert(s_mock_staged_ctx.received[i] == 0xA5);
         }
 
-        /* 7. 测试容量超限严格拒绝: 默认容量 512，传入 600 字节必须返回 FAILED 并 abort */
+        /* 7. 测试容量超限严格拒绝: 配置容量 256，传入 300 字节必须返回 FAILED 并 abort */
         ecat_foe_transport_abort(&foe_tr);
         s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
         assert(ecat_transfer_begin(&test_mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
         foe_tr.pending = true;
         foe_tr.begin_pending = true;
 
-        uint8_t overflow_buf[600];
+        uint8_t overflow_buf[300];
         memset(overflow_buf, 0x55, sizeof(overflow_buf));
         assert(ecat_foe_transport_start(&foe_tr, overflow_buf, sizeof(overflow_buf), true) == ECAT_UPGRADE_ASYNC_FAILED);
         assert(ecat_foe_transport_owns(&foe_tr) == false);

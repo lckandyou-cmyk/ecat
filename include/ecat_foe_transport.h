@@ -19,8 +19,6 @@
 extern "C" {
 #endif
 
-#define ECAT_FOE_TRANSPORT_STAGING_DEFAULT_CAPACITY 512U
-
 typedef struct {
     ecat_upgrade_t *upgrade;      /**< 遗留升级管理器 (兼容模式) */
     ecat_transfer_t *transfer;    /**< 权威统一双向传输管理器 (统一核心模式) */
@@ -30,10 +28,9 @@ typedef struct {
     bool finish_after_write;
     bool finishing;
     bool committed;
-    uint8_t *custom_staging_buf;  /**< 可选用户自定义首包受控暂存区 */
-    size_t custom_staging_cap;    /**< 可选用户自定义首包受控暂存区容量 */
-    uint8_t default_staging_buf[ECAT_FOE_TRANSPORT_STAGING_DEFAULT_CAPACITY]; /**< 内置受控深拷贝暂存区 */
-    size_t staged_length;         /**< 首包异步暂存数据长度 */
+    uint8_t *staged_buf;          /**< 可选外部/调用方受控首包深拷贝暂存区 (纯同步保持 NULL 零多余 RAM) */
+    size_t staged_cap;            /**< 可选外部/调用方受控首包暂存区容量 */
+    size_t staged_length;         /**< 首包异步暂存数据实际有效长度 */
     bool staged_more_data;        /**< 首包后续数据标志 */
     bool has_staged_packet;       /**< 是否包含暂存的首包数据 */
 } ecat_foe_transport_t;
@@ -50,11 +47,15 @@ int ecat_foe_transport_init(ecat_foe_transport_t *transport, ecat_upgrade_t *upg
 int ecat_foe_transport_init_transfer(ecat_foe_transport_t *transport, ecat_transfer_t *transfer);
 
 /**
- * @brief 为 FoE 适配桥配置自定义首包异步受控暂存区 (若未配置则默认使用内置 512 字节受控缓冲)
+ * @brief 为 FoE 适配桥配置首包异步受控暂存区
+ * @note 纯同步部署保持未配置 (零多余 RAM 开销)；
+ *       若发生异步首包暂存需求（begin 返回 PENDING）但未配置暂存区或容量不足，
+ *       适配桥将严格安全失败并中止，绝不产生未定义内存行为。
+ *       会话活跃期间（owns）严禁更换暂存区。
  * @param transport 适配桥结构体指针
- * @param buffer 外部受控暂存区指针 (NULL 表示恢复内置默认缓冲)
+ * @param buffer 外部受控暂存区指针 (NULL 表示清空)
  * @param capacity 暂存区容量 (字节)
- * @return 0 成功, -1 参数非法或处于活跃传输中
+ * @return 0 成功, -1 参数非法或处于活跃会话中
  */
 int ecat_foe_transport_set_staged_buffer(ecat_foe_transport_t *transport, uint8_t *buffer, size_t capacity);
 
