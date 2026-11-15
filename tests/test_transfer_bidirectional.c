@@ -95,6 +95,44 @@ static bool s_fw_async_poll_called = false;
 static bool s_fw_async_abort_called = false;
 static ecat_upgrade_async_result_t s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
 
+/* 异步 DATA 完整驱动生命周期 Mock 变量与函数 */
+static bool g_async_io_init_called = false;
+static bool g_async_io_invalidate_called = false;
+static bool g_async_io_erase_called = false;
+static bool g_async_io_finalize_called = false;
+static bool g_async_io_abort_called = false;
+static bool g_fail_async_init = false;
+static bool g_fail_async_invalidate = false;
+static bool g_fail_async_erase = false;
+static bool g_fail_async_finalize = false;
+
+static int mock_async_io_init(void *ctx) {
+    (void)ctx;
+    g_async_io_init_called = true;
+    return g_fail_async_init ? -1 : 0;
+}
+static int mock_async_io_invalidate(void *ctx) {
+    (void)ctx;
+    g_async_io_invalidate_called = true;
+    return g_fail_async_invalidate ? -1 : 0;
+}
+static int mock_async_io_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx) {
+    (void)ctx;
+    g_async_io_erase_called = true;
+    if (g_fail_async_erase) return -1;
+    if (erased_end) *erased_end = (need_end + 127U) & ~127U;
+    return 0;
+}
+static int mock_async_io_finalize(void *ctx) {
+    (void)ctx;
+    g_async_io_finalize_called = true;
+    return g_fail_async_finalize ? -1 : 0;
+}
+static void mock_async_io_abort(void *ctx) {
+    (void)ctx;
+    g_async_io_abort_called = true;
+}
+
 static ecat_upgrade_async_result_t test_fw_async_start(void *ctx, const uint8_t *data, size_t len, bool more)
 {
     (void)ctx; (void)data; (void)len; (void)more;
@@ -1469,6 +1507,81 @@ int main(void)
     assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(mgr_first.active == false);
     assert(!ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, fw_tok));
+
+    /* 10.5 异步 DATA 完整驱动生命周期验证 (init, invalidate, erase_to, finalize, abort) */
+    printf("--- 测试 10.5: 异步 DATA 完整驱动生命周期与失败安全回退 ---\n");
+    ecat_target_desc_t async_full_desc;
+    memset(&async_full_desc, 0, sizeof(async_full_desc));
+    async_full_desc.target_id = 12U;
+    strncpy(async_full_desc.name, "async_full_lifecycle", sizeof(async_full_desc.name));
+    async_full_desc.type = ECAT_TARGET_TYPE_DATA;
+    async_full_desc.permissions = ECAT_PERM_RW;
+    async_full_desc.max_size = 1024U;
+    async_full_desc.enabled = true;
+    async_full_desc.asynchronous = true;
+    async_full_desc.driver.async_ops = &real_async_ops;
+    async_full_desc.driver.io.init = mock_async_io_init;
+    async_full_desc.driver.io.invalidate = mock_async_io_invalidate;
+    async_full_desc.driver.io.erase_to = mock_async_io_erase_to;
+    async_full_desc.driver.io.finalize = mock_async_io_finalize;
+    async_full_desc.driver.io.abort = mock_async_io_abort;
+    assert(ecat_target_registry_add(&async_reg, &async_full_desc) == 0);
+
+    /* 10.5.1: 异步 DATA 的 init 失败拦截并释放租约 */
+    g_async_io_init_called = false;
+    g_fail_async_init = true;
+    ecat_transfer_request_t req_12 = {
+        .transport_id = 1U, .target_id = 12U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 128U
+    };
+    uint64_t tok_12 = 0;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_FAILED);
+    assert(g_async_io_init_called == true);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_INIT);
+    assert(!async_xfer.active);
+    g_fail_async_init = false;
+
+    /* 10.5.2: 异步 DATA 的 invalidate 失败拦截并释放租约 */
+    g_async_io_invalidate_called = false;
+    g_fail_async_invalidate = true;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_FAILED);
+    assert(g_async_io_invalidate_called == true);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_INVALIDATE);
+    assert(!async_xfer.active);
+    g_fail_async_invalidate = false;
+
+    /* 10.5.3: 异步 DATA 写入前 erase_to 失败拦截并安全清理 */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
+    g_async_io_erase_called = false;
+    g_fail_async_erase = true;
+    uint8_t dummy_chunk[64] = {0};
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, sizeof(dummy_chunk)) == ECAT_TRANSFER_FAILED);
+    assert(g_async_io_erase_called == true);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_ERASE);
+    assert(!async_xfer.active);
+    g_fail_async_erase = false;
+
+    /* 10.5.4: 异步 DATA 写入前按需 erase_to 正常调用及擦除水印验证 */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
+    g_async_io_erase_called = false;
+    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(g_async_io_erase_called == true);
+    /* 擦除块为 128 对齐，写入 64 后擦除水位线已达 128；再写 32 字节不应重复调用 erase */
+    g_async_io_erase_called = false;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 32U) == ECAT_TRANSFER_COMPLETE);
+    assert(g_async_io_erase_called == false);
+
+    /* 补齐写入剩余 32 字节，达到 expected_size (128) */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 32U) == ECAT_TRANSFER_COMPLETE);
+
+    /* 10.5.5: 异步 DATA finish 时触发 finalize 并处理失败 */
+    g_async_io_finalize_called = false;
+    g_fail_async_finalize = true;
+    assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_FAILED);
+    assert(g_async_io_finalize_called == true);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_FINALIZE);
+    assert(!async_xfer.active);
+    g_fail_async_finalize = false;
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
