@@ -104,8 +104,10 @@ int ecat_transfer_init_async_firmware(
     const ecat_upgrade_async_ops_t *ops,
     void *ctx)
 {
-    if (t == NULL || ops == NULL || ops->start == NULL || ops->poll == NULL ||
-        ops->abort == NULL || ctx == NULL) {
+    if (t == NULL || t->core == NULL || ops == NULL || ops->start == NULL ||
+        ops->poll == NULL || ops->abort == NULL || ctx == NULL ||
+        t->core->async_abort_hook != ops->abort ||
+        t->core->async_abort_ctx != ctx) {
         return -1;
     }
     t->fw_async_ops = ops;

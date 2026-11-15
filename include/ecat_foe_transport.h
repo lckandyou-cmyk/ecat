@@ -1,4 +1,15 @@
-/** FoE filename/EOF bridge into a shared transport-independent upgrade manager. */
+/**
+ * @file ecat_foe_transport.h
+ * @brief FoE 固件升级专用适配桥 (FoE Bridge into Firmware Upgrade Manager)
+ *
+ * 【架构分层与迁移边界契约】：
+ * - 本组件为既有 EtherCAT FoE 协议层至固件升级管理器 (ecat_upgrade_t) 的专用桥接器；
+ * - 互斥与仲裁保证：通过 upgrade->session_ptr 共享 ecat_upgrade_session_t，与统一传输引擎
+ *   (ecat_transfer_t) 在底层会话租约层完全互斥排他；
+ * - 分阶段迁移边界：当前阶段本适配器保持既有轻量状态机与 ecat_upgrade_t 绑定，不直接并入
+ *   ecat_transfer_t，以确保对原有 Beckhoff SSC / SOES 协议栈及测试套件的 100% 行为兼容；
+ * - 若需多目标双向通用数据传输，请使用统一传输端点 ecat_transport_endpoint_t。
+ */
 #ifndef ECAT_FOE_TRANSPORT_H
 #define ECAT_FOE_TRANSPORT_H
 #include "ecat_upgrade.h"

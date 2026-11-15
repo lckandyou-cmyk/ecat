@@ -8,6 +8,7 @@
 #include "ecat_foe_transport.h"
 #include "ecat_upgrade_file.h"
 #include "ecat_foe_efw.h"
+#include "ecat_foe_core_async.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
@@ -1467,6 +1468,11 @@ int main(void)
         .abort = test_fw_async_abort
     };
     int fw_dummy_ctx = 0;
+    /* 核心未关联或伪造的 fake ops 必须被明确拒绝，防止绕过验签与权限检查 */
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == -1);
+    /* 正确挂钩到 core 的 async_abort_hook 与 async_abort_ctx */
+    core.async_abort_hook = fw_ops.abort;
+    core.async_abort_ctx = &fw_dummy_ctx;
     assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == 0);
     uint8_t fw_staging[256];
     assert(ecat_transfer_set_staging_buffer(&mgr_first, fw_staging, sizeof(fw_staging)) == 0);
@@ -1699,6 +1705,32 @@ int main(void)
     assert(s_async_abort_called == true);
     assert(g_async_io_abort_called == false);
     assert(!async_xfer.active);
+
+    /* 10.8 真实异步固件核心 (ecat_foe_core_async) 鉴权绑定与伪造后端全面防御 */
+    printf("--- 测试 10.8: 真实异步固件核心鉴权绑定与防伪造检查 ---\n");
+    static uint8_t s_real_packet_storage[512];
+    static uint8_t s_real_op_storage[256];
+    ecat_foe_core_async_t real_fw_async_core;
+    assert(ecat_foe_core_async_init(&real_fw_async_core, &core, s_real_packet_storage,
+                                   sizeof(s_real_packet_storage), s_real_op_storage,
+                                   sizeof(s_real_op_storage)) == 0);
+
+    /* 10.8.1: 管理器未关联 core (core == NULL) 时调用必须拒绝 */
+    ecat_transfer_t mgr_no_core;
+    memset(&mgr_no_core, 0, sizeof(mgr_no_core));
+    assert(ecat_transfer_init_async_firmware(&mgr_no_core, ecat_foe_core_async_ops(), &real_fw_async_core) == -1);
+
+    /* 10.8.2: 伪造上下文 ctx 不匹配 core->async_abort_ctx 时必须拒绝 */
+    int fake_fw_ctx = 42;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &fake_fw_ctx) == -1);
+
+    /* 10.8.3: 伪造 abort 回调不匹配 core->async_abort_hook 时必须拒绝 */
+    ecat_upgrade_async_ops_t fake_abort_ops = *ecat_foe_core_async_ops();
+    fake_abort_ops.abort = test_fw_async_abort;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_abort_ops, &real_fw_async_core) == -1);
+
+    /* 10.8.4: 真实已初始化的异步固件核心与合法 ops 绑定成功 */
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &real_fw_async_core) == 0);
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;

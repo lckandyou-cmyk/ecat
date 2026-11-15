@@ -34,12 +34,18 @@
 static ecat_async_op_result_t s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
 static ecat_async_op_result_t e2e_async_start(void *ctx, ecat_async_data_op_t *op)
 {
-    (void)ctx; (void)op;
+    (void)ctx;
+    if (op != NULL) {
+        op->actual_length = op->length;
+    }
     return s_e2e_async_res;
 }
 static ecat_async_op_result_t e2e_async_poll(void *ctx, ecat_async_data_op_t *op)
 {
-    (void)ctx; (void)op;
+    (void)ctx;
+    if (op != NULL) {
+        op->actual_length = op->length;
+    }
     return s_e2e_async_res;
 }
 static void e2e_async_abort(void *ctx) { (void)ctx; }

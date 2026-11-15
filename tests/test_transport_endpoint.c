@@ -98,12 +98,18 @@ static void reset_cb_flags(void)
 static ecat_async_op_result_t s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
 static ecat_async_op_result_t ep_mock_async_start(void *ctx, ecat_async_data_op_t *op)
 {
-    (void)ctx; (void)op;
+    (void)ctx;
+    if (op != NULL) {
+        op->actual_length = op->length;
+    }
     return s_ep_async_next_res;
 }
 static ecat_async_op_result_t ep_mock_async_poll(void *ctx, ecat_async_data_op_t *op)
 {
-    (void)ctx; (void)op;
+    (void)ctx;
+    if (op != NULL) {
+        op->actual_length = op->length;
+    }
     return s_ep_async_next_res;
 }
 static void ep_mock_async_abort(void *ctx) { (void)ctx; }

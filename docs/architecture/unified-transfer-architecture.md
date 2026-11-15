@@ -15,15 +15,16 @@
 ```mermaid
 flowchart TD
     subgraph Transports["传输接入层 (Transports & Endpoints)"]
-        FoE["FoE 工业总线通道\n(ecat_foe_transport)"]
-        File["本地文件流通道\n(File Stream)"]
-        Custom["用户自定义通道\n(UART / CAN / BLE / ...)"]
-        Legacy["旧版兼容接口\n(ecat_upgrade_t Wrapper)"]
+        FoE["FoE 工业总线固件桥接\n(ecat_foe_transport)"]
+        Endpoint["通用传输端点\n(ecat_transport_endpoint_t)"]
+        File["本地文件流适配\n(ecat_upgrade_file)"]
+        Custom["用户自定义通道\n(UART / CAN / ...)"]
+        Legacy["固件升级兼容层\n(ecat_upgrade_t)"]
     end
 
     subgraph Core["权威统一传输核心 (Authoritative Transfer Core)"]
         TransferMgr["双向传输引擎 (ecat_transfer_t)\n- 统一双向 (IMPORT / EXPORT)\n- 统一状态机 (IDLE / PENDING / COMPLETE / ...)\n- 单一持有者令牌 (manager + owner + token)\n- 统一权限矩阵 (ACL Check)"]
-        SharedSession["会话与租约仲裁器 (ecat_upgrade_session_t)"]
+        SharedSession["统一会话仲裁器 (ecat_upgrade_session_t)\n- 跨管理器身份绑定 (manager + owner + token)\n- 全局单一租约排他互斥"]
     end
 
     subgraph Registry["目标与驱动注册中心 (Target Registry)"]
@@ -32,14 +33,15 @@ flowchart TD
 
     subgraph Drivers["后端存储与核心驱动层 (Backends & Drivers)"]
         SyncDrv["同步驱动 (ecat_target_driver_t)\n- 经典阻塞读写/擦除/生效"]
-        AsyncDataDrv["异步数据驱动 (ecat_async_data_driver_t)\n- 真正非阻塞 start / poll / abort"]
-        AsyncFwCore["异步固件核心 (ecat_foe_core_async)\n- EFW 校验 / 签名 / 回读 CRC / 防回滚"]
+        AsyncDataDrv["异步数据驱动 (ecat_async_data_ops_t)\n- 真正非阻塞 start / poll / abort"]
+        AsyncFwCore["真实异步固件核心 (ecat_foe_core_async)\n- 严格关联 core->async_abort_hook/ctx\n- EFW 校验 / 签名 / 回读 CRC / 防回滚"]
     end
 
-    FoE --> TransferMgr
+    FoE --> Legacy
+    Legacy --> SharedSession
+    Endpoint --> TransferMgr
     File --> TransferMgr
-    Custom --> TransferMgr
-    Legacy -.-> TransferMgr
+    Custom --> Endpoint
 
     TransferMgr --> SharedSession
     TransferMgr --> TargetReg
@@ -142,9 +144,10 @@ typedef struct {
   - 若目标标记为 `asynchronous`，但未配置异步 ops 或底层驱动不支持，`begin` 阶段直接拒绝（返回 `ECAT_TRANSFER_ERR_DRIVER_INIT`），绝不静默降级为同步阻塞执行。
 
 ### 3.3 FIRMWARE 固件区块的异步复用契约
-* **核心复用**：
+* **核心复用与强制真实绑定**：
   - 固件升级涉及 EFW 容器解析、Ed25519ph 签名核验、物理回读 CRC32 比对、版本防回滚等关键安全控制。
-  - `ecat_transfer_t` 在处理 FIRMWARE 类型的异步目标时，**直接复用既有的 `ecat_foe_core_async_t` 引擎**。
+  - `ecat_transfer_t` 在处理 FIRMWARE 类型的异步目标时，**必须直接复用既有的 `ecat_foe_core_async_t` 引擎**。
+  - **防伪造 Backend 校验契约**：在 `ecat_transfer_init_async_firmware` 中强制核验 `t->core != NULL && t->core->async_abort_hook == ops->abort && t->core->async_abort_ctx == ctx`。若传入未通过真实核心初始化的伪造 ops，立即返回 -1 拒绝，确保验签、权限与安全生命周期绝不被旁路绕过。
 * **防止双重租约与状态冲突**：
   - 严禁为同一个底层 Core 创建第二个独立的租约管理器。`ecat_transfer_t` 通过 `core->shared_session` 与底层状态机联动。
   - 若升级异常中止或取消，`ecat_transfer_cancel` 自动串联调用 `ecat_foe_core_async_abort`，确保目标驱动与验签上下文一次性干净释放。
@@ -176,12 +179,19 @@ typedef struct {
 
 ### 5.2 兼容层与分阶段平滑迁移边界 (Compatibility & Boundaries)
 为确保现有测试与调用方 100% 不破坏：
-1. **现有默认 FoE 行为**：
-   - 现有的 `ecat_foe_transport` 及其端到端测试保持完全兼容，同步调用路径 0 开销、0 行为变动。
-2. **旧版 `ecat_upgrade_t` 接口**：
-   - 保持全部公开头文件定义不变。
-   - 内部消除重复的 session 检查逻辑，与统一核心共享仲裁。
-3. **真实硬件边界声明**：
+1. **统一会话仲裁核心 (Authoritative Session Core)**：
+   - `ecat_upgrade_session_t` 为全系统唯一的会话租约仲裁器，跨管理器（`ecat_transfer_t` 与 `ecat_upgrade_t`）、跨传输通道（FoE、文件、自定义通道）实现严格的互斥与所有权绑定。
+   - 杜绝双重租约与跨管理器非法取消：非持有者无法释放或操作其他管理器的激活租约。
+2. **FoE 固件升级专用适配桥 (`ecat_foe_transport.c`) 与分阶段迁移边界**：
+   - **当前状态**：`ecat_foe_transport` 保留作为 Beckhoff SSC / SOES 协议栈至固件升级管理器 `ecat_upgrade_t` 的轻量专用适配桥，内部直接调用 `ecat_upgrade_begin` / `ecat_upgrade_write` 等 API；
+   - **互斥边界**：它与统一传输引擎 `ecat_transfer_t` 在底层共享会话层（`upgrade->session_ptr`）达成排他互斥，即当 `ecat_transfer_t` 操作时 FoE 无法侵入，反之亦然；但 FoE 自身状态机尚未并入 `ecat_transfer_t`；
+   - **设计考量**：这是经过深思熟虑的阶段性架构边界，旨在保证现有 SOES、SSC 以及 Bootloader 的集成测试 100% 稳定运行且行为零回归；
+   - **通用传输接入**：所有通用多目标、双向（导入与导出）、同步与真正异步数据传输通道，均通过 `ecat_transport_endpoint_t` 接入统一引擎 `ecat_transfer_t`；
+   - **未来阶段规划**：在后续版本中，规划将 `ecat_foe_transport` 的底层回调完全映射为委托 `ecat_transport_endpoint_t`，完成传输端点的终极单点收拢。
+3. **真实固件核心安全复用契约**：
+   - 固件异步传输通过 `ecat_transfer_init_async_firmware` 强制绑定真实固件核心（`core->async_abort_hook == ops->abort && core->async_abort_ctx == ctx`）；
+   - 严格杜绝伪造 backend 绕过 Ed25519ph 验签、版本防回滚、EFW 头部核验与硬件写入生命周期。
+4. **真实硬件边界声明**：
    - 本项目交付物包含通用接口、统一核心、端点适配器、Mock 验证与真实 SOES/Monocypher 宿主集成测试。
    - **明确边界**：本项目未虚构真实 UART/CAN 硬件寄存器驱动，尚未在真实物理 32 位 MCU 硬件上进行动态在线升级联调，真实硬件部署时需挂载对应芯片的外设驱动。
 

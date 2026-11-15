@@ -1,3 +1,11 @@
+/*
+ * FoE 固件升级专用适配器实现
+ *
+ * 架构说明与迁移边界:
+ * 本实现为现有 EtherCAT FoE 固件升级调用栈提供专用桥接，直接调用 ecat_upgrade_begin 等 API。
+ * 它与全系统统一双向传输核心 (ecat_transfer_t) 在会话仲裁层 (ecat_upgrade_session_t) 达成排他互斥。
+ * 当前阶段保留独立状态机以确保 SOES/SSC 零回归，通用传输通道请通过 ecat_transport_endpoint_t 接入。
+ */
 #include "ecat_foe_transport.h"
 #include <string.h>
 
