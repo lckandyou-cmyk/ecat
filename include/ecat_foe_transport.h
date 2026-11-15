@@ -24,9 +24,14 @@ typedef struct {
     ecat_transfer_t *transfer;    /**< 权威统一双向传输管理器 (统一核心模式) */
     uint64_t token;
     bool pending;
+    bool begin_pending;           /**< 标记当前正在进行 begin 异步等待 */
     bool finish_after_write;
     bool finishing;
     bool committed;
+    const uint8_t *staged_data;   /**< 首包异步暂存数据指针 */
+    size_t staged_length;         /**< 首包异步暂存数据长度 */
+    bool staged_more_data;        /**< 首包后续数据标志 */
+    bool has_staged_packet;       /**< 是否包含暂存的首包数据 */
 } ecat_foe_transport_t;
 
 /* Initialize once; address is the stable owner identity, so do not copy it. */

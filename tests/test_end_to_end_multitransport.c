@@ -156,7 +156,8 @@ static ecat_async_op_result_t e2e_async_poll(void *ctx, ecat_async_data_op_t *op
     }
     return s_e2e_async_res;
 }
-static void e2e_async_abort(void *ctx) { (void)ctx; }
+static unsigned s_e2e_async_aborts = 0U;
+static void e2e_async_abort(void *ctx) { (void)ctx; s_e2e_async_aborts++; }
 
 int port_get_version_floor(uint16_t id, uint32_t *v)
 {
@@ -330,6 +331,11 @@ int main(void)
     core_cfg.targets[0].write_unit = 8U;
     core_cfg.targets[0].driver = &mcu_desc.driver.io;
     core_cfg.targets[0].user_ctx = NULL;
+    core_cfg.targets[1].enabled = true;
+    core_cfg.targets[1].max_payload_size = 512U * 1024U;
+    core_cfg.targets[1].write_unit = 8U;
+    core_cfg.targets[1].driver = &mcu_desc.driver.io;
+    core_cfg.targets[1].user_ctx = NULL;
     assert(ecat_foe_core_init(&core, &core_cfg) == 0);
 
     ecat_transfer_t mgr;
@@ -794,6 +800,105 @@ int main(void)
     assert(ecat_foe_transport_start(&foe_tr, fw_buf + 100U, 80U, false) == ECAT_UPGRADE_ASYNC_COMPLETE);
     assert(foe_tr.committed == true);
     assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.7: 真实 SSC 协议回调验证 FoE 适配器 pending begin、首包 BUSY 握手时序 */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.7: 真实 SSC 协议栈回调验证 pending begin、首包 BUSY 与重复 WRQ ---\n");
+    ecat_target_desc_t fpga_desc;
+    memset(&fpga_desc, 0, sizeof(fpga_desc));
+    fpga_desc.target_id = 2U;
+    strncpy(fpga_desc.name, "fpga_async", sizeof(fpga_desc.name));
+    fpga_desc.type = ECAT_TARGET_TYPE_DATA;
+    fpga_desc.permissions = ECAT_PERM_WRITE;
+    fpga_desc.max_size = 512U * 1024U;
+    fpga_desc.enabled = true;
+    fpga_desc.asynchronous = true;
+    fpga_desc.driver.async_ops = &e2e_async_ops;
+    assert(ecat_target_registry_add(&reg, &fpga_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 1U, 2U, ECAT_PERM_WRITE) == 0);
+
+    ecat_foe_ssc_adapter_t ssc_adp;
+    ecat_foe_ssc_async_t ssc_gate;
+    uint8_t ssc_storage[128];
+    ecat_foe_ssc_init_async(&ssc_adp, &core, &ssc_gate);
+    assert(ecat_foe_ssc_async_init(&ssc_gate, ecat_foe_transport_async_ops(), &ssc_adp.transport,
+                                   ssc_storage, sizeof(ssc_storage), 100U, 0x8007U,
+                                   ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+    assert(ecat_foe_ssc_bind_transfer(&ssc_adp, &mgr) == 0);
+
+    const char *wrq_fpga = "DRIVE_SERVO_FPGA_V1.0.0.0.efw";
+
+    /* D3.7.1: pending begin 下重复 WRQ，验证前次会话被安全 abort 并重新获取新租约 */
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    s_e2e_async_aborts = 0U;
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ssc_adp.session_active == true);
+    assert(ssc_adp.transport.begin_pending == true);
+    assert(ssc_adp.transport.pending == true);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    uint64_t tok1 = ssc_adp.transport.token;
+    assert(tok1 != 0U);
+
+    /* 重复 WRQ 到达: 必须安全 abort 前次底层会话并重新 begin 建立新租约 */
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(s_e2e_async_aborts == 1U);
+    assert(ssc_adp.transport.begin_pending == true);
+    assert(ssc_adp.transport.token != tok1);
+    assert(ecat_transfer_is_active(&mgr) == true);
+
+    /* D3.7.2: pending begin 期间调用 abort，验证会话彻底释放且无租约泄漏 */
+    ecat_foe_ssc_on_abort(&ssc_adp, 0);
+    assert(s_e2e_async_aborts == 2U);
+    assert(ssc_adp.session_active == false);
+    assert(ssc_adp.transport.pending == false);
+    assert(ssc_adp.transport.begin_pending == false);
+    assert(ecat_foe_transport_owns(&ssc_adp.transport) == false);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* 租约释放后，其它端点可无障碍占用 (此时 s_e2e_async_res 为 PENDING，故返回 PENDING 表明租约已成功获取而非 BUSY 阻断) */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D3.7.3: pending begin -> 首包到达返回 BUSY (0x8007) -> 延迟重试 -> 轮询推进 -> 写入与 finish */
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_foe_ssc_on_write(&ssc_adp, wrq_fpga, strlen(wrq_fpga), 0) == 0U);
+    assert(ssc_adp.transport.begin_pending == true);
+
+    uint8_t packet1[32];
+    memset(packet1, 0x33, sizeof(packet1));
+    uint32_t ssc_tick = 1000U;
+
+    /* 首包到达: 此时底层处于 pending begin，必须向协议栈返回 BUSY (0x8007) 且首包被暂存 */
+    uint16_t d1_code = ecat_foe_ssc_on_data_following(&ssc_adp, packet1, sizeof(packet1), true, ssc_tick++);
+    assert(d1_code == 0x8007U);
+    assert(ssc_adp.transport.has_staged_packet == true);
+    assert(ssc_gate.pending == true);
+
+    /* 主站重发首包 (数据一致): 门控依然拦截并回复 BUSY */
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, packet1, sizeof(packet1), true, ssc_tick++) == 0x8007U);
+
+    /* 底层驱动就绪完成 */
+    s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+
+    /* 从站主循环轮询: 推进 begin 完成并自动触发暂存首包写入落盘 */
+    uint16_t main_res = ecat_foe_ssc_on_main_loop(&ssc_adp, ssc_tick++);
+    assert(main_res == 0U);
+    assert(ssc_gate.completed == true);
+    assert(ssc_gate.pending == false);
+
+    /* 主站再次重传首包 (此时首包已成功落盘): 门控完成重试握手并返回 0 (ACK) */
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, packet1, sizeof(packet1), true, ssc_tick++) == 0U);
+
+    /* 发送第 2 包 (末包，32 字节，more_data = false): 触发 finish 提交并成功关闭会话 */
+    uint8_t packet2[32];
+    memset(packet2, 0x44, sizeof(packet2));
+    assert(ecat_foe_ssc_on_data_following(&ssc_adp, packet2, sizeof(packet2), false, ssc_tick++) == 0U);
+    assert(ssc_adp.transport.committed == true);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
 }

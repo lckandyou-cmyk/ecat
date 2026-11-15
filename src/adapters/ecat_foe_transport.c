@@ -71,8 +71,13 @@ void ecat_foe_transport_abort(void *ctx)
         }
     }
     t->pending = false;
+    t->begin_pending = false;
     t->finish_after_write = false;
     t->finishing = false;
+    t->has_staged_packet = false;
+    t->staged_data = NULL;
+    t->staged_length = 0U;
+    t->staged_more_data = false;
 }
 
 int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t length)
@@ -106,9 +111,11 @@ int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t l
         ecat_transfer_result_t tres = ecat_transfer_begin(t->transfer, t, &req, &t->token);
         if (tres == ECAT_TRANSFER_PENDING) {
             t->pending = true;
+            t->begin_pending = true;
             return 0;
         } else if (tres == ECAT_TRANSFER_COMPLETE) {
             t->pending = false;
+            t->begin_pending = false;
             return 0;
         } else {
             return ECAT_FOE_ERRCODE_NOTDEFINED;
@@ -159,7 +166,48 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
     size_t length, bool more_data)
 {
     ecat_foe_transport_t *t = (ecat_foe_transport_t *)ctx;
-    if (!ecat_foe_transport_owns(t) || t->pending) return ECAT_UPGRADE_ASYNC_FAILED;
+    if (t == NULL || !ecat_foe_transport_owns(t)) return ECAT_UPGRADE_ASYNC_FAILED;
+
+    if (t->begin_pending) {
+        if (t->transfer != NULL) {
+            ecat_transfer_result_t poll_res = ecat_transfer_poll(t->transfer, t, t->token);
+            if (poll_res == ECAT_TRANSFER_PENDING) {
+                /* begin 阶段尚未完成：暂存首包并向协议栈返回 PENDING，由 SSC 异步门向主站回复 BUSY */
+                t->staged_data = data;
+                t->staged_length = length;
+                t->staged_more_data = more_data;
+                t->has_staged_packet = true;
+                t->pending = true;
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            } else if (poll_res == ECAT_TRANSFER_COMPLETE) {
+                t->begin_pending = false;
+                t->pending = false;
+                /* begin 已顺利就绪，顺畅进入下方首包数据写入 */
+            } else {
+                ecat_foe_transport_abort(t);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+        } else {
+            ecat_upgrade_result_t upg_poll = ecat_upgrade_poll(t->upgrade, t, t->token);
+            if (upg_poll == ECAT_UPGRADE_PENDING) {
+                t->staged_data = data;
+                t->staged_length = length;
+                t->staged_more_data = more_data;
+                t->has_staged_packet = true;
+                t->pending = true;
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            } else if (upg_poll == ECAT_UPGRADE_COMPLETE) {
+                t->begin_pending = false;
+                t->pending = false;
+            } else {
+                ecat_foe_transport_abort(t);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+        }
+    } else if (t->pending) {
+        return ECAT_UPGRADE_ASYNC_FAILED;
+    }
+
     t->finish_after_write = !more_data;
     t->finishing = false;
 
@@ -198,6 +246,55 @@ ecat_upgrade_async_result_t ecat_foe_transport_poll(void *ctx)
 {
     ecat_foe_transport_t *t = (ecat_foe_transport_t *)ctx;
     if (t == NULL || !t->pending || !ecat_foe_transport_owns(t)) return ECAT_UPGRADE_ASYNC_FAILED;
+
+    if (t->begin_pending) {
+        if (t->transfer != NULL) {
+            ecat_transfer_result_t res = ecat_transfer_poll(t->transfer, t, t->token);
+            if (res == ECAT_TRANSFER_PENDING) {
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            } else if (res == ECAT_TRANSFER_COMPLETE) {
+                t->begin_pending = false;
+                t->pending = false;
+                if (!t->has_staged_packet) {
+                    return ECAT_UPGRADE_ASYNC_COMPLETE;
+                }
+                /* 存在暂存的首包数据，在 begin 就绪后自动无缝触发首包写入 */
+                const uint8_t *data = t->staged_data;
+                size_t length = t->staged_length;
+                bool more_data = t->staged_more_data;
+                t->has_staged_packet = false;
+                t->staged_data = NULL;
+                t->staged_length = 0U;
+                t->staged_more_data = false;
+                return ecat_foe_transport_start(t, data, length, more_data);
+            } else {
+                ecat_foe_transport_abort(t);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+        } else {
+            ecat_upgrade_result_t ures = ecat_upgrade_poll(t->upgrade, t, t->token);
+            if (ures == ECAT_UPGRADE_PENDING) {
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            } else if (ures == ECAT_UPGRADE_COMPLETE) {
+                t->begin_pending = false;
+                t->pending = false;
+                if (!t->has_staged_packet) {
+                    return ECAT_UPGRADE_ASYNC_COMPLETE;
+                }
+                const uint8_t *data = t->staged_data;
+                size_t length = t->staged_length;
+                bool more_data = t->staged_more_data;
+                t->has_staged_packet = false;
+                t->staged_data = NULL;
+                t->staged_length = 0U;
+                t->staged_more_data = false;
+                return ecat_foe_transport_start(t, data, length, more_data);
+            } else {
+                ecat_foe_transport_abort(t);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+        }
+    }
 
     if (t->transfer != NULL) {
         ecat_transfer_result_t res = ecat_transfer_poll(t->transfer, t, t->token);
