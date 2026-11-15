@@ -37,6 +37,9 @@ static ecat_async_op_result_t e2e_async_start(void *ctx, ecat_async_data_op_t *o
     (void)ctx;
     if (op != NULL) {
         op->actual_length = op->length;
+        if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+            op->erased_end = op->need_end;
+        }
     }
     return s_e2e_async_res;
 }
@@ -45,6 +48,9 @@ static ecat_async_op_result_t e2e_async_poll(void *ctx, ecat_async_data_op_t *op
     (void)ctx;
     if (op != NULL) {
         op->actual_length = op->length;
+        if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+            op->erased_end = op->need_end;
+        }
     }
     return s_e2e_async_res;
 }

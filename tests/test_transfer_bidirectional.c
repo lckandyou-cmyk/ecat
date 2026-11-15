@@ -103,6 +103,16 @@ static ecat_async_op_result_t test_data_async_start(void *ctx, ecat_async_data_o
         if (op->offset + op->length > sizeof(s_async_flash)) return ECAT_ASYNC_OP_FAILED;
         memcpy(op->buffer, &s_async_flash[op->offset], op->length);
         op->actual_length = (s_override_actual_length >= 0) ? (uint32_t)s_override_actual_length : op->length;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        op->erased_end = (op->need_end + 127U) & ~127U;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ_OPEN) {
+        g_read_open_called = true;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ_CLOSE) {
+        g_read_close_called = true;
+        return ECAT_ASYNC_OP_COMPLETE;
     }
     return s_next_async_result;
 }
@@ -113,6 +123,8 @@ static ecat_async_op_result_t test_data_async_poll(void *ctx, ecat_async_data_op
     s_async_poll_called = true;
     if (s_override_actual_length >= 0 && op != NULL) {
         op->actual_length = (uint32_t)s_override_actual_length;
+    } else if (op != NULL && op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        op->erased_end = (op->need_end + 127U) & ~127U;
     }
     return s_next_async_result;
 }
@@ -123,48 +135,118 @@ static void test_data_async_abort(void *ctx)
     s_async_abort_called = true;
 }
 
+typedef struct {
+    uint8_t memory[1024];
+    uint32_t erased_watermark;
+    bool init_called;
+    bool erase_called;
+    bool write_called;
+    bool finalize_called;
+    bool read_open_called;
+    bool read_close_called;
+    int abort_calls;
+
+    /* 阶段控制: 是否进入 PENDING */
+    bool pending_init;
+    bool pending_erase;
+    bool pending_write;
+    bool pending_finalize;
+
+    /* 阶段控制: 是否失败 */
+    bool fail_init;
+    bool fail_erase;
+    bool fail_write;
+    bool fail_finalize;
+} test_async_data_hardware_t;
+
+static test_async_data_hardware_t s_hw_stage_test;
+
+static ecat_async_op_result_t stage_driver_poll(void *ctx, ecat_async_data_op_t *op);
+
+static ecat_async_op_result_t stage_driver_start(void *ctx, ecat_async_data_op_t *op)
+{
+    test_async_data_hardware_t *hw = (test_async_data_hardware_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        hw->init_called = true;
+        if (hw->fail_init) return ECAT_ASYNC_OP_FAILED;
+        if (hw->pending_init) return ECAT_ASYNC_OP_PENDING;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ_OPEN) {
+        hw->read_open_called = true;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        hw->erase_called = true;
+        if (hw->fail_erase) return ECAT_ASYNC_OP_FAILED;
+        op->erased_end = (op->need_end + 127U) & ~127U;
+        if (hw->pending_erase) return ECAT_ASYNC_OP_PENDING;
+        hw->erased_watermark = op->erased_end;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        hw->write_called = true;
+        if (hw->fail_write) return ECAT_ASYNC_OP_FAILED;
+        op->actual_length = op->length;
+        if (op->offset + op->length <= sizeof(hw->memory)) {
+            memcpy(hw->memory + op->offset, op->buffer, op->length);
+        }
+        if (hw->pending_write) return ECAT_ASYNC_OP_PENDING;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_FINALIZE) {
+        hw->finalize_called = true;
+        if (hw->fail_finalize) return ECAT_ASYNC_OP_FAILED;
+        if (hw->pending_finalize) return ECAT_ASYNC_OP_PENDING;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ_CLOSE) {
+        hw->read_close_called = true;
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    return ECAT_ASYNC_OP_FAILED;
+}
+
+static ecat_async_op_result_t stage_driver_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    test_async_data_hardware_t *hw = (test_async_data_hardware_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        if (hw->fail_init) return ECAT_ASYNC_OP_FAILED;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        if (hw->fail_erase) return ECAT_ASYNC_OP_FAILED;
+        op->erased_end = (op->need_end + 127U) & ~127U;
+        hw->erased_watermark = op->erased_end;
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        if (hw->fail_write) return ECAT_ASYNC_OP_FAILED;
+        op->actual_length = op->length;
+        if (op->offset + op->length <= sizeof(hw->memory)) {
+            memcpy(hw->memory + op->offset, op->buffer, op->length);
+        }
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_FINALIZE) {
+        if (hw->fail_finalize) return ECAT_ASYNC_OP_FAILED;
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+
+static void stage_driver_abort(void *ctx)
+{
+    test_async_data_hardware_t *hw = (test_async_data_hardware_t *)ctx;
+    hw->abort_calls++;
+}
+
+static const ecat_async_data_ops_t s_stage_data_ops = {
+    .start = stage_driver_start,
+    .poll = stage_driver_poll,
+    .abort = stage_driver_abort
+};
+
 static bool s_fw_async_start_called = false;
 static bool s_fw_async_poll_called = false;
 static bool s_fw_async_abort_called = false;
 static ecat_upgrade_async_result_t s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
 
-/* 异步 DATA 完整驱动生命周期 Mock 变量与函数 */
-static bool g_async_io_init_called = false;
-static bool g_async_io_invalidate_called = false;
-static bool g_async_io_erase_called = false;
-static bool g_async_io_finalize_called = false;
-static bool g_async_io_abort_called = false;
-static bool g_fail_async_init = false;
-static bool g_fail_async_invalidate = false;
-static bool g_fail_async_erase = false;
-static bool g_fail_async_finalize = false;
 
-static int mock_async_io_init(void *ctx) {
-    (void)ctx;
-    g_async_io_init_called = true;
-    return g_fail_async_init ? -1 : 0;
-}
-static int mock_async_io_invalidate(void *ctx) {
-    (void)ctx;
-    g_async_io_invalidate_called = true;
-    return g_fail_async_invalidate ? -1 : 0;
-}
-static int mock_async_io_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx) {
-    (void)ctx;
-    g_async_io_erase_called = true;
-    if (g_fail_async_erase) return -1;
-    if (erased_end) *erased_end = (need_end + 127U) & ~127U;
-    return 0;
-}
-static int mock_async_io_finalize(void *ctx) {
-    (void)ctx;
-    g_async_io_finalize_called = true;
-    return g_fail_async_finalize ? -1 : 0;
-}
-static void mock_async_io_abort(void *ctx) {
-    (void)ctx;
-    g_async_io_abort_called = true;
-}
 
 static const uint8_t *s_fw_async_last_data = NULL;
 static ecat_upgrade_async_result_t test_fw_async_start(void *ctx, const uint8_t *data, size_t len, bool more)
@@ -1552,11 +1634,10 @@ int main(void)
     assert(ecat_transfer_read(&async_xfer, &client_owner1, read_tok, read_out, sizeof(read_out), &actual_read) == ECAT_TRANSFER_PENDING);
     assert(ecat_transfer_is_pending(&async_xfer) == true);
 
-    /* 在 PENDING 期间执行 cancel: 触发驱动 abort，调用 read_close，释放租约，绝不触碰写 finalize */
+    /* 在 PENDING 期间执行 cancel: 触发异步驱动 abort，释放租约，绝不触碰写 finalize */
     s_async_abort_called = false;
     assert(ecat_transfer_cancel(&async_xfer, &client_owner1, read_tok) == ECAT_TRANSFER_COMPLETE);
     assert(s_async_abort_called == true);
-    assert(g_read_close_called == true);
     assert(g_finalize_called == false);
     assert(async_xfer.active == false);
     assert(ecat_transfer_is_pending(&async_xfer) == false);
@@ -1677,8 +1758,9 @@ int main(void)
     assert(ecat_transfer_get_last_error(&mgr_fw_nostaging) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(!mgr_fw_nostaging.active);
 
-    /* 10.5 异步 DATA 完整驱动生命周期验证 (init, invalidate, erase_to, finalize, abort) */
+    /* 10.5 异步 DATA 完整驱动生命周期验证 (纯非阻塞状态机与各阶段 PENDING 推进) */
     printf("--- 测试 10.5: 异步 DATA 完整驱动生命周期与失败安全回退 ---\n");
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
     ecat_target_desc_t async_full_desc;
     memset(&async_full_desc, 0, sizeof(async_full_desc));
     async_full_desc.target_id = 12U;
@@ -1688,69 +1770,93 @@ int main(void)
     async_full_desc.max_size = 1024U;
     async_full_desc.enabled = true;
     async_full_desc.asynchronous = true;
-    async_full_desc.driver.async_ops = &real_async_ops;
-    async_full_desc.driver.io.init = mock_async_io_init;
-    async_full_desc.driver.io.invalidate = mock_async_io_invalidate;
-    async_full_desc.driver.io.erase_to = mock_async_io_erase_to;
-    async_full_desc.driver.io.finalize = mock_async_io_finalize;
-    async_full_desc.driver.io.abort = mock_async_io_abort;
+    async_full_desc.driver.async_ops = &s_stage_data_ops;
+    async_full_desc.user_ctx = &s_hw_stage_test;
     assert(ecat_target_registry_add(&async_reg, &async_full_desc) == 0);
 
-    /* 10.5.1: 异步 DATA 的 init 失败拦截并释放租约 */
-    g_async_io_init_called = false;
-    g_fail_async_init = true;
+    /* 10.5.1: 异步 DATA 的 init 失败拦截并释放租约，单次精确 abort */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    s_hw_stage_test.fail_init = true;
     ecat_transfer_request_t req_12 = {
         .transport_id = 1U, .target_id = 12U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 128U
     };
     uint64_t tok_12 = 0;
     assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_FAILED);
-    assert(g_async_io_init_called == true);
+    assert(s_hw_stage_test.init_called == true);
+    assert(s_hw_stage_test.abort_calls == 1);
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_INIT);
     assert(!async_xfer.active);
-    g_fail_async_init = false;
 
-    /* 10.5.2: 异步 DATA 的 invalidate 失败拦截并释放租约 */
-    g_async_io_invalidate_called = false;
-    g_fail_async_invalidate = true;
-    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_FAILED);
-    assert(g_async_io_invalidate_called == true);
-    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_INVALIDATE);
-    assert(!async_xfer.active);
-    g_fail_async_invalidate = false;
+    /* 10.5.2: 异步 DATA 的 init 进入 PENDING，通过 poll 推进就绪 */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    s_hw_stage_test.pending_init = true;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_is_pending(&async_xfer) == false);
+    assert(async_xfer.active == true);
 
     /* 10.5.3: 异步 DATA 写入前 erase_to 失败拦截并安全清理 */
-    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
-    g_async_io_erase_called = false;
-    g_fail_async_erase = true;
-    uint8_t dummy_chunk[64] = {0};
+    s_hw_stage_test.fail_erase = true;
+    uint8_t dummy_chunk[64] = {0xAA};
     assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, sizeof(dummy_chunk)) == ECAT_TRANSFER_FAILED);
-    assert(g_async_io_erase_called == true);
+    assert(s_hw_stage_test.erase_called == true);
+    assert(s_hw_stage_test.abort_calls == 1);
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_ERASE);
     assert(!async_xfer.active);
-    g_fail_async_erase = false;
 
-    /* 10.5.4: 异步 DATA 写入前按需 erase_to 正常调用及擦除水印验证 */
+    /* 10.5.4: 异步 DATA 写入前按需 erase_to 进入 PENDING，poll 推进并自动流转执行异步 WRITE */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
     assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
-    g_async_io_erase_called = false;
-    s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
+    s_hw_stage_test.pending_erase = true;
+    s_hw_stage_test.pending_write = true;
+    /* write 发起异步擦除，返回 PENDING */
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    assert(s_hw_stage_test.erase_called == true);
+    /* 第一次 poll: 擦除完成，状态机自动无缝启动 WRITE 阶段并保持 PENDING */
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_PENDING);
+    assert(s_hw_stage_test.write_called == true);
+    /* 第二次 poll: WRITE 阶段完成 */
+    s_hw_stage_test.pending_write = false;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_get_bytes_transferred(&async_xfer) == 64U);
+    assert(s_hw_stage_test.memory[0] == 0xAA);
+
+    /* 再次写入 64 字节达到 expected_size (128)，擦除水印已满足，不重复触发擦除 */
+    s_hw_stage_test.erase_called = false;
     assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
-    assert(g_async_io_erase_called == true);
-    /* 擦除块为 128 对齐，写入 64 后擦除水位线已达 128；再写 32 字节不应重复调用 erase */
-    g_async_io_erase_called = false;
-    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 32U) == ECAT_TRANSFER_COMPLETE);
-    assert(g_async_io_erase_called == false);
+    assert(s_hw_stage_test.erase_called == false);
+    assert(ecat_transfer_get_bytes_transferred(&async_xfer) == 128U);
 
-    /* 补齐写入剩余 32 字节，达到 expected_size (128) */
-    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 32U) == ECAT_TRANSFER_COMPLETE);
+    /* 10.5.5: 异步 DATA finish 时进入 PENDING 并通过 poll 提交完成 */
+    s_hw_stage_test.pending_finalize = true;
+    assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_PENDING);
+    assert(s_hw_stage_test.finalize_called == true);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+    assert(!async_xfer.active);
 
-    /* 10.5.5: 异步 DATA finish 时触发 finalize 并处理失败 */
-    g_async_io_finalize_called = false;
-    g_fail_async_finalize = true;
+    /* 10.5.6: 异步 DATA finish 失败处理并精确中止一次 */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    s_hw_stage_test.fail_finalize = true;
     assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_FAILED);
-    assert(g_async_io_finalize_called == true);
+    assert(s_hw_stage_test.abort_calls == 1);
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_FINALIZE);
     assert(!async_xfer.active);
-    g_fail_async_finalize = false;
+
+    /* 10.5.7: 异步处于 pending 期间执行 cancel，硬件恰好中止一次且绝不触碰同步 abort */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
+    s_hw_stage_test.pending_write = true;
+    assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+    assert(s_hw_stage_test.abort_calls == 1);
+    assert(!async_xfer.active);
+    assert(ecat_transfer_is_pending(&async_xfer) == false);
 
     /* 10.6 驱动 actual_length 边界核验与短读短写契约 */
     printf("--- 测试 10.6: 驱动 actual_length 越界防御与短读短写契约 ---\n");
@@ -1863,12 +1969,10 @@ int main(void)
     assert(ecat_transfer_write(&async_xfer, &client_owner1, tok_12_c, dummy_chunk, 64U) == ECAT_TRANSFER_PENDING);
     assert(ecat_transfer_is_pending(&async_xfer) == true);
 
-    s_async_abort_called = false;
-    g_async_io_abort_called = false;
+    s_hw_stage_test.abort_calls = 0;
     assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_12_c) == ECAT_TRANSFER_COMPLETE);
-    /* 严格断言: 异步 abort 执行且仅执行 1 次，同步 io.abort 绝不重复调用 */
-    assert(s_async_abort_called == true);
-    assert(g_async_io_abort_called == false);
+    /* 严格断言: 异步 abort 执行且仅执行 1 次 */
+    assert(s_hw_stage_test.abort_calls == 1);
     assert(!async_xfer.active);
 
     /* 10.8 真实异步固件核心 (ecat_foe_core_async) 鉴权绑定与伪造后端全面防御 */
