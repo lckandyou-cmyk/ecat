@@ -104,7 +104,15 @@ int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t l
         req.fw_version = fw_version;
 
         ecat_transfer_result_t tres = ecat_transfer_begin(t->transfer, t, &req, &t->token);
-        return (tres == ECAT_TRANSFER_COMPLETE || tres == ECAT_TRANSFER_PENDING) ? 0 : ECAT_FOE_ERRCODE_NOTDEFINED;
+        if (tres == ECAT_TRANSFER_PENDING) {
+            t->pending = true;
+            return 0;
+        } else if (tres == ECAT_TRANSFER_COMPLETE) {
+            t->pending = false;
+            return 0;
+        } else {
+            return ECAT_FOE_ERRCODE_NOTDEFINED;
+        }
     } else {
         ecat_upgrade_request_t request;
         request.target_id = target_id;

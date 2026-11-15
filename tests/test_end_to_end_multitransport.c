@@ -697,7 +697,103 @@ int main(void)
     assert(sig_verifier.abort_calls > 0U);
     assert(ecat_transfer_is_active(&mgr) == false);
     fclose(tmp_fp);
+    core.cfg.signature_verify_enable = false;
+    sig_verifier.fail_finish = false;
 
+    /* ---------------------------------------------------------------------- */
+    /* D3.5: 异步 begin PENDING 生命周期、step 推进与防租约泄漏验证            */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.5: 文件流适配器异步 begin PENDING 生命周期与防租约泄漏 ---\n");
+    ecat_upgrade_request_t upg_async_data_req = { .target_id = 5U, .fw_version = 0U };
+    uint8_t async_file_data[128];
+    memset(async_file_data, 0x33, sizeof(async_file_data));
+    tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(async_file_data, 1U, sizeof(async_file_data), tmp_fp) == sizeof(async_file_data));
+    rewind(tmp_fp);
+
+    /* D3.5.1: 异步驱动 INIT 返回 PENDING 时，begin 必须返回 PENDING 并正确激活 active/pending */
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_UPGRADE_PENDING);
+    assert(file_tr.active == true);
+    assert(file_tr.pending == true);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    assert(ecat_transfer_is_pending(&mgr) == true);
+    /* 互斥阻断验证: pending begin 期间其它通道被 BUSY 拦截 */
+    assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
+
+    /* D3.5.2: 在 pending begin 期间调用 cancel，必须安全释放租约，杜绝租约泄漏 */
+    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    assert(file_tr.active == false);
+    assert(file_tr.pending == false);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    /* 释放后冲突消除，其它通道可立即占用 */
+    assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_foe);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D3.5.3: 重新发起 begin PENDING，并通过 step 推进就绪与数据写入 */
+    rewind(tmp_fp);
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_UPGRADE_PENDING);
+    assert(file_tr.active == true);
+    assert(file_tr.pending == true);
+
+    /* step 推进: 驱动仍 pending 时 step 返回 PENDING */
+    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    assert(file_tr.pending == true);
+
+    /* 驱动完成 INIT/INVALIDATE */
+    s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    assert(file_tr.pending == false); /* begin 轮询完成，就绪态 */
+
+    /* 继续 step 循环直到文件传输完成 */
+    f_step_res = ECAT_UPGRADE_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
+        f_step_res = ecat_upgrade_file_step(&file_tr);
+    }
+    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    fclose(tmp_fp);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.6: FoE 适配器直连统一核心完整流程、abort 释放与会话互斥消除验证      */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.6: FoE 适配器直连统一核心完整流程与 abort 释放 ---\n");
+    ecat_foe_transport_t foe_tr;
+    assert(ecat_foe_transport_init_transfer(&foe_tr, &mgr) == 0);
+    const char *wrq_name = "DRIVE_SERVO_MCU_V1.0.0.0.efw";
+
+    /* D3.6.1: FoE begin 成功接收，会话激活并排他独占 */
+    assert(ecat_foe_transport_begin(&foe_tr, wrq_name, strlen(wrq_name)) == 0);
+    assert(ecat_foe_transport_owns(&foe_tr) == true);
+    assert(ecat_transfer_is_active(&mgr) == true);
+
+    /* 互斥阻断: 其它端点此时无法 begin */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_BUSY);
+
+    /* D3.6.2: 中途调用 abort，安全取消会话并释放租约 */
+    ecat_foe_transport_abort(&foe_tr);
+    assert(foe_tr.pending == false);
+    assert(ecat_foe_transport_owns(&foe_tr) == false);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* 释放后冲突消除，其它通道可立即占用 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D3.6.3: 重新发起 FoE begin，分块传输完整固件包并提交成功 */
+    assert(ecat_foe_transport_begin(&foe_tr, wrq_name, strlen(wrq_name)) == 0);
+    assert(ecat_foe_transport_owns(&foe_tr) == true);
+    /* 写入第 1 块 100 字节 (more_data = true) */
+    assert(ecat_foe_transport_start(&foe_tr, fw_buf, 100U, true) == ECAT_UPGRADE_ASYNC_COMPLETE);
+    assert(foe_tr.committed == false);
+    /* 写入第 2 块 80 字节 (总计 180 字节，more_data = false，自动触发 finish 提交) */
+    assert(ecat_foe_transport_start(&foe_tr, fw_buf + 100U, 80U, false) == ECAT_UPGRADE_ASYNC_COMPLETE);
+    assert(foe_tr.committed == true);
+    assert(ecat_transfer_is_active(&mgr) == false);
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
 }

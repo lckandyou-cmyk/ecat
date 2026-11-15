@@ -62,6 +62,16 @@ ecat_upgrade_result_t ecat_upgrade_file_begin(ecat_upgrade_file_t *f,
         result = ecat_upgrade_begin(f->upgrade, f, request, &f->token);
     }
 
+    if (result == ECAT_UPGRADE_PENDING) {
+        f->stream = stream;
+        f->active = true;
+        f->pending = true;
+        f->ending = false;
+        f->io_error = false;
+        f->result = ECAT_UPGRADE_PENDING;
+        return ECAT_UPGRADE_PENDING;
+    }
+
     if (result != ECAT_UPGRADE_COMPLETE) return result;
     f->stream = stream;
     f->active = true;
