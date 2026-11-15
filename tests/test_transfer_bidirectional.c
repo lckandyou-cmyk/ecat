@@ -3772,6 +3772,340 @@ int main(void)
         printf("  [PASS] 统一传输核心暂存区重叠内存防御与单次稳定捕获验证 (5 大路径 20 项场景) 全部通过\n");
     }
 
+    /* ---------------------------------------------------------------------- */
+    /* 10.18 跨层缓冲别名测试 (transfer staging_buf 与 real core packet)      */
+    /* 覆盖前向/后向部分重叠、完全相同与独立缓冲，覆盖立即 COMPLETE 与 PENDING  */
+    /* 逐字节校验真实固件接收、最终 CRC、签名/验收结果与失败不提交状态        */
+    /* ---------------------------------------------------------------------- */
+    {
+        printf("--- 测试 10.18: 跨层缓冲别名 (transfer staging 与 real core packet) 逐字节校验与 CRC 验证 ---\n");
+
+        static ecat_target_registry_t fw_reg;
+        static ecat_target_desc_t fw_target;
+        static ecat_foe_core_t fw_core;
+        static ecat_foe_core_async_t s_fw_sess;
+        static uint8_t s_fw_op[128];
+
+        assert(ecat_target_registry_init(&fw_reg) == 0);
+        memset(&fw_target, 0, sizeof(fw_target));
+        fw_target.target_id = 1U;
+        strncpy(fw_target.name, "firmware_mcu", sizeof(fw_target.name));
+        fw_target.enabled = true;
+        fw_target.type = ECAT_TARGET_TYPE_FIRMWARE;
+        fw_target.permissions = ECAT_PERM_WRITE;
+        fw_target.max_size = sizeof(s_fw_test_flash.flash);
+        fw_target.asynchronous = true;
+        fw_target.driver.io = param_desc.driver.io;
+        assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
+
+        ecat_foe_core_cfg_t fw_cfg;
+        memset(&fw_cfg, 0, sizeof(fw_cfg));
+        fw_cfg.project_name = "DRIVE_SERVO";
+        fw_cfg.project_id = 0x10010001U;
+        fw_cfg.hardware_id = 1U;
+        fw_cfg.local_hw_ver = 1U;
+        fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+        fw_cfg.targets[0].target_id = 1U;
+        fw_cfg.targets[0].enabled = true;
+        fw_cfg.targets[0].asynchronous = true;
+        fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
+        fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
+        fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
+        fw_cfg.targets[0].write_unit = 16U;
+        fw_cfg.targets[0].driver = &param_desc.driver.io;
+        assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
+
+        uint8_t fw_payload[32];
+        memset(fw_payload, 0x5A, sizeof(fw_payload));
+        uint8_t fw_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + 32];
+        size_t efw_len = make_test_efw(fw_efw, fw_payload, sizeof(fw_payload), 1U);
+        assert(efw_len == sizeof(fw_efw));
+
+        ecat_transfer_request_t fw_req = {
+            .transport_id = 1U,
+            .target_id = 1U,
+            .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = (uint32_t)efw_len,
+            .fw_version = 0x01000000U
+        };
+
+        const char *owner = "test_alias_owner";
+        uint64_t token = 0;
+        uint8_t cross_backing[512];
+        uint32_t expected_crc = ecat_foe_crc32_calc(fw_efw, efw_len);
+        ecat_transfer_t mgr;
+
+        /* ------------------------------------------------------------------ */
+        /* Case 1: 前向部分重叠 (staging_buf = &cross[0], packet = &cross[16])*/
+        /* ------------------------------------------------------------------ */
+        /* Case 1.1: 立即完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 0U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* Case 1.2: PENDING 轮询完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 1U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Case 2: 后向部分重叠 (staging_buf = &cross[16], packet = &cross[0])*/
+        /* ------------------------------------------------------------------ */
+        /* Case 2.1: 立即完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 0U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[16], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* Case 2.2: PENDING 轮询完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 1U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[16], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Case 3: 完全相同地址 (staging_buf == packet == &cross[0])           */
+        /* ------------------------------------------------------------------ */
+        /* Case 3.1: 立即完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 0U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* Case 3.2: PENDING 轮询完成路径 */
+        {
+            s_fw_test_flash.poll_pending_count = 1U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Case 4: 独立缓冲 (完全不重叠)                                       */
+        /* ------------------------------------------------------------------ */
+        /* Case 4.1: 立即完成路径 */
+        {
+            uint8_t sep_staging[256];
+            uint8_t sep_packet[256];
+            s_fw_test_flash.poll_pending_count = 0U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, sep_staging, sizeof(sep_staging)) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, sep_packet, sizeof(sep_packet),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* Case 4.2: PENDING 轮询完成路径 */
+        {
+            uint8_t sep_staging[256];
+            uint8_t sep_packet[256];
+            s_fw_test_flash.poll_pending_count = 1U;
+            s_fw_test_flash.valid = false;
+            memset(s_fw_test_flash.flash, 0, sizeof(s_fw_test_flash.flash));
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, sep_staging, sizeof(sep_staging)) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, sep_packet, sizeof(sep_packet),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == expected_crc);
+            ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+            while (fres == ECAT_TRANSFER_PENDING) {
+                fres = ecat_transfer_poll(&mgr, owner, token);
+            }
+            assert(fres == ECAT_TRANSFER_COMPLETE);
+            assert(s_fw_test_flash.valid == true);
+            assert(memcmp(s_fw_test_flash.flash, fw_payload, sizeof(fw_payload)) == 0);
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* Case 5: 失败不提交状态验证 (写入失败时不污染已有的 running_crc32)   */
+        /* ------------------------------------------------------------------ */
+        {
+            s_fw_test_flash.poll_pending_count = 0U;
+            s_fw_test_flash.valid = false;
+            ecat_foe_core_on_abort(&fw_core);
+            fw_core.shared_session = NULL;
+
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            /* 故意传入畸形非法数据 (非合法 EFW 魔数)，导致 core 立即拒绝 */
+            uint8_t bad_data[64];
+            memset(bad_data, 0xFF, sizeof(bad_data));
+            assert(ecat_transfer_write(&mgr, owner, token, bad_data, sizeof(bad_data)) == ECAT_TRANSFER_FAILED);
+            /* 验证失败未提交 CRC 状态 (仍为初始 0) */
+            assert(ecat_transfer_get_crc32(&mgr) == 0U);
+        }
+
+        printf("  [PASS] 跨层缓冲别名逐字节校验与 CRC 验证 (4 拓扑 × 2 路径 + 失败安全) 全部通过\n");
+    }
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

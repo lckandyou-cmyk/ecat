@@ -744,15 +744,20 @@ ecat_transfer_result_t ecat_transfer_write(
             if (t->staging_buf != data && length > 0U) {
                 memmove(t->staging_buf, data, length);
             }
+            /* 在传给下游 ops 之前计算候选 CRC，防范下游 memmove/别名改写 staging_buf 破坏 CRC 计算 */
+            uint32_t candidate_crc = t->running_crc32;
+            ecat_foe_crc32_update(&candidate_crc, t->staging_buf, (uint32_t)length);
+
             ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, t->staging_buf, length, true);
             if (res == ECAT_UPGRADE_ASYNC_PENDING) {
                 t->pending = true;
                 t->stage = ECAT_TRANSFER_STAGE_WRITE;
                 t->pending_length = length;
+                t->pending_crc32 = candidate_crc;
                 return ECAT_TRANSFER_PENDING;
             } else if (res == ECAT_UPGRADE_ASYNC_COMPLETE) {
                 t->current_offset += (uint32_t)length;
-                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)length);
+                t->running_crc32 = candidate_crc;
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
@@ -1185,9 +1190,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->current_offset += (uint32_t)t->pending_length;
-                if (t->staging_buf != NULL && t->pending_length <= t->staging_capacity) {
-                    ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)t->pending_length);
-                }
+                t->running_crc32 = t->pending_crc32;
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 return ECAT_TRANSFER_COMPLETE;
             }

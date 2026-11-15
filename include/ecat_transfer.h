@@ -114,6 +114,7 @@ typedef struct {
     uint8_t *staging_buf;                   /* 调用方提供的固定暂存缓冲区指针 */
     size_t staging_capacity;                /* 暂存缓冲区容量 (字节) */
     size_t pending_length;                  /* 当前 pending 写入或读取的数据长度 */
+    uint32_t pending_crc32;                 /* 待提交候选 CRC32 (防范下游别名改写与失败状态泄漏) */
     uint8_t *user_read_out_buf;             /* READ 异步操作时调用方的接收缓冲区 */
     size_t *user_read_actual;               /* READ 异步操作时传出实际读取字节数的指针 */
     const ecat_upgrade_async_ops_t *fw_async_ops; /* 可选固件异步 ops (针对 FIRMWARE 目标) */
@@ -219,6 +220,13 @@ ecat_transfer_result_t ecat_transfer_cancel(
 
 /**
  * @brief 绑定调用方拥有的固定静态暂存区 (供异步写/读操作使用)
+ *
+ * 【跨层缓冲别名与重叠安全契约】：
+ * - 推荐配置独立的静态缓冲区，或与底层固件核心 packet_storage 使用完全相同首地址 (零冗余拷贝)；
+ * - 即使调用方传入与底层核心 packet 存在部分重叠的切片，transfer 引擎保证在入口处单次稳定捕获
+ *   并预计算候选 CRC，防止下游操作改写暂存区造成 CRC 校验失真，且在失败时不提交状态；
+ * - 严禁在异步操作处于 PENDING 状态时更换缓冲区。
+ *
  * @param t 管理器上下文指针
  * @param buf 缓冲区首地址 (必须非空)
  * @param capacity 缓冲区物理容量 (字节)
