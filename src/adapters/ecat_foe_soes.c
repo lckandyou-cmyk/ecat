@@ -53,10 +53,6 @@ int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t 
 {
     if (adapter == NULL || upgrade == NULL || upgrade->core == NULL || adapter->core != upgrade->core ||
         soes_has_transport(adapter) || adapter->has_staged_wrq) return -1;
-    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-        if (upgrade->core->cfg.targets[i].enabled && upgrade->core->cfg.targets[i].asynchronous)
-            return -1;
-    }
     return ecat_foe_transport_init(&adapter->transport, upgrade);
 }
 

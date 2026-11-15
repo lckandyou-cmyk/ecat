@@ -31,6 +31,7 @@
 #include "ecat_foe_efw.h"
 #include "ecat_foe_core.h"
 #include "ecat_foe_soes.h"
+#include "ecat_foe_target_async.h"
 #include "ecat_target_registry.h"
 #include "ecat_transfer.h"
 #include "mock_driver.h"
@@ -201,6 +202,35 @@ static foe_cfg_t s_foe_cfg = {
     .buffer_size = 256,
     .n_files = 2,
     .files = s_foe_files,
+};
+
+static ecat_foe_target_async_result_t s_dummy_start(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+
+static ecat_foe_target_async_result_t s_dummy_poll(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+
+static void s_dummy_abort(void *ctx)
+{
+    (void)ctx;
+}
+
+static void s_dummy_abort_session(void *ctx)
+{
+    (void)ctx;
+}
+
+static const ecat_foe_target_async_ops_t s_harness_dummy_async_ops = {
+    s_dummy_start,
+    s_dummy_poll,
+    s_dummy_abort,
+    s_dummy_abort_session
 };
 
 static void reset_soes_environment(void)
@@ -2875,6 +2905,106 @@ int main(void)
             ecat_foe_transport_abort(&adapter.transport);
 
             printf("  [PASS] 深度风险 10: 异步目标在 SOES 下前置预检切断与原生 ERR(0x8001) 拦截验证通过 (防假 ACK)\n");
+        }
+
+        /* 深度风险 11: 验证旧接口 ecat_foe_soes_bind_upgrade 亦支持混合目标共存绑定与逐目标按需拦截 */
+        {
+            reset_soes_environment();
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            cfg.targets[0].enabled = true;
+            cfg.targets[0].asynchronous = false;
+            cfg.targets[1].enabled = true;
+            cfg.targets[1].asynchronous = true;
+            cfg.targets[1].max_payload_size = 1024U;
+            cfg.targets[1].driver = &s_harness_drv.driver;
+            cfg.targets[1].async_ops = &s_harness_dummy_async_ops;
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+
+            ecat_foe_soes_adapter_t leg_adp;
+            ecat_foe_soes_init(&leg_adp, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&leg_adp, MBXcontrol, MBX, 4, 128) == 0);
+
+            ecat_upgrade_t leg_upg;
+            assert(ecat_upgrade_init(&leg_upg, &core) == 0);
+
+            /* 关键断言 1: 旧接口 bind_upgrade 允许绑定混合同步与异步目标的 core */
+            assert(ecat_foe_soes_bind_upgrade(&leg_adp, &leg_upg) == 0);
+
+            /* 关键断言 2: 请求同步目标 1 成功返回 ACK(0) */
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].filepass = 0;
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+            assert(ecat_foe_soes_pre_process_hook(&leg_adp, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+            _FOE *ack1 = get_last_outbound_foe();
+            assert(ack1->foeheader.opcode == FOE_OP_ACK);
+            assert(ack1->foeheader.packetnumber == 0);
+            assert(ecat_foe_soes_post_process_hook(&leg_adp, &s_foe_cfg, (const uint8_t *)ack1, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            mock_master_read_outbox();
+
+            /* 主站下发标准 FOE_OP_ERR 报文复位从站回 READY */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)sizeof(_FOEh);
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_ERR;
+            req->foeheader.errorcode = 0x8000;
+            assert(ecat_foe_soes_pre_process_hook(&leg_adp, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            ESC_foeprocess();
+            mock_master_read_outbox();
+
+            /* 关键断言 3: 请求异步目标 2，前置预检切断 n_files = 0，原生 SOES 回复 0x8001，绝不发 ACK */
+            const char *fn_async = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+            s_foe_files[1].name = "SERVO_DRV_FPGA.efw";
+            s_foe_files[1].filepass = 0;
+            s_foe_files[1].write_function = ecat_foe_soes_write_cb;
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_async));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_async, strlen(fn_async));
+            assert(ecat_foe_soes_pre_process_hook(&leg_adp, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_async)) != 0);
+            assert(s_foe_cfg.n_files == 0);
+            ESC_foeprocess();
+            _FOE *err_res = get_last_outbound_foe();
+            assert(err_res->foeheader.opcode == FOE_OP_ERR);
+            assert(err_res->foeheader.errorcode == 0x8001);
+            assert(core.state == ECAT_FOE_STATE_IDLE);
+            mock_master_read_outbox();
+
+            /* 关键断言 4: 重复下发同步目标 1，会话正常自愈建立并回复 ACK(0) */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+            assert(ecat_foe_soes_pre_process_hook(&leg_adp, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu)) == 0);
+            ESC_foeprocess();
+            _FOE *ack2 = get_last_outbound_foe();
+            assert(ack2->foeheader.opcode == FOE_OP_ACK);
+            assert(ack2->foeheader.packetnumber == 0);
+            assert(ecat_foe_soes_post_process_hook(&leg_adp, &s_foe_cfg, (const uint8_t *)ack2, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            mock_master_read_outbox();
+            ecat_foe_transport_abort(&leg_adp.transport);
+
+            printf("  [PASS] 深度风险 11: 旧接口 bind_upgrade 混合目标共存绑定与逐目标切断验证通过\n");
         }
     }
 

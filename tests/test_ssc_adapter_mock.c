@@ -444,6 +444,48 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 14 项测试全部通过 (Mock 环境) <<<\n");
+    /* [TEST 15] 验证旧接口 ecat_foe_ssc_bind_upgrade 亦支持混合目标共存绑定与逐目标按需拒绝 */
+    {
+        printf("[TEST 15] 验证旧接口 bind_upgrade 支持混合目标共存并按需拒绝异步目标...");
+        setup_core_and_adapter(&core, &adapter, 0U);
+        assert(adapter.async_gate == NULL);
+
+        /* 目标 1: 同步固件；目标 2: 异步数据/固件 */
+        core.cfg.targets[0].enabled = true;
+        core.cfg.targets[0].asynchronous = false;
+        core.cfg.targets[1].target_id = 2U;
+        core.cfg.targets[1].enabled = true;
+        core.cfg.targets[1].asynchronous = true;
+        core.cfg.targets[1].max_payload_size = 1024U;
+        core.cfg.targets[1].driver = &s_mock_drv.driver;
+
+        ecat_upgrade_t upgrade;
+        assert(ecat_upgrade_init(&upgrade, &core) == 0);
+
+        /* 关键断言: 纯同步 SSC 适配器通过旧接口 bind_upgrade 绑定混合配置，必须允许绑定成功 (返回 0) */
+        assert(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
+
+        /* 请求同步目标 1: on_write 成功返回 0 */
+        const char *name_sync = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
+        assert(adapter.session_active == true);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(adapter.session_active == false);
+
+        /* 请求异步目标 2: on_write 精准拦截返回 0x8004 */
+        const char *name_async = "SERVO_DRV_FPGA_V1.0.0.0.efw";
+        uint16_t err = ecat_foe_ssc_on_write(&adapter, name_async, (uint16_t)strlen(name_async), 0U);
+        assert(err == ECAT_FOE_SSC_ERR_ILLEGAL);
+        assert(adapter.session_active == false);
+
+        /* 重复下发同步目标 1，会话自愈 */
+        assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
+        assert(adapter.session_active == true);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(adapter.session_active == false);
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 15 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }
