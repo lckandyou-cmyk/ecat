@@ -478,6 +478,122 @@ int main(void)
     CHECK(ecat_upgrade_file_step(&file) == ECAT_UPGRADE_FAILED);
     fclose(stream);
 
+    /* ---------------------------------------------------------------------- */
+    /* 验证 packet_storage 与 operation_storage 部分重叠严格安全拒绝与边界相接 */
+    /* ---------------------------------------------------------------------- */
+    {
+        uint8_t big_payload[256];
+        for (size_t i = 0; i < sizeof(big_payload); i++) big_payload[i] = (uint8_t)(i ^ 0x5A);
+        uint8_t big_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(big_payload)];
+        size_t big_total = make_efw(big_efw, big_payload, sizeof(big_payload));
+        (void)big_total;
+
+        async_flash_t big_flash;
+        memset(&big_flash, 0, sizeof(big_flash));
+        big_flash.immediate = true;
+
+        ecat_foe_core_t test_core;
+        ecat_foe_core_cfg_t test_cfg;
+        memset(&test_cfg, 0, sizeof(test_cfg));
+        test_cfg.project_name = "DRIVE_SERVO";
+        test_cfg.project_id = 0x10010001U;
+        test_cfg.hardware_id = 1U;
+        test_cfg.local_hw_ver = 1U;
+        test_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+        test_cfg.targets[0].target_id = ECAT_FOE_TARGET_MCU;
+        test_cfg.targets[0].enabled = true;
+        test_cfg.targets[0].asynchronous = true;
+        test_cfg.targets[0].async_ops = &flash_ops;
+        test_cfg.targets[0].async_user_ctx = &big_flash;
+        test_cfg.targets[0].max_payload_size = sizeof(big_flash.flash);
+        test_cfg.targets[0].write_unit = 64U; /* 写入单位 64 */
+        CHECK(ecat_foe_core_init(&test_core, &test_cfg) == 0);
+
+        uint8_t shared_arr[512];
+        ecat_foe_core_async_t test_session;
+
+        /* Case 1: 后向部分重叠拒绝 (packet = &shared_arr[0..255], op = &shared_arr[64..127]) */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[0], 256U,
+                                       &shared_arr[64], 64U) == -1);
+
+        /* Case 2: 前向部分重叠拒绝 (packet = &shared_arr[32..287], op = &shared_arr[0..63]) */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[32], 256U,
+                                       &shared_arr[0], 64U) == -1);
+
+        /* Case 3: 完全相同首地址拒绝 (packet = &shared_arr[0], op = &shared_arr[0]) */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[0], 256U,
+                                       &shared_arr[0], 64U) == -1);
+
+        /* Case 4: 包含关系拒绝 (op 落在 packet 内部) */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[0], 256U,
+                                       &shared_arr[100], 64U) == -1);
+
+        /* Case 5: 容量与地址加法溢出安全防御 */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       (uint8_t *)(UINTPTR_MAX - 10U), 20U,
+                                       &shared_arr[0], 64U) == -1);
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[0], 128U,
+                                       (uint8_t *)(UINTPTR_MAX - 10U), 20U) == -1);
+
+        /* Case 6: 边界相接合法放行 (packet = &shared_arr[0..255], op = &shared_arr[256..319]) */
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[0], 256U,
+                                       &shared_arr[256], 64U) == 0);
+        {
+            ecat_upgrade_t test_upg;
+            CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
+            int src = 1;
+            ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+            uint64_t tok = 0;
+            CHECK(ecat_upgrade_begin(&test_upg, &src, &req, &tok) == ECAT_UPGRADE_COMPLETE);
+
+            /* 分块写入完整 EFW 文件 (含大于 op_cap 的 128 字节分块) */
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_UPGRADE_COMPLETE);
+            ecat_upgrade_result_t fin = ecat_upgrade_finish(&test_upg, &src, tok);
+            for (unsigned poll = 0; fin == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
+                fin = ecat_upgrade_poll(&test_upg, &src, tok);
+            CHECK(fin == ECAT_UPGRADE_COMPLETE);
+
+            CHECK(big_flash.valid);
+            CHECK(memcmp(big_flash.flash, big_payload, sizeof(big_payload)) == 0);
+            CHECK(ecat_upgrade_cancel(&test_upg, &src, tok) == ECAT_UPGRADE_STALE);
+        }
+
+        /* Case 7: 反向边界相接合法放行 (op = &shared_arr[0..63], packet = &shared_arr[64..319]) */
+        memset(&big_flash, 0, sizeof(big_flash));
+        big_flash.immediate = true;
+        ecat_foe_core_on_abort(&test_core);
+        CHECK(ecat_foe_core_async_init(&test_session, &test_core,
+                                       &shared_arr[64], 256U,
+                                       &shared_arr[0], 64U) == 0);
+        {
+            ecat_upgrade_t test_upg;
+            CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
+            int src = 1;
+            ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+            uint64_t tok = 0;
+            CHECK(ecat_upgrade_begin(&test_upg, &src, &req, &tok) == ECAT_UPGRADE_COMPLETE);
+
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_UPGRADE_COMPLETE);
+            ecat_upgrade_result_t fin = ecat_upgrade_finish(&test_upg, &src, tok);
+            for (unsigned poll = 0; fin == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
+                fin = ecat_upgrade_poll(&test_upg, &src, tok);
+            CHECK(fin == ECAT_UPGRADE_COMPLETE);
+
+            CHECK(big_flash.valid);
+            CHECK(memcmp(big_flash.flash, big_payload, sizeof(big_payload)) == 0);
+        }
+    }
+
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");
     return 0;
 }

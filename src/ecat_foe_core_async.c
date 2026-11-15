@@ -49,10 +49,24 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *s,
 {
     if (s == NULL || core == NULL || !core->is_configured ||
         packet_storage == NULL || packet_capacity == 0U ||
-        operation_storage == NULL || packet_storage == operation_storage ||
+        operation_storage == NULL ||
         operation_capacity < sizeof(s->readback)) {
         return -1;
     }
+
+    /* 严禁整段交叠，严格防御容量与地址加法溢出 (防止绕过交叠检查) */
+    uintptr_t p_start = (uintptr_t)packet_storage;
+    uintptr_t o_start = (uintptr_t)operation_storage;
+    if (p_start + packet_capacity < p_start ||
+        o_start + operation_capacity < o_start) {
+        return -1;
+    }
+    uintptr_t p_end = p_start + packet_capacity;
+    uintptr_t o_end = o_start + operation_capacity;
+    if (p_start < o_end && o_start < p_end) {
+        return -1;
+    }
+
     memset(s, 0, sizeof(*s));
     s->core = core;
     s->packet = packet_storage;

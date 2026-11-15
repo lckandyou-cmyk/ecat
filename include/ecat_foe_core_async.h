@@ -60,6 +60,16 @@ typedef struct {
     uint8_t readback[64];
 } ecat_foe_core_async_t;
 
+/**
+ * @brief 初始化异步 FoE 核心状态机
+ *
+ * 【存储隔离与重叠安全契约】：
+ * - packet_storage 与 operation_storage 必须是不相交的静态存储，严禁整段交叠
+ *   (包括前向/后向部分重叠、完全相同首地址与包含关系)；
+ * - 允许边界相邻 (如 packet 结尾与 operation 开头相接)；
+ * - 函数内部严格防御容量与地址加法溢出，若发生溢出或区间交叠一律返回 -1 拒绝；
+ * - packet_capacity 必须容纳单个输入分块；operation_capacity 必须覆盖最大写入单位且至少 64 字节。
+ */
 int ecat_foe_core_async_init(ecat_foe_core_async_t *session,
                              ecat_foe_core_t *core,
                              uint8_t *packet_storage,
