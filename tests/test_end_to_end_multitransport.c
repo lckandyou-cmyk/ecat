@@ -25,9 +25,24 @@
 #include "ecat_target_registry.h"
 #include "ecat_transfer.h"
 #include "ecat_foe_efw.h"
+#include "ecat_upgrade.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+
+/* Mock 异步数据驱动 */
+static ecat_async_op_result_t s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+static ecat_async_op_result_t e2e_async_start(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return s_e2e_async_res;
+}
+static ecat_async_op_result_t e2e_async_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    (void)ctx; (void)op;
+    return s_e2e_async_res;
+}
+static void e2e_async_abort(void *ctx) { (void)ctx; }
 
 int port_get_version_floor(uint16_t id, uint32_t *v)
 {
@@ -279,6 +294,91 @@ int main(void)
     uint32_t expected_log_crc = ecat_foe_crc32_calc(s_flash_log, sizeof(s_flash_log));
     assert(ecat_transfer_get_crc32(&mgr) == expected_log_crc);
     assert(ecat_transport_endpoint_finish_export(&ep_can) == ECAT_TRANSFER_COMPLETE);
+
+    /* ---------------------------------------------------------------------- */
+    /* 测试阶段 C: 跨通道会话互斥仲裁、异步挂起阻断与旧升级入口对齐验证     */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试阶段 C: 跨通道会话互斥仲裁、异步挂起阻断与旧升级入口对齐验证 ---\n");
+
+    /* C1: 多通道同步互斥仲裁 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 3U, sizeof(new_params), 0) == ECAT_TRANSFER_COMPLETE);
+    /* UART 处于活动状态，CAN 发起导出必须返回 BUSY */
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
+    /* FoE 端点发起导入也必须返回 BUSY */
+    assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
+
+    /* 初始化旧升级管理器实例并共享 core 会话 */
+    ecat_upgrade_t legacy_upgrade;
+    assert(ecat_upgrade_init(&legacy_upgrade, &core) == 0);
+    ecat_upgrade_request_t upg_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    uint64_t upg_token = 0;
+    /* UART 端点占有会话时，旧升级 begin 必须返回 BUSY */
+    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_BUSY);
+
+    /* UART 端点取消并释放会话 */
+    ecat_transport_endpoint_abort(&ep_uart);
+    assert(ep_uart.current_token == 0U);
+
+    /* C2: 注册异步目标 5，验证真正异步挂起期间全局租约阻断与释放 */
+    ecat_async_data_ops_t e2e_async_ops = {
+        .start = e2e_async_start,
+        .poll = e2e_async_poll,
+        .abort = e2e_async_abort
+    };
+    ecat_target_desc_t async_desc;
+    memset(&async_desc, 0, sizeof(async_desc));
+    async_desc.target_id = 5U;
+    strncpy(async_desc.name, "async_storage", sizeof(async_desc.name));
+    async_desc.type = ECAT_TARGET_TYPE_DATA;
+    async_desc.permissions = ECAT_PERM_RW;
+    async_desc.max_size = 1024U;
+    async_desc.enabled = true;
+    async_desc.asynchronous = true;
+    async_desc.driver.async_ops = &e2e_async_ops;
+    assert(ecat_target_registry_add(&reg, &async_desc) == 0);
+    /* 添加 ACL: UART 允许写 5U */
+    assert(ecat_target_registry_add_acl(&reg, 2U, 5U, ECAT_PERM_WRITE) == 0);
+
+    /* 绑定暂存区 */
+    uint8_t e2e_staging[256];
+    assert(ecat_transfer_set_staging_buffer(&mgr, e2e_staging, sizeof(e2e_staging)) == 0);
+
+    /* UART 发起异步写入 */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_COMPLETE);
+    s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+    uint8_t async_chunk[64];
+    memset(async_chunk, 0x55, sizeof(async_chunk));
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, async_chunk, sizeof(async_chunk)) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* 异步 PENDING 期间，所有其它通道与旧升级接口必须被严格阻断 (BUSY) */
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
+    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_BUSY);
+
+    /* 推进 poll 完成数据写入 */
+    s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+
+    /* 终结提交 */
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ep_uart.current_token == 0U);
+
+    /* C3: 会话释放后，旧升级接口可正常发起并反向互斥 */
+    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_COMPLETE);
+    assert(upg_token != 0);
+
+    /* 旧升级活跃期间，所有新端点发起操作必须被拦截返回 BUSY */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 3U, 16, 0) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
+
+    /* 旧升级 cancel 释放 */
+    assert(ecat_upgrade_cancel(&legacy_upgrade, &legacy_upgrade, upg_token) == ECAT_UPGRADE_COMPLETE);
+
+    /* 释放后新端点可再次正常发起 */
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, &log_size) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_can);
 
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
