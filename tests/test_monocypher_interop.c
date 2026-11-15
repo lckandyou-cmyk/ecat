@@ -1,6 +1,8 @@
 /* Real CLI-to-core Ed25519ph integration; Monocypher is supplied externally.
  * 边界说明: 本测试链接外部固定 Monocypher 4.0.3 密码学库，验证真实私钥签名与端到端密码学公钥验签；
  * 常规单元测试 (如 test_core.c, test_transfer_bidirectional.c) 使用 mock_signature 回调验证状态机与生命周期契约。
+ *
+ * 轮询上限: 所有 while(PENDING) 循环均设 MAX_POLL_ITERS 次数上限，超时即断言失败，防止 CI 挂起。
  */
 #include <assert.h>
 #include <stdint.h>
@@ -17,6 +19,9 @@
 
 #define HEADER_SIZE ECAT_FOE_EFW_HEADER_MIN_LEN
 #define BUFFER_SIZE 4096U
+
+/* 轮询保护: 防止 CI 在驱动回归时因 PENDING 无限循环而挂起 */
+#define MAX_POLL_ITERS 1000
 
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
 {
@@ -147,7 +152,7 @@ static ecat_foe_target_async_result_t async_mono_flash_poll(void *ctx, ecat_foe_
             return ECAT_FOE_TARGET_ASYNC_FAILED;
         memcpy(op->data, f->flash + op->offset, op->length);
         if (f->inject_read_corruption && op->length > 0U) {
-            op->data[0] ^= 0x55U; /* 破坏回读数据，破坏 SHA-512 / 验签散列 */
+            op->data[0] ^= 0x55U; /* 破坏回读数据，触发物理介质回读 CRC32 校验失败 (READBACK_CRC_MISMATCH) */
         }
         break;
     case ECAT_FOE_TARGET_OP_FINALIZE:
@@ -180,6 +185,88 @@ static const ecat_foe_target_async_ops_t s_async_mono_flash_ops = {
     async_mono_flash_abort_session
 };
 
+/* -------------------------------------------------------------------------- */
+/* 可观察验签包装器 (Counted Verifier Wrapper)                                 */
+/* 在真实 Monocypher 验签器之上叠加调用计数，用于断言 Ed25519ph finish 确实被调用 */
+/* -------------------------------------------------------------------------- */
+typedef struct {
+    ecat_foe_monocypher_verifier_t real; /* 必须作为首字段，user_ctx 强转兼容 */
+    unsigned begin_calls;
+    unsigned update_calls;
+    unsigned finish_calls;
+    unsigned abort_calls;
+} counted_verifier_t;
+
+static int counted_begin(const uint8_t *key_id, const uint8_t *signature, void *ctx)
+{
+    counted_verifier_t *cv = (counted_verifier_t *)ctx;
+    cv->begin_calls++;
+    if (cv->real.keys == NULL || key_id == NULL || signature == NULL) return -1;
+    for (size_t i = 0; i < cv->real.key_count; ++i) {
+        if (memcmp(key_id, cv->real.keys[i].key_id, ECAT_FOE_EFW_KEY_ID_LEN) == 0) {
+            memcpy(cv->real.active_public_key, cv->real.keys[i].public_key,
+                   sizeof(cv->real.active_public_key));
+            memcpy(cv->real.signature, signature, sizeof(cv->real.signature));
+            crypto_sha512_init(&cv->real.hash);
+            cv->real.active = true;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int counted_update(const uint8_t *data, size_t len, void *ctx)
+{
+    counted_verifier_t *cv = (counted_verifier_t *)ctx;
+    cv->update_calls++;
+    if (!cv->real.active || (data == NULL && len != 0U)) return -1;
+    crypto_sha512_update(&cv->real.hash, data, len);
+    return 0;
+}
+
+static int counted_finish(void *ctx)
+{
+    counted_verifier_t *cv = (counted_verifier_t *)ctx;
+    cv->finish_calls++;
+    if (!cv->real.active) return -1;
+    uint8_t digest[64];
+    crypto_sha512_final(&cv->real.hash, digest);
+    int result = crypto_ed25519_ph_check(cv->real.signature, cv->real.active_public_key, digest);
+    crypto_wipe(digest, sizeof(digest));
+    crypto_wipe(&cv->real.hash, sizeof(cv->real.hash));
+    crypto_wipe(cv->real.signature, sizeof(cv->real.signature));
+    crypto_wipe(cv->real.active_public_key, sizeof(cv->real.active_public_key));
+    cv->real.active = false;
+    return result; /* 0=通过, 非0=签名无效 → 核心置 SIGNATURE_INVALID */
+}
+
+static void counted_abort(void *ctx)
+{
+    counted_verifier_t *cv = (counted_verifier_t *)ctx;
+    cv->abort_calls++;
+    if (cv->real.active) {
+        crypto_wipe(&cv->real.hash, sizeof(cv->real.hash));
+        crypto_wipe(cv->real.signature, sizeof(cv->real.signature));
+        crypto_wipe(cv->real.active_public_key, sizeof(cv->real.active_public_key));
+        cv->real.active = false;
+    }
+}
+
+static void counted_verifier_init(counted_verifier_t *cv,
+                                  const ecat_foe_trusted_key_t *keys,
+                                  size_t key_count,
+                                  ecat_foe_signature_verifier_t *callbacks)
+{
+    memset(cv, 0, sizeof(*cv));
+    cv->real.keys      = keys;
+    cv->real.key_count = key_count;
+    callbacks->begin    = counted_begin;
+    callbacks->update   = counted_update;
+    callbacks->finish   = counted_finish;
+    callbacks->abort    = counted_abort;
+    callbacks->user_ctx = cv;
+}
+
 static void test_one_cross_layer_alias_case(
     const uint8_t *efw_package,
     size_t efw_size,
@@ -209,9 +296,9 @@ static void test_one_cross_layer_alias_case(
     static mock_driver_t fallback_driver;
     mock_driver_init(&fallback_driver);
 
-    ecat_foe_monocypher_verifier_t verifier = {0};
+    counted_verifier_t verifier;
     ecat_foe_signature_verifier_t callbacks = {0};
-    ecat_foe_monocypher_verifier_init(&verifier, key, 1U, &callbacks);
+    counted_verifier_init(&verifier, key, 1U, &callbacks);
 
     ecat_foe_core_cfg_t cfg = {0};
     cfg.project_name = "INTEROP";
@@ -274,22 +361,20 @@ static void test_one_cross_layer_alias_case(
     for (size_t pos = 0; pos < efw_size;) {
         size_t chunk = (efw_size - pos > 37U) ? 37U : efw_size - pos;
         ecat_transfer_result_t wres = ecat_transfer_write(&mgr, owner, token, send_buf + pos, chunk);
+        int poll_iters = 0;
         while (wres == ECAT_TRANSFER_PENDING) {
+            assert(++poll_iters < MAX_POLL_ITERS && "write poll exceeded limit");
             wres = ecat_transfer_poll(&mgr, owner, token);
         }
-        if (wres != ECAT_TRANSFER_COMPLETE && wres != ECAT_TRANSFER_CONTINUE) {
-            assert(!expect_success);
-            ecat_transfer_cancel(&mgr, owner, token);
-            assert(flash.valid == false);
-            assert(flash.finalize_calls == 0U);
-            assert(flash.abort_calls >= 1U);
-            return;
-        }
+        /* 严禁提前退出：正向、签名篡改、回读损坏用例在写入阶段头部与分块均完整，写入阶段必须成功完成接收 */
+        assert(wres == ECAT_TRANSFER_COMPLETE || wres == ECAT_TRANSFER_CONTINUE);
         pos += chunk;
     }
 
     ecat_transfer_result_t fres = ecat_transfer_finish(&mgr, owner, token);
+    int finish_poll_iters = 0;
     while (fres == ECAT_TRANSFER_PENDING) {
+        assert(++finish_poll_iters < MAX_POLL_ITERS && "finish poll exceeded limit");
         fres = ecat_transfer_poll(&mgr, owner, token);
     }
     if (expect_success) {
@@ -297,17 +382,51 @@ static void test_one_cross_layer_alias_case(
         /* 关键断言 1: 真实 Monocypher Ed25519ph 验签成功并由核心触发 finalize 置位 valid */
         assert(flash.valid == true);
         assert(flash.finalize_calls == 1U);
+        assert(verifier.begin_calls == 1U);
+        assert(verifier.update_calls > 0U);
+        assert(verifier.finish_calls == 1U);
+        assert(verifier.abort_calls == 0U);
+        assert(verifier.real.active == false); /* 验签上下文已完成并安全 wipe */
         /* 关键断言 2: 逐字节比对写入 Flash 的 payload 与签名包完全一致 */
         assert(memcmp(flash.flash, efw_package + HEADER_SIZE, efw_size - HEADER_SIZE) == 0);
         /* 关键断言 3: 传输层 CRC 与预期一致 */
         assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(efw_package, efw_size));
-    } else {
-        /* 篡改用例: 必须严格拒绝，禁止 finalize，禁止置 valid，且必须安全调用 abort */
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK);
+    } else if (tamper_sig) {
+        /* 篡改签名用例: 写入与回读均顺利完成，真实到达 Monocypher finish，由 Ed25519ph 检出无效签名拒绝 */
         assert(fres == ECAT_TRANSFER_FAILED);
         assert(flash.valid == false);
         assert(flash.finalize_calls == 0U);
+        assert(verifier.begin_calls == 1U);
+        assert(verifier.update_calls > 0U);
+        assert(verifier.finish_calls == 1U); /* 证明真正到达并执行了 Ed25519ph finish 密码学校验 */
+        assert(verifier.real.active == false); /* 验签上下文已安全 wipe */
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_SIGNATURE_INVALID);
         assert(flash.abort_calls >= 1U);
+    } else if (inject_read_corruption) {
+        /* 回读损坏用例: 在 finish 阶段回读比对时，由物理介质回读 CRC32 完整性校验优先拦截 */
+        assert(fres == ECAT_TRANSFER_FAILED);
+        assert(flash.valid == false);
+        assert(flash.finalize_calls == 0U);
+        assert(verifier.begin_calls == 1U);
+        assert(verifier.update_calls > 0U);
+        assert(verifier.finish_calls == 0U); /* 因回读 CRC 优先报错，尚未进入 finish 密码学校验 */
+        assert(verifier.abort_calls >= 1U);   /* 失败时安全中止并清理验签会话 */
+        assert(verifier.real.active == false);
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH);
+        assert(flash.abort_calls >= 1U);
+    } else {
+        assert(0 && "unhandled test branch");
     }
+
+    /* 验证会话租约与状态已完全释放：无论成功还是失败，新所有者均可重新获得会话 */
+    const char *new_owner = "test_alias_probe_owner";
+    uint64_t new_token = 0;
+    ecat_transfer_request_t probe_req = req;
+    probe_req.direction = ECAT_TRANSFER_DIR_IMPORT;
+    ecat_transfer_result_t probe_res = ecat_transfer_begin(&mgr, new_owner, &probe_req, &new_token);
+    assert(probe_res == ECAT_TRANSFER_COMPLETE || probe_res == ECAT_TRANSFER_PENDING);
+    ecat_transfer_cancel(&mgr, new_owner, new_token);
 }
 
 int main(int argc, char **argv)
@@ -402,7 +521,7 @@ int main(int argc, char **argv)
     test_one_cross_layer_alias_case(original, size, &key, &cross_backing[0], 256,
                                     &cross_backing[16], 256, 1U, false, true, false);
 
-    /* 5.2 载荷/回读损坏: Flash 回读数据损坏，SHA-512 散列不符拒绝 */
+    /* 5.2 载荷/回读损坏: Flash 回读数据损坏，回读 CRC32 完整性校验拦截 */
     test_one_cross_layer_alias_case(original, size, &key, &cross_backing[0], 256,
                                     &cross_backing[16], 256, 0U, true, false, false);
     test_one_cross_layer_alias_case(original, size, &key, &cross_backing[0], 256,
