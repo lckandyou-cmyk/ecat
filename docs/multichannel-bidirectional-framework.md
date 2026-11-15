@@ -5,16 +5,15 @@
 本框架提供了一套面向资源受限嵌入式系统的面向嵌入式设备的目标注册、同步双向数据传输与固件升级接口。当前以宿主测试为主，硬件验证和部分功能仍待完成。
 
 ```text
-FoE 协议栈 ── FoE 适配器 ──┐
-文件流参考入口 ─────────────┤── ecat_upgrade_t ── 固件核心 ── 固件目标驱动
-                            │          │
-自定义通道 ── 传输端点 ── ecat_transfer_t ── 目标注册表 / ACL
-                              │                     │
-                              ├── 固件核心          └── 数据目标驱动
-                              └── 数据目标驱动
+FoE 协议栈 ── FoE 适配桥 ──┐
+文件流参考入口 ─────────────┤
+自定义总线 ── 传输端点 ───┼── ecat_transfer_t (权威统一核心) ──┬── 固件安全策略机 ── 固件驱动
+                             │    (会话仲裁 / ACL / 同步&异步)    └── 数据驱动 (同步/真正异步)
+遗留固件升级 API (兼容) ────┘            │
+   └── ecat_upgrade_t ───────────────────┘ (共享会话租约仲裁器 ecat_upgrade_session_t)
 ```
 
-同一个固件核心上的升级管理器和双向传输管理器共享会话仲裁；两类入口不是同一个 API。数据导入/导出由自定义端点接入，仓库中的 FoE 和文件流适配器使用升级管理器，不等同于现成的通用数据导入/导出适配器。
+系统以 `ecat_transfer_t` 为唯一的权威调度核心；FoE 协议栈、文件流与自定义端点均可原生直连统一传输核心。旧升级管理器（`ecat_upgrade_t`）作为薄向下兼容层，与统一传输管理器通过全局唯一的 `ecat_upgrade_session_t` 会话仲裁器实现强绑定与排他互斥，避免双重租约与状态撕裂。
 
 ---
 
@@ -121,10 +120,15 @@ ecat_transport_endpoint_finish_import(&uart_ep);
   - 具体的物理外设硬件驱动（如真实的 MCU 片上 UART 硬件中断/DMA 驱动、物理 CAN 现场总线控制器驱动、SPI 外设驱动等）**未内置在当前仓库中**。
   - 架构设计中的 UART、CAN 等通道 ID 属于通道编号规范，单元测试中的 `ep_uart`、`ep_can` 属于通用传输端点接口 (`ecat_transport_endpoint_t`) 的原型验证，实际硬件工程集成时须由集成方根据目标板级芯片 SDK 实现对应外设中断收发回调。
 
-### 5.2 异步传输标志完成度说明 (Asynchronous Flags)
-- **未实现的内容（标为未实现/规划中）**：
-  - 目标描述符 `ecat_target_desc_t` 中的 `asynchronous` 标志目前在双向传输管理器 (`ecat_transfer_t`) 中**尚未实现**。
-  - 当前 `ecat_transfer_t` 使用同步调用模型，不提供异步目标的轮询或调度。旧升级管理器另有异步接口，接入限制见 [SSC 异步说明](architecture/ssc-async-stage1.md)。
+### 5.2 异步传输能力与真实边界说明 (Asynchronous Transfer & Hardware Boundaries)
+- **已实现/已验证的异步能力**：
+  - 目标描述符 `ecat_target_desc_t` 中的 `asynchronous` 标志已在权威双向传输引擎 (`ecat_transfer_t`) 中**完整实现**；
+  - **真正的非阻塞异步 DATA 驱动**：完整支持 `ecat_async_data_ops_t` 接口，覆盖 `INIT -> INVALIDATE -> ERASE_TO -> WRITE -> FINALIZE` 完整写入生命周期，以及 `READ_OPEN -> READ -> READ_CLOSE` 独立只读生命周期，支持 `PENDING` 挂起与 `ecat_transfer_poll` 轮询推进；
+  - **固件异步复用与防伪造绑定**：异步固件导入直接复用真实固件升级核心 (`ecat_foe_core_async_t`)，强制校验后端 ops 绑定有效性，防止伪造 ops 绕过密码学验签；
+  - **通用端点异步支持**：传输端点 (`ecat_transport_endpoint_t`) 支持异步启动挂起 (`begin_pending`)、非阻塞轮询推进以及完成/中止事件单次且仅触发一次的严格保障。
+- **真实硬件与运行时边界如实声明**：
+  - 本仓库未内置具体的物理 MCU 片上外设寄存器驱动（如物理芯片 USART/CAN/SPI 控制器中断收发与 DMA 驱动），实际硬件工程须由集成方挂载芯片外设驱动；
+  - 尚未在真实物理 32 位 MCU 芯片上进行动态在线升级联调，真实硬件投产前须在目标芯片上完成底层驱动移植核验。
 
 ### 5.3 只读生命周期契约与固件容器流上限规范说明 (Readonly Lifecycle & Container Limit)
 - **只读导出生命周期契约 (EXPORT Lifecycle)**：
