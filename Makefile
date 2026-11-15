@@ -164,6 +164,8 @@ test-monocypher:
 	trap 'rm -rf "$$TMP_MONOCYPHER_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -Iexamples/crypto -I"$(MONOCYPHER_DIR)" -I"$(MONOCYPHER_DIR)/optional" \
 		-o "$$TMP_MONOCYPHER_DIR/interop" src/ecat_foe_efw.c src/ecat_foe_core.c \
+		src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c \
+		src/ecat_foe_core_async.c src/ecat_foe_target_async.c \
 		examples/crypto/ecat_foe_monocypher_verifier.c tests/mock_driver.c tests/test_monocypher_interop.c \
 		"$(MONOCYPHER_DIR)/monocypher.c" "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.c" && \
 	$(PYTHON) tests/test_monocypher_interop.py "$$TMP_MONOCYPHER_DIR/interop"
