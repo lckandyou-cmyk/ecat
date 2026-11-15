@@ -312,6 +312,13 @@ int main(void)
     assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
     assert(s_cb_aborted_count == 0);
 
+    /* 在 PENDING 期间重复调用 write_chunk: 必须返回 BUSY，且保留会话、token与激活状态 */
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, sizeof(ep_chunk)) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+    assert(ep_uart.current_token != 0U);
+
     /* 端点 poll 推进: 驱动保持 PENDING 时返回 PENDING */
     assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_PENDING);
     assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
@@ -326,6 +333,13 @@ int main(void)
     s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_PENDING);
     assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* 在 finish PENDING 期间重复调用 finish: 必须返回 BUSY 且保留会话 */
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+    assert(ep_uart.current_token != 0U);
 
     /* poll 推进 finish 终结提交 */
     s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;

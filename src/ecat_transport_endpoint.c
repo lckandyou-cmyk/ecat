@@ -111,6 +111,11 @@ ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
         return res;
     }
 
+    if (res == ECAT_TRANSFER_BUSY) {
+        /* 并发或挂起时重复操作: 保留原操作、会话状态与令牌，直接返回 BUSY */
+        return res;
+    }
+
     if (res == ECAT_TRANSFER_INVALID) {
         /* 可重试参数错误: 保留会话与 IMPORTING 状态，允许调用方更正参数重试或调用 abort 清理 */
         return res;
@@ -154,6 +159,11 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
     if (res == ECAT_TRANSFER_PENDING) {
         /* 异步提交进行中: 标记 finishing，保持 IMPORTING 等待 poll 推进终结 */
         ep->finishing = true;
+        return res;
+    }
+
+    if (res == ECAT_TRANSFER_BUSY) {
+        /* 保持原会话与 finishing 状态 */
         return res;
     }
 
@@ -240,6 +250,11 @@ ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
         return res;
     }
 
+    if (res == ECAT_TRANSFER_BUSY) {
+        /* 保留原导出读取会话与令牌 */
+        return res;
+    }
+
     if (res == ECAT_TRANSFER_INVALID) {
         /* 可重试参数错误: 保留会话与 EXPORTING 状态，允许调用方更正参数重试或调用 abort 清理 */
         return res;
@@ -283,6 +298,11 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_export(
     if (res == ECAT_TRANSFER_PENDING) {
         /* 异步提交进行中: 标记 finishing，保持 EXPORTING 等待 poll 推进终结 */
         ep->finishing = true;
+        return res;
+    }
+
+    if (res == ECAT_TRANSFER_BUSY) {
+        /* 保留原导出终结状态与令牌 */
         return res;
     }
 
