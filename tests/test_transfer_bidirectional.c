@@ -244,6 +244,78 @@ typedef struct {
 
 static foe_staged_upg_mock_t s_mock_staged_upg_ctx;
 
+typedef struct {
+    ecat_async_op_result_t erase_start_res;
+    ecat_async_op_result_t erase_poll_res;
+    ecat_async_op_result_t write_start_res;
+    ecat_async_op_result_t write_poll_res;
+    const uint8_t *observed_write_buf;
+    uint8_t received_payload[128];
+    size_t received_len;
+    unsigned erase_start_calls;
+    unsigned erase_poll_calls;
+    unsigned write_start_calls;
+    unsigned write_poll_calls;
+} test_transfer_overlap_mock_t;
+
+static test_transfer_overlap_mock_t s_tr_overlap_mock;
+
+static ecat_async_op_result_t tr_overlap_start(void *ctx, ecat_async_data_op_t *op)
+{
+    test_transfer_overlap_mock_t *m = (test_transfer_overlap_mock_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_INIT || op->kind == ECAT_ASYNC_DATA_OP_INVALIDATE) {
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        m->erase_start_calls++;
+        op->erased_end = op->need_end;
+        return m->erase_start_res;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        m->write_start_calls++;
+        m->observed_write_buf = op->buffer;
+        m->received_len = op->length;
+        if (op->buffer != NULL && op->length <= sizeof(m->received_payload)) {
+            memcpy(m->received_payload, op->buffer, op->length);
+        }
+        op->actual_length = op->length;
+        return m->write_start_res;
+    }
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+
+static ecat_async_op_result_t tr_overlap_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    test_transfer_overlap_mock_t *m = (test_transfer_overlap_mock_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        m->erase_poll_calls++;
+        op->erased_end = op->need_end;
+        return m->erase_poll_res;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        m->write_poll_calls++;
+        m->observed_write_buf = op->buffer;
+        m->received_len = op->length;
+        if (op->buffer != NULL && op->length <= sizeof(m->received_payload)) {
+            memcpy(m->received_payload, op->buffer, op->length);
+        }
+        op->actual_length = op->length;
+        return m->write_poll_res;
+    }
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+
+static void tr_overlap_abort(void *ctx)
+{
+    (void)ctx;
+}
+
+static const ecat_async_data_ops_t s_tr_overlap_ops = {
+    .start = tr_overlap_start,
+    .poll = tr_overlap_poll,
+    .abort = tr_overlap_abort
+};
+
 static ecat_upgrade_async_result_t foe_staged_upg_start(void *ctx, const uint8_t *data, size_t length, bool more_data) {
     foe_staged_upg_mock_t *m = (foe_staged_upg_mock_t *)ctx;
     (void)more_data;
@@ -433,6 +505,7 @@ typedef struct {
     bool valid;
     bool pending;
     bool fail_finalize;
+    int poll_pending_count;
     int starts;
     int polls;
     int abort_calls;
@@ -447,6 +520,9 @@ static ecat_foe_target_async_result_t fw_flash_start(void *ctx, ecat_foe_target_
     test_flash_async_t *f = (test_flash_async_t *)ctx;
     f->starts++;
     f->pending = true;
+    if (f->poll_pending_count > 0) {
+        return ECAT_FOE_TARGET_ASYNC_PENDING;
+    }
     return fw_flash_poll(ctx, op);
 }
 
@@ -454,6 +530,11 @@ static ecat_foe_target_async_result_t fw_flash_poll(void *ctx, ecat_foe_target_a
 {
     test_flash_async_t *f = (test_flash_async_t *)ctx;
     f->polls++;
+    if (f->poll_pending_count > 0) {
+        f->poll_pending_count--;
+        return ECAT_FOE_TARGET_ASYNC_PENDING;
+    }
+    f->pending = false;
     switch (op->kind) {
     case ECAT_FOE_TARGET_OP_INIT:
         f->erased_watermark = 0U;
@@ -3081,6 +3162,614 @@ int main(void)
             ecat_foe_transport_abort(&foe_tr_upg);
         }
         printf("  [PASS] FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支 8 项场景) 全部通过\n");
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 10.17 统一传输核心暂存区重叠内存防御与单次稳定捕获验证 (5 大全路径覆盖)  */
+    /* ---------------------------------------------------------------------- */
+    {
+        printf("--- 测试 10.17: 统一传输核心暂存区重叠内存防御与单次稳定捕获验证 (5 大全路径覆盖) ---\n");
+
+        ecat_foe_core_t core_dummy;
+        ecat_foe_core_cfg_t core_cfg;
+        memset(&core_cfg, 0, sizeof(core_cfg));
+        core_cfg.project_name = "OVERLAP_DEV";
+        core_cfg.hardware_id = 0x0001U;
+        core_cfg.local_hw_ver = 0x0100U;
+        core_cfg.max_header_size = 148U;
+        core_cfg.targets[0].enabled = true;
+        core_cfg.targets[0].max_payload_size = 1024U * 1024U;
+        core_cfg.targets[0].write_unit = 8U;
+        core_cfg.targets[0].driver = &param_desc.driver.io;
+        assert(ecat_foe_core_init(&core_dummy, &core_cfg) == 0);
+
+        ecat_target_registry_t reg;
+        assert(ecat_target_registry_init(&reg) == 0);
+
+        ecat_target_desc_t data_desc = {
+            .target_id = 96U,
+            .name = "tr_overlap_data",
+            .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = 4096U,
+            .enabled = true,
+            .asynchronous = true,
+            .user_ctx = &s_tr_overlap_mock,
+            .driver = {
+                .async_ops = &s_tr_overlap_ops
+            }
+        };
+        assert(ecat_target_registry_add(&reg, &data_desc) == 0);
+
+        ecat_target_desc_t fw_desc = {
+            .target_id = 97U,
+            .name = "tr_overlap_fw",
+            .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = 4096U,
+            .enabled = true,
+            .asynchronous = true,
+            .user_ctx = NULL,
+            .driver = {
+                .io = param_desc.driver.io
+            }
+        };
+        assert(ecat_target_registry_add(&reg, &fw_desc) == 0);
+
+        uint8_t backing_buf[256];
+        uint8_t separate_buf[64];
+        uint8_t expected[64];
+        for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+        for (size_t i = 0; i < sizeof(separate_buf); i++) separate_buf[i] = (uint8_t)(0xA0 + i);
+
+        void *owner = (void *)0x8899;
+        uint64_t token = 0;
+        ecat_transfer_t mgr;
+        ecat_transfer_request_t req = {
+            .transport_id = 1U,
+            .target_id = 96U,
+            .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = 64U
+        };
+
+        /* ================================================================== */
+        /* 路径 1: 异步 DATA - 擦除立即完成 (Erase Complete Immediately)       */
+        /* 覆盖 Case 1A(前向重叠), 1B(后向重叠), 1C(相同地址), 1D(独立缓冲)   */
+        /* ================================================================== */
+        {
+            /* Case 1A: 前向部分重叠 (staging_buf < data && staging_buf + len > data)
+             * staging_buf = &backing_buf[0], data = &backing_buf[16], len = 64
+             * 关键: 必须仅单次稳定捕获至 staging_buf，防范两次拷贝的数据覆盖损毁与 ASan 报警 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[16], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[16], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 1B: 后向部分重叠 (data < staging_buf && data + len > staging_buf) */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[16], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[16]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 1C: 完全相同地址 (staging_buf == data) */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 1D: 独立缓冲 (完全不重叠) */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(expected, separate_buf, 64);
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, separate_buf, 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+        }
+
+        /* ================================================================== */
+        /* 路径 2: 异步 DATA - 擦除挂起 (Erase PENDING -> Poll Complete)       */
+        /* 覆盖 Case 2A(前向重叠), 2B(后向重叠), 2C(相同地址), 2D(独立缓冲)   */
+        /* ================================================================== */
+        {
+            /* Case 2A: 前向部分重叠 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[16], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_PENDING;
+            s_tr_overlap_mock.erase_poll_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[16], 64) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            assert(s_tr_overlap_mock.erase_start_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 0U);
+
+            assert(ecat_transfer_poll(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+            assert(mgr.pending == false);
+            assert(s_tr_overlap_mock.erase_poll_calls == 1U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 2B: 后向部分重叠 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[16], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_PENDING;
+            s_tr_overlap_mock.erase_poll_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_PENDING);
+            assert(ecat_transfer_poll(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[16]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 2C: 完全相同地址 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_PENDING;
+            s_tr_overlap_mock.erase_poll_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_PENDING);
+            assert(ecat_transfer_poll(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 2D: 独立缓冲 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(expected, separate_buf, 64);
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.erase_start_res = ECAT_ASYNC_OP_PENDING;
+            s_tr_overlap_mock.erase_poll_res = ECAT_ASYNC_OP_COMPLETE;
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, separate_buf, 64) == ECAT_TRANSFER_PENDING);
+            assert(ecat_transfer_poll(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+        }
+
+        /* ================================================================== */
+        /* 路径 3: 异步 DATA - 已擦除/无需擦除 (Already Erased)                */
+        /* 覆盖 Case 3A(前向重叠), 3B(后向重叠), 3C(相同地址), 3D(独立缓冲)   */
+        /* ================================================================== */
+        {
+            /* Case 3A: 前向部分重叠 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+            mgr.erased_watermark = 1024U; /* 预置已擦除高水位，跳过擦除 */
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[16], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[16], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 0U); /* 证实跳过擦除 */
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 3B: 后向部分重叠 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[16], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+            mgr.erased_watermark = 1024U;
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 0U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[16]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 3C: 完全相同地址 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+            mgr.erased_watermark = 1024U;
+
+            for (size_t i = 0; i < sizeof(backing_buf); i++) backing_buf[i] = (uint8_t)(i + 1);
+            memcpy(expected, &backing_buf[0], 64);
+
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, &backing_buf[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 0U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+
+            /* Case 3D: 独立缓冲 */
+            assert(ecat_transfer_init(&mgr, &reg, &core_dummy) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &backing_buf[0], 128) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &req, &token) == ECAT_TRANSFER_COMPLETE);
+            mgr.erased_watermark = 1024U;
+
+            memcpy(expected, separate_buf, 64);
+            memset(&s_tr_overlap_mock, 0, sizeof(s_tr_overlap_mock));
+            s_tr_overlap_mock.write_start_res = ECAT_ASYNC_OP_COMPLETE;
+
+            assert(ecat_transfer_write(&mgr, owner, token, separate_buf, 64) == ECAT_TRANSFER_COMPLETE);
+            assert(s_tr_overlap_mock.erase_start_calls == 0U);
+            assert(s_tr_overlap_mock.write_start_calls == 1U);
+            assert(s_tr_overlap_mock.observed_write_buf == &backing_buf[0]);
+            assert(s_tr_overlap_mock.received_len == 64U);
+            assert(memcmp(s_tr_overlap_mock.received_payload, expected, 64) == 0);
+            assert(ecat_transfer_finish(&mgr, owner, token) == ECAT_TRANSFER_COMPLETE);
+        }
+
+        /* ================================================================== */
+        /* 路径 4: 异步 FIRMWARE - 写入立即完成 (Firmware Complete Immediately)*/
+        /* 覆盖 Case 4A(前向重叠), 4B(后向重叠), 4C(相同地址), 4D(独立缓冲)   */
+        /* ================================================================== */
+        {
+            ecat_foe_core_t fw_core;
+            ecat_foe_core_cfg_t fw_cfg;
+            memset(&fw_cfg, 0, sizeof(fw_cfg));
+            fw_cfg.project_name = "DRIVE_SERVO";
+            fw_cfg.project_id = 0x10010001U;
+            fw_cfg.hardware_id = 1U;
+            fw_cfg.local_hw_ver = 1U;
+            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+            fw_cfg.targets[0].target_id = 1U;
+            fw_cfg.targets[0].enabled = true;
+            fw_cfg.targets[0].asynchronous = true;
+            fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
+            fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
+            fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
+            fw_cfg.targets[0].write_unit = 8U;
+            fw_cfg.targets[0].driver = &param_desc.driver.io;
+            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
+
+            static uint8_t s_fw_pkt[512];
+            static uint8_t s_fw_op[256];
+            static ecat_foe_core_async_t s_fw_sess;
+
+            ecat_target_registry_t fw_reg;
+            assert(ecat_target_registry_init(&fw_reg) == 0);
+            ecat_target_desc_t fw_target = {
+                .target_id = 1U,
+                .name = "firmware_mcu",
+                .type = ECAT_TARGET_TYPE_FIRMWARE,
+                .permissions = ECAT_PERM_WRITE,
+                .max_size = 1024U * 1024U,
+                .enabled = true,
+                .asynchronous = true,
+                .driver = {
+                    .io = param_desc.driver.io
+                }
+            };
+            assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
+
+            uint8_t fw_payload[52];
+            memset(fw_payload, 0xAA, sizeof(fw_payload));
+            uint8_t fw_efw[200];
+            assert(make_test_efw(fw_efw, fw_payload, sizeof(fw_payload), 1U) == 200U);
+
+            ecat_transfer_request_t fw_req = {
+                .transport_id = 1U,
+                .target_id = 1U,
+                .direction = ECAT_TRANSFER_DIR_IMPORT,
+                .expected_size = 200U,
+                .fw_version = 0x01000000U
+            };
+
+            uint8_t fw_backing[512];
+            uint8_t fw_expected[64];
+            uint8_t fw_separate[64];
+            memcpy(fw_separate, fw_efw, 64);
+
+            /* Case 4A: 前向部分重叠 (staging_buf < data && staging_buf + len > data) */
+            ecat_transfer_t mgr;
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&fw_backing[16], fw_efw, 64);
+            memcpy(fw_expected, fw_efw, 64);
+            uint32_t exp_crc = ecat_foe_crc32_calc(fw_expected, 64);
+
+            s_fw_test_flash.poll_pending_count = 0U; /* 立即完成 */
+            assert(ecat_transfer_write(&mgr, owner, token, &fw_backing[16], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == exp_crc);
+            assert(memcmp(mgr.staging_buf, fw_expected, 64) == 0);
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 4B: 后向部分重叠 (data < staging_buf && data + len > staging_buf) */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[16], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&fw_backing[0], fw_efw, 64);
+            s_fw_test_flash.poll_pending_count = 0U;
+            assert(ecat_transfer_write(&mgr, owner, token, &fw_backing[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == exp_crc);
+            assert(memcmp(mgr.staging_buf, fw_expected, 64) == 0);
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 4C: 完全相同地址 (staging_buf == data) */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&fw_backing[0], fw_efw, 64);
+            s_fw_test_flash.poll_pending_count = 0U;
+            assert(ecat_transfer_write(&mgr, owner, token, &fw_backing[0], 64) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == exp_crc);
+            assert(memcmp(mgr.staging_buf, fw_expected, 64) == 0);
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 4D: 独立缓冲 (完全不重叠) */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            s_fw_test_flash.poll_pending_count = 0U;
+            assert(ecat_transfer_write(&mgr, owner, token, fw_separate, 64) == ECAT_TRANSFER_COMPLETE);
+            assert(ecat_transfer_get_crc32(&mgr) == exp_crc);
+            assert(memcmp(mgr.staging_buf, fw_expected, 64) == 0);
+            ecat_transfer_cancel(&mgr, owner, token);
+        }
+
+        /* ================================================================== */
+        /* 路径 5: 异步 FIRMWARE - 写入挂起 (Firmware PENDING -> Poll Complete) */
+        /* 覆盖 Case 5A(前向重叠), 5B(后向重叠), 5C(相同地址), 5D(独立缓冲)   */
+        /* ================================================================== */
+        {
+            ecat_foe_core_t fw_core;
+            ecat_foe_core_cfg_t fw_cfg;
+            memset(&fw_cfg, 0, sizeof(fw_cfg));
+            fw_cfg.project_name = "DRIVE_SERVO";
+            fw_cfg.project_id = 0x10010001U;
+            fw_cfg.hardware_id = 1U;
+            fw_cfg.local_hw_ver = 1U;
+            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+            fw_cfg.targets[0].target_id = 1U;
+            fw_cfg.targets[0].enabled = true;
+            fw_cfg.targets[0].asynchronous = true;
+            fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
+            fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
+            fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
+            fw_cfg.targets[0].write_unit = 8U;
+            fw_cfg.targets[0].driver = &param_desc.driver.io;
+            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
+
+            static uint8_t s_fw_pkt[512];
+            static uint8_t s_fw_op[256];
+            static ecat_foe_core_async_t s_fw_sess;
+
+            ecat_target_registry_t fw_reg;
+            assert(ecat_target_registry_init(&fw_reg) == 0);
+            ecat_target_desc_t fw_target = {
+                .target_id = 1U,
+                .name = "firmware_mcu",
+                .type = ECAT_TARGET_TYPE_FIRMWARE,
+                .permissions = ECAT_PERM_WRITE,
+                .max_size = 1024U * 1024U,
+                .enabled = true,
+                .asynchronous = true,
+                .driver = {
+                    .io = param_desc.driver.io
+                }
+            };
+            assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
+
+            uint8_t fw_payload[52];
+            memset(fw_payload, 0xBB, sizeof(fw_payload));
+            uint8_t fw_efw[200];
+            assert(make_test_efw(fw_efw, fw_payload, sizeof(fw_payload), 1U) == 200U);
+
+            ecat_transfer_request_t fw_req = {
+                .transport_id = 1U,
+                .target_id = 1U,
+                .direction = ECAT_TRANSFER_DIR_IMPORT,
+                .expected_size = 200U,
+                .fw_version = 0x01000000U
+            };
+
+            uint8_t fw_backing[512];
+            uint8_t fw_expected[64];
+            uint8_t fw_separate[64];
+            memcpy(fw_separate, fw_efw, 64);
+
+            /* Case 5A: 前向部分重叠 */
+            ecat_transfer_t mgr;
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&fw_backing[16], fw_efw, 64);
+            memcpy(fw_expected, fw_efw, 64);
+
+            /* 构造 150 字节写入以启动 flash 写入并挂起 (EFW 头部 148 字节解析完后进入 payload) */
+            uint8_t big_backing[512];
+            memcpy(&big_backing[16], fw_efw, 160);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &big_backing[0], 256) == 0);
+            s_fw_test_flash.poll_pending_count = 1U; /* 产生 PENDING */
+
+            assert(ecat_transfer_write(&mgr, owner, token, &big_backing[16], 160) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(fw_efw, 160));
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 5B: 后向部分重叠 */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &big_backing[16], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&big_backing[0], fw_efw, 160);
+            s_fw_test_flash.poll_pending_count = 1U;
+            assert(ecat_transfer_write(&mgr, owner, token, &big_backing[0], 160) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(fw_efw, 160));
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 5C: 完全相同地址 */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &big_backing[0], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            memcpy(&big_backing[0], fw_efw, 160);
+            s_fw_test_flash.poll_pending_count = 1U;
+            assert(ecat_transfer_write(&mgr, owner, token, &big_backing[0], 160) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(fw_efw, 160));
+            ecat_transfer_cancel(&mgr, owner, token);
+
+            /* Case 5D: 独立缓冲 */
+            assert(ecat_transfer_init(&mgr, &fw_reg, &fw_core) == 0);
+            assert(ecat_transfer_set_staging_buffer(&mgr, &big_backing[0], 256) == 0);
+            ecat_foe_core_on_abort(&fw_core);
+            assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
+                                            s_fw_op, sizeof(s_fw_op)) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
+
+            s_fw_test_flash.poll_pending_count = 1U;
+            assert(ecat_transfer_write(&mgr, owner, token, fw_efw, 160) == ECAT_TRANSFER_PENDING);
+            assert(mgr.pending == true);
+            for (unsigned p = 0; mgr.pending && p < 16U; p++) {
+                assert(ecat_transfer_poll(&mgr, owner, token) != ECAT_TRANSFER_FAILED);
+            }
+            assert(mgr.pending == false);
+            assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(fw_efw, 160));
+            ecat_transfer_cancel(&mgr, owner, token);
+        }
+
+        printf("  [PASS] 统一传输核心暂存区重叠内存防御与单次稳定捕获验证 (5 大路径 20 项场景) 全部通过\n");
     }
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");

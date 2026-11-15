@@ -740,7 +740,10 @@ ecat_transfer_result_t ecat_transfer_write(
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
-            memcpy(t->staging_buf, data, length);
+            /* 保证每一分块仅捕获一次稳定副本至 staging_buf，防范重叠内存未定义行为 */
+            if (t->staging_buf != data && length > 0U) {
+                memmove(t->staging_buf, data, length);
+            }
             ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, t->staging_buf, length, true);
             if (res == ECAT_UPGRADE_ASYNC_PENDING) {
                 t->pending = true;
@@ -813,11 +816,15 @@ ecat_transfer_result_t ecat_transfer_write(
                 return ECAT_TRANSFER_FAILED;
             }
 
+            /* 保证每一分块仅捕获一次稳定副本至 staging_buf，防范重叠内存未定义行为及二次拷贝覆盖破坏 */
+            if (t->staging_buf != data && length > 0U) {
+                memmove(t->staging_buf, data, length);
+            }
+
             /* 异步 DATA 写入前按需非阻塞擦除 */
             uint32_t len32 = (uint32_t)length;
             uint32_t need_end = t->current_offset + len32;
             if (need_end > t->erased_watermark) {
-                memcpy(t->staging_buf, data, length);
                 memset(&t->async_data_op, 0, sizeof(t->async_data_op));
                 t->async_data_op.kind = ECAT_ASYNC_DATA_OP_ERASE_TO;
                 t->async_data_op.need_end = need_end;
@@ -848,7 +855,6 @@ ecat_transfer_result_t ecat_transfer_write(
                 }
             }
 
-            memcpy(t->staging_buf, data, length);
             memset(&t->async_data_op, 0, sizeof(t->async_data_op));
             t->async_data_op.kind = ECAT_ASYNC_DATA_OP_WRITE;
             t->async_data_op.offset = t->current_offset;
