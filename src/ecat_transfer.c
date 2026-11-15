@@ -23,8 +23,10 @@ static bool target_registry_acl_adapter(
 /**
  * @brief 动态计算固件容器物理上限 (header + payload + padding)
  *
- * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕，
- * 并依据核心实际配置的 max_header_size (支持扩展头) 与 write_unit 计算有界上限。
+ * 依据 EFW v0.2 规范 (docs/spec/efw-format-v0.2.md)，固件容器头部恒定为 148 字节 (ECAT_FOE_EFW_HEADER_MIN_LEN)。
+ * 核心配置的 max_header_size 仅为内部头部装配缓冲容量 (>= 148 字节)，非协议支持扩展头格式。
+ * 容器最大尺寸 = eff_payload + 148U + max_padding。
+ * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕。
  */
 static uint32_t calc_firmware_container_limit(
     const ecat_target_desc_t *target,
@@ -43,9 +45,6 @@ static uint32_t calc_firmware_container_limit(
             }
             uint32_t wunit = core->cfg.targets[target_idx].write_unit;
             max_pad = (wunit > 0U) ? (wunit - 1U) : 0U;
-        }
-        if (core->cfg.max_header_size >= ECAT_FOE_EFW_HEADER_MIN_LEN) {
-            max_hdr = core->cfg.max_header_size;
         }
     }
 

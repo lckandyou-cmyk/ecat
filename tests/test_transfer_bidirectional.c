@@ -968,6 +968,9 @@ int main(void)
     assert(fw_manager.session.owner == NULL);
 
     /* 8.3 纯算术减法防御对比验证 (可移植到任何 32 位 MCU 架构) */
+    /* [说明]: 当前运行宿主为 64 位环境 (__SIZEOF_SIZE_T__ == 8)；
+     * 此处通过 32 位整型极限值 (uint32_t) 进行等价减法判定逻辑检验，确保移植到 32 位 MCU 时绝不环绕。
+     * 因当前 macOS 宿主环境缺乏 32 位用户态二进制执行环境与模拟器，未进行真实 32 位目标机二进制动态运行，特此明确标注。 */
     uint32_t test_off = 1U;
     uint32_t test_limit = 1024U;
     uint32_t test_len = UINT32_MAX;
@@ -1010,43 +1013,68 @@ int main(void)
     assert(near_max_tok != 0);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, near_max_tok) == ECAT_TRANSFER_COMPLETE);
 
-    /* 8.5 针对非最小头长度 (扩展头 max_header_size > 148) 场景的统一容器上限推导测试 */
-    /* Target 1 载荷上限设为 100 字节，核心 max_header_size 设为 256 字节，write_unit 设为 8 字节 */
-    /* 合法容器上限为 100 + 256 + 7 = 363 字节 */
-    core.cfg.max_header_size = 256U;
-    core.cfg.targets[0].max_payload_size = 100U;
-    /* 同时将 registry 中的 Target 1 max_size 也设为 100 字节以保持测试纯粹性 */
+    /* 8.5 规范固件完整升级流端到端验证 (包含真实 148 字节固定头、有效负载、分片与成功提交) */
+    /*
+     * 【规范语义说明】:
+     * 依据 docs/spec/efw-format-v0.2.md，当前 EFW 容器规范固定 148 字节头部 (ECAT_FOE_EFW_HEADER_MIN_LEN)。
+     * core.cfg.max_header_size (如配置 148 或 256) 仅代表宿主为状态机分配的内部装配缓冲容量，非协议扩展头格式。
+     * 固件容器物理总上限恒定为: 有效负载上限 + 148 字节头 + 对齐填充上限。
+     */
+    core.cfg.project_id = 0x10010001U;
+    core.cfg.hardware_id = 1U;
+    core.cfg.local_hw_ver = 1U;
+    core.cfg.targets[0].max_payload_size = 16U;
+    core.cfg.targets[0].write_unit = 8U;
     ecat_target_desc_t *fw_t1 = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
     assert(fw_t1 != NULL);
     uint32_t orig_t1_max_size = fw_t1->max_size;
-    fw_t1->max_size = 100U;
+    fw_t1->max_size = 16U;
 
-    /* 传入扩展头固件期望大小 350 字节 (在核心允许的 363 字节内，但大于硬编码的 100 + 148 + 7 = 255 字节) */
-    /* 旧代码因为硬编码 148U + 7U，会以 350U > 255U 错误拒绝！ */
-    ecat_transfer_request_t ext_hdr_req = {
+    /* 发起合法 16 字节固件升级 (总长度 148 + 16 = 164 字节 <= 16 + 148 + 7 = 171 字节物理上限) */
+    ecat_transfer_request_t valid_fw_req = {
         .transport_id = 1U,
         .target_id = 1U,
         .direction = ECAT_TRANSFER_DIR_IMPORT,
-        .expected_size = 350U,
-        .fw_version = 0x01000000U
+        .expected_size = sizeof(s_valid_16_efw), /* 164 字节 */
+        .fw_version = 0x01020304U
     };
-    uint64_t ext_hdr_tok = 0;
+    uint64_t valid_fw_tok = 0;
     reset_mock_flags();
-    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &ext_hdr_req, &ext_hdr_tok) == ECAT_TRANSFER_COMPLETE);
-    assert(ext_hdr_tok != 0);
-    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, ext_hdr_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &valid_fw_req, &valid_fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(valid_fw_tok != 0);
 
-    /* 8.6 真正超出核心统一上限 (364 字节 > 363 字节) 的拒绝测试，并核验拒绝前无副作用 */
-    ecat_transfer_request_t oversize_ext_req = {
+    /* 分片写入完整固件包: 64 字节 + 64 字节 + 36 字节 = 164 字节 */
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_fw_tok, s_valid_16_efw, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_fw_tok, s_valid_16_efw + 64U, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_fw_tok, s_valid_16_efw + 128U, 36U) == ECAT_TRANSFER_COMPLETE);
+
+    /* 完成传输并验证驱动成功 finalize 提交与核心写入数据闭环 */
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(g_finalize_called == true);
+    assert(core.written_offset == 16U);
+    assert(fw_manager.session.owner == NULL); /* 锁安全释放 */
+
+    /* 8.6 固件截断场景测试 (Truncation): 声明 164 字节但仅写入 100 字节即 finish */
+    uint64_t trunc_fw_tok = 0;
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &valid_fw_req, &trunc_fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&fw_manager, &channel_uart, trunc_fw_tok, s_valid_16_efw, 100U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_finish(&fw_manager, &channel_uart, trunc_fw_tok) == ECAT_TRANSFER_FAILED);
+    assert(g_finalize_called == false);
+    assert(fw_manager.session.owner == NULL); /* finish 失败时安全释放会话锁与资源 */
+    assert(fw_manager.active == false);
+
+    /* 8.7 物理容器上限越界拒绝测试 (172 字节 > 171 字节物理上限)，验证拒绝前无驱动副作用 */
+    ecat_transfer_request_t oversize_fw_req = {
         .transport_id = 1U,
         .target_id = 1U,
         .direction = ECAT_TRANSFER_DIR_IMPORT,
-        .expected_size = 364U,
-        .fw_version = 0x01000000U
+        .expected_size = 172U, /* 172 > 16 + 148 + 7 = 171 */
+        .fw_version = 0x01020304U
     };
-    uint64_t oversize_ext_tok = 0;
+    uint64_t oversize_fw_tok = 0;
     reset_mock_flags();
-    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_ext_req, &oversize_ext_tok) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_fw_req, &oversize_fw_tok) == ECAT_TRANSFER_FAILED);
     assert(fw_manager.last_error == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
     assert(fw_manager.session.owner == NULL); /* 锁已安全释放 */
     assert(fw_manager.active == false);       /* 状态机未激活 */
@@ -1055,7 +1083,6 @@ int main(void)
 
     /* 恢复 Target 1 与 core 配置 */
     fw_t1->max_size = orig_t1_max_size;
-    core.cfg.max_header_size = 148U;
     core.cfg.targets[0].max_payload_size = 1024U * 1024U;
 
 #if __SIZEOF_SIZE_T__ > 4
