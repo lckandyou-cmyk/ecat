@@ -13,7 +13,7 @@ bool ecat_foe_transport_owns(const ecat_foe_transport_t *t)
 {
     if (t == NULL || t->upgrade == NULL) return false;
     ecat_upgrade_session_t *sess = t->upgrade->session_ptr ? t->upgrade->session_ptr : &t->upgrade->session;
-    return ecat_upgrade_session_owns(sess, t, t->token);
+    return ecat_upgrade_session_owns_mgr(sess, t->upgrade, t, t->token);
 }
 
 void ecat_foe_transport_abort(void *ctx)

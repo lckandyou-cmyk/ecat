@@ -783,7 +783,9 @@ int main(void)
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
     /* 新管理器无法取消旧入口会话 */
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, old_token) == ECAT_TRANSFER_STALE);
-    assert(ecat_upgrade_session_owns(old_mgr.session_ptr, &channel_can, old_token));
+    assert(ecat_upgrade_session_owns_mgr(old_mgr.session_ptr, &old_mgr, &channel_can, old_token));
+    /* 验证旧接口 release 无法绕过管理器身份检查 */
+    assert(ecat_upgrade_session_release(old_mgr.session_ptr, &channel_can, old_token) == ECAT_UPGRADE_SESSION_STALE);
 
     /* 释放旧入口会话 */
     assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);

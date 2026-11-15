@@ -26,7 +26,9 @@ typedef struct {
     const void *manager; /**< 绑定持有当前租约的具体管理器实例 (ecat_transfer_t / ecat_upgrade_t) */
 } ecat_upgrade_session_t;
 
-/* Failure preserves both the manager and the caller's token output. */
+/* Failure preserves both the manager and the caller's token output.
+ * Note: Legacy APIs (acquire/owns/release) operate exclusively on non-manager-bound
+ * leases (session->manager == NULL). They cannot inspect or release manager-bound leases. */
 ecat_upgrade_session_result_t ecat_upgrade_session_acquire(
     ecat_upgrade_session_t *session, const void *owner, uint64_t *token);
 bool ecat_upgrade_session_owns(
@@ -34,7 +36,10 @@ bool ecat_upgrade_session_owns(
 ecat_upgrade_session_result_t ecat_upgrade_session_release(
     ecat_upgrade_session_t *session, const void *owner, uint64_t token);
 
-/* Manager-bound session APIs: bind lease to both caller owner and specific manager instance. */
+/* Manager-bound session APIs: bind lease to both caller owner and specific manager instance.
+ * - ecat_upgrade_session_acquire_mgr requires manager != NULL (returns INVALID on NULL).
+ * - ecat_upgrade_session_owns_mgr and release_mgr strictly require manager matching session->manager.
+ * - Legacy release cannot release manager-bound leases (returns STALE). */
 ecat_upgrade_session_result_t ecat_upgrade_session_acquire_mgr(
     ecat_upgrade_session_t *session, const void *manager, const void *owner, uint64_t *token);
 bool ecat_upgrade_session_owns_mgr(
