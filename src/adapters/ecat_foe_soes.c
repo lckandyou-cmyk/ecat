@@ -11,6 +11,7 @@
  */
 
 #include "ecat_foe_soes.h"
+#include "ecat_target_registry.h"
 #include <string.h>
 
 static ecat_foe_soes_adapter_t *s_active_adapter = NULL;
@@ -70,7 +71,34 @@ int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_
             return -1;
         }
     }
+    if (transfer->registry != NULL) {
+        for (size_t i = 0; i < transfer->registry->target_count; i++) {
+            if (transfer->registry->targets[i].enabled && transfer->registry->targets[i].asynchronous) {
+                return -1;
+            }
+        }
+    }
     return ecat_foe_transport_init_transfer(&adapter->transport, transfer);
+}
+
+static bool soes_target_is_async(const ecat_foe_soes_adapter_t *adapter, uint16_t target_id)
+{
+    if (adapter == NULL) return false;
+    if (adapter->core != NULL && target_id >= 1U && target_id <= ECAT_FOE_TARGET_COUNT) {
+        if (adapter->core->cfg.targets[target_id - 1U].enabled &&
+            adapter->core->cfg.targets[target_id - 1U].asynchronous) {
+            return true;
+        }
+    }
+    if (soes_has_transport(adapter) && adapter->transport.transfer != NULL &&
+        adapter->transport.transfer->registry != NULL) {
+        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(
+            adapter->transport.transfer->registry, target_id);
+        if (desc != NULL && desc->enabled && desc->asynchronous) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void soes_abort_core(ecat_foe_soes_adapter_t *adapter)
@@ -164,6 +192,12 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     s_active_adapter = adapter;
+    uint16_t tid = 0;
+    uint32_t ver = 0;
+    if (ecat_foe_core_validate_wrq(adapter->core, filename, filename_len, &tid, &ver) != 0 ||
+        soes_target_is_async(adapter, tid)) {
+        return ECAT_FOE_ERRCODE_NOTDEFINED;
+    }
     if (soes_has_transport(adapter))
         return ecat_foe_transport_begin(&adapter->transport, filename, filename_len);
     return ecat_foe_core_on_wrq(adapter->core, filename, filename_len);
@@ -447,15 +481,16 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     uint16_t tid = 0;
     uint32_t ver = 0;
     int vrc = ecat_foe_core_validate_wrq(adapter->core, safe_name, (size_t)name_len, &tid, &ver);
-    if (vrc != 0) {
-        /* 核心机校验失败 (项目不符、短前缀、非法格式等)：
-         * 关键安全防御：将 foe_cfg->n_files 置 0，切断原生 SOES 命中旧缓存或短前缀的路径！
+    if (vrc != 0 || soes_target_is_async(adapter, tid)) {
+        /* 核心机校验失败 (项目不符、短前缀、非法格式等) 或目标为异步目标：
+         * 关键安全防御：SOES 缺乏异步重传握手门控，必须在预检时切断异步目标，
+         * 将 foe_cfg->n_files 置 0，切断原生 SOES 命中旧缓存或短前缀的路径！
          * 原生 SOES 空闲时回复 FOE_ERR_NOTFOUND (0x8001)；
          * 活跃传输时原生 SOES 会拒绝并中止旧会话，后置钩子负责同步清理。
          */
         foe_cfg->n_files = 0;
         adapter->has_staged_wrq = false;
-        return vrc;
+        return (vrc != 0) ? vrc : ECAT_FOE_ERRCODE_NOTDEFINED;
     }
 
     /* 严格目标范围校验：通过目标映射表查找文件条目索引，支持稀疏与紧凑文件表 */

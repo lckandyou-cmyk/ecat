@@ -31,6 +31,8 @@
 #include "ecat_foe_efw.h"
 #include "ecat_foe_core.h"
 #include "ecat_foe_soes.h"
+#include "ecat_target_registry.h"
+#include "ecat_transfer.h"
 #include "mock_driver.h"
 
 /* 真实 SOES esc.c 内部函数的补充前向声明 (供测试 Harness 调用) */
@@ -2744,6 +2746,74 @@ int main(void)
             mock_master_read_outbox();
 
             printf("  [PASS] 深度风险 9: 异常分支主站可观察一致失败保障，信箱计数保持与 WAIT_FOR_DATA 自愈边界完全验证\n");
+        }
+
+        /* [TEST Case 10] 深度风险 10: 异步目标在 SOES 下的前置拒绝与防假 ACK(0) 验证 */
+        {
+            reset_soes_environment();
+            mock_driver_reset(&s_harness_drv);
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            s_foe_files[0].filepass = 0;
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+
+            /* 1. 注册表中配置了启用的异步目标时，ecat_foe_soes_bind_transfer 必须返回 -1 拒绝 */
+            ecat_target_registry_t reg;
+            assert(ecat_target_registry_init(&reg) == 0);
+            ecat_target_desc_t async_desc = {
+                .target_id = 1U,
+                .name = "mcu",
+                .type = ECAT_TARGET_TYPE_FIRMWARE,
+                .permissions = ECAT_PERM_WRITE,
+                .max_size = 1024U * 1024U,
+                .enabled = true,
+                .asynchronous = true,
+                .driver = { .io = s_harness_drv.driver },
+                .user_ctx = &s_harness_drv
+            };
+            assert(ecat_target_registry_add(&reg, &async_desc) == 0);
+
+            ecat_transfer_t transfer;
+            assert(ecat_transfer_init(&transfer, &reg, &core) == 0);
+            assert(ecat_foe_soes_bind_transfer(&adapter, &transfer) == -1);
+
+            /* 2. 运行时若目标为异步，收到 WRQ 时 pre_process_hook 必须切断 n_files 并返回错误，
+             *    真实 SOES 必须回复 FOE_OP_ERR (0x8001)，绝不能发出 FOE_OP_ACK(0)！ */
+            core.cfg.targets[0].asynchronous = true;
+
+            MBXcontrol[0].state = MBXstate_inclaim;
+            _FOE *req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_mcu));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_mcu, strlen(fn_mcu));
+
+            int pre_rc = ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_mcu));
+            assert(pre_rc != 0);
+            assert(s_foe_cfg.n_files == 0);
+            assert(adapter.has_staged_wrq == false);
+
+            /* 真实 SOES 协议机处理 */
+            ESC_foeprocess();
+
+            _FOE *err_res = get_last_outbound_foe();
+            assert(err_res->foeheader.opcode == FOE_OP_ERR);
+            assert(err_res->foeheader.opcode != FOE_OP_ACK);
+            assert(err_res->foeheader.errorcode == 0x8001);
+            assert(adapter.has_staged_wrq == false);
+            assert(core.state == ECAT_FOE_STATE_IDLE);
+            mock_master_read_outbox();
+
+            printf("  [PASS] 深度风险 10: 异步目标在 SOES 下前置预检切断与原生 ERR(0x8001) 拦截验证通过 (防假 ACK)\n");
         }
     }
 

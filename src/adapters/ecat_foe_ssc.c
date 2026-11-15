@@ -10,6 +10,7 @@
  */
 
 #include "ecat_foe_ssc.h"
+#include "ecat_target_registry.h"
 #include <string.h>
 
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size)
@@ -74,8 +75,35 @@ int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *a, ecat_transfer_t *trans
             if (transfer->core->cfg.targets[i].enabled && transfer->core->cfg.targets[i].asynchronous)
                 return -1;
         }
+        if (transfer->registry != NULL) {
+            for (size_t i = 0; i < transfer->registry->target_count; i++) {
+                if (transfer->registry->targets[i].enabled && transfer->registry->targets[i].asynchronous) {
+                    return -1;
+                }
+            }
+        }
     }
     return ecat_foe_transport_init_transfer(&a->transport, transfer);
+}
+
+static bool ssc_target_is_async(const ecat_foe_ssc_adapter_t *a, uint16_t target_id)
+{
+    if (a == NULL) return false;
+    if (a->core != NULL && target_id >= 1U && target_id <= ECAT_FOE_TARGET_COUNT) {
+        if (a->core->cfg.targets[target_id - 1U].enabled &&
+            a->core->cfg.targets[target_id - 1U].asynchronous) {
+            return true;
+        }
+    }
+    if (ssc_has_transport(a) && a->transport.transfer != NULL &&
+        a->transport.transfer->registry != NULL) {
+        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(
+            a->transport.transfer->registry, target_id);
+        if (desc != NULL && desc->enabled && desc->asynchronous) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void ssc_abort_core(ecat_foe_ssc_adapter_t *a)
@@ -119,6 +147,19 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
         return ECAT_FOE_SSC_ERR_NORIGHTS_PW;
     }
     adapter->async_final_acked = false;
+
+    /* 无异步 gate 的纯同步 SSC 适配器必须在 WRQ 阶段严格拒绝异步目标 */
+    if (adapter->async_gate == NULL) {
+        uint16_t tid = 0;
+        uint32_t ver = 0;
+        int vrc = ecat_foe_core_validate_wrq(adapter->core, pName, (size_t)nameSize, &tid, &ver);
+        if (vrc != 0) {
+            return (uint16_t)vrc;
+        }
+        if (ssc_target_is_async(adapter, tid)) {
+            return ECAT_FOE_SSC_ERR_ILLEGAL;
+        }
+    }
 
     if (adapter->async_gate != NULL && adapter->session_active) {
         ecat_foe_ssc_async_abort_session(adapter->async_gate);

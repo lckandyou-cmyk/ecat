@@ -15,6 +15,8 @@
 #include <assert.h>
 #include "ecat_foe_ssc.h"
 #include "ecat_foe_efw.h"
+#include "ecat_target_registry.h"
+#include "ecat_transfer.h"
 #include "mock_driver.h"
 
 #define TEST_PROJECT_ID      0x10010001U
@@ -376,6 +378,44 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 13 项测试全部通过 (Mock 环境) <<<\n");
+    /* [TEST 14] 无异步 gate 的纯同步 SSC 适配器必须在 bind 与 on_write 阶段拒绝异步目标 */
+    {
+        printf("[TEST 14] 验证无异步 gate 的纯同步 SSC 适配器拒绝异步目标 (bind 与 on_write)...");
+        setup_core_and_adapter(&core, &adapter, 0U);
+        assert(adapter.async_gate == NULL);
+
+        /* 1. 注册表中配置了启用的异步目标时，bind_transfer 必须返回 -1 拒绝 */
+        ecat_target_registry_t reg;
+        assert(ecat_target_registry_init(&reg) == 0);
+        ecat_target_desc_t async_desc = {
+            .target_id = 1U,
+            .name = "mcu",
+            .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = TEST_MAX_SIZE,
+            .enabled = true,
+            .asynchronous = true,
+            .driver = { .io = s_mock_drv.driver },
+            .user_ctx = &s_mock_drv
+        };
+        assert(ecat_target_registry_add(&reg, &async_desc) == 0);
+
+        ecat_transfer_t transfer;
+        assert(ecat_transfer_init(&transfer, &reg, &core) == 0);
+
+        /* 无 gate 的纯同步 SSC 试图绑定含有异步目标的 transfer，必须被严格拒绝 */
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == -1);
+
+        /* 2. 纯 core 模式下，若目标被配置为异步，on_write 必须直接返回 0x8004 拒绝建立会话 */
+        core.cfg.targets[0].asynchronous = true;
+        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        uint16_t err = ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U);
+        assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
+        assert(adapter.session_active == false);
+        core.cfg.targets[0].asynchronous = false;
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 14 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

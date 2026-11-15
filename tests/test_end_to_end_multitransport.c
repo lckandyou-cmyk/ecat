@@ -505,6 +505,17 @@ int main(void)
     /* ---------------------------------------------------------------------- */
     printf("--- 测试阶段 D: SOES、SSC 与文件流直接接入统一传输核心真实调用链验证 ---\n");
 
+    /* D0: 异步目标前置拒绝验证：当注册表中存在启用的异步目标 5 时，纯同步 SOES 绑定必须被严格拒绝 */
+    ecat_foe_soes_adapter_t soes_adapter;
+    ecat_foe_soes_init(&soes_adapter, &core, 128U);
+    assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
+
+    /* 阶段 C 结束：禁用阶段 C 临时注册的异步数据目标 5，转入纯同步协议栈直连验证 */
+    const ecat_target_desc_t *d5 = ecat_target_registry_find_by_id(&reg, 5U);
+    if (d5 != NULL) {
+        ((ecat_target_desc_t *)d5)->enabled = false;
+    }
+
     /* D1: SOES 适配器直连统一传输核心 (ecat_foe_soes_bind_transfer) */
     /* 开启 core 目标 3 (SII，固件) 用于 ACL 权限拦截对比 */
     core.cfg.targets[2].enabled = true;
@@ -512,8 +523,6 @@ int main(void)
     core.cfg.targets[2].write_unit = 8U;
     core.cfg.targets[2].driver = &param_desc.driver.io;
 
-    ecat_foe_soes_adapter_t soes_adapter;
-    ecat_foe_soes_init(&soes_adapter, &core, 128U);
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == 0);
     /* 重复绑定防御拦截 */
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
@@ -710,6 +719,9 @@ int main(void)
     /* D3.5: 异步 begin PENDING 生命周期、step 推进与防租约泄漏验证            */
     /* ---------------------------------------------------------------------- */
     printf("--- 测试 D3.5: 文件流适配器异步 begin PENDING 生命周期与防租约泄漏 ---\n");
+    if (d5 != NULL) {
+        ((ecat_target_desc_t *)d5)->enabled = true;
+    }
     ecat_upgrade_request_t upg_async_data_req = { .target_id = 5U, .fw_version = 0U };
     uint8_t async_file_data[128];
     memset(async_file_data, 0x33, sizeof(async_file_data));
