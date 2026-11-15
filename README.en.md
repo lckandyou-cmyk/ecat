@@ -94,7 +94,7 @@ make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
 ```
 
-The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a reference integration; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md) and [file stream integration](examples/file_stream/README.md).
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a reference integration; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md) and [file stream integration](examples/file_stream/README.md). The [multichannel and target registry guide](docs/multichannel-bidirectional-framework.md) describes synchronous import/export and custom endpoints. Registry capacity is configurable; firmware imports still map to the core’s enabled targets 1–4. ACL enforcement and signature verification require explicit local configuration. Physical adapters and bidirectional asynchronous scheduling are not provided.
 
 ## Verification status
 

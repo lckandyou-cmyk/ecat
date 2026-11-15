@@ -102,7 +102,7 @@ make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
 ```
 
-默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。
+默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。 新增的目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)。数据区块数量受注册表容量限制，固件导入目前仍映射核心的 1～4 号目标；ACL 和签名验证须按设备配置启用。
 
 ## 验证状态
 
