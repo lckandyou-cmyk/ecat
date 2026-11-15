@@ -3,6 +3,7 @@
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
@@ -105,16 +106,55 @@ with tempfile.TemporaryDirectory(prefix='ecat-reg-abi-') as tmp:
     subprocess.run([str(tmp_path / 'expr')], check=True)
 
     # 32-bit architecture static compilation check (sizeof(size_t) == 4)
-    # Verifies type safety and compilation on a true 32-bit target when supported by compiler.
+    # 1. First probe whether compiler and system headers support 32-bit cross-compilation with a minimal probe.
+    probe_src = tmp_path / 'probe_32bit_env.c'
+    probe_src.write_text(
+        '#include <stddef.h>\n'
+        '#include <stdint.h>\n'
+        '#include <stdbool.h>\n'
+        '#include <string.h>\n'
+        'typedef char assert_32bit_size_t[(sizeof(size_t) == 4) ? 1 : -1];\n'
+        'typedef char assert_32bit_ptr[(sizeof(void *) == 4) ? 1 : -1];\n'
+        'int probe_env_entry(void) { return 0; }\n'
+    )
+    probe_obj = tmp_path / 'probe_32bit_env.o'
     probe_32bit = subprocess.run([cc, '-target', 'i386-apple-darwin', '-std=c99',
-                                  '-Wall', '-Wextra', '-Werror',
-                                  '-I' + str(root / 'include'),
-                                  '-c', str(root / 'src/ecat_transfer.c'),
-                                  '-o', str(tmp_path / 'ecat_transfer_32bit.o')],
+                                  '-c', str(probe_src),
+                                  '-o', str(probe_obj)],
                                  capture_output=True, text=True)
-    if probe_32bit.returncode == 0:
-        print("PASS: 32-bit static compilation check (sizeof(size_t) == 4, no host 32-bit runtime available)")
+
+    if probe_32bit.returncode != 0:
+        # Toolchain or system headers do not support 32-bit targets.
+        reason = probe_32bit.stderr.strip().replace('\n', ' ')
+        print(f"SKIP: 32-bit cross-compilation environment not supported by host toolchain/headers (reason: {reason})")
     else:
-        print("NOTE: 32-bit target compilation not supported by host compiler, relying on host arithmetic simulation")
+        # Supported environment confirmed: verify that deliberate 32-bit compilation failures are NOT swallowed.
+        bad_src = tmp_path / 'intentional_32bit_fail.c'
+        bad_src.write_text(
+            '#include <stddef.h>\n'
+            'int bad_entry(void) {\n'
+            '    char a[(sizeof(size_t) == 8) ? 1 : -1]; /* Deliberately invalid on 32-bit */\n'
+            '    return (int)sizeof(a);\n'
+            '}\n'
+        )
+        bad_res = subprocess.run([cc, '-target', 'i386-apple-darwin', '-std=c99',
+                                  '-c', str(bad_src),
+                                  '-o', str(tmp_path / 'bad_32bit.o')],
+                                 capture_output=True, text=True)
+        assert bad_res.returncode != 0, "FATAL: Compiler unexpectedly passed deliberate 32-bit failure!"
+
+        # Compile project source file: failures in a supported environment MUST be surfaced and fail the test.
+        proj_32bit = subprocess.run([cc, '-target', 'i386-apple-darwin', '-std=c99',
+                                     '-Wall', '-Wextra', '-Werror',
+                                     '-I' + str(root / 'include'),
+                                     '-c', str(root / 'src/ecat_transfer.c'),
+                                     '-o', str(tmp_path / 'ecat_transfer_32bit.o')],
+                                    capture_output=True, text=True)
+        if proj_32bit.returncode != 0:
+            print("FATAL: 32-bit project compilation failed in supported environment!", file=sys.stderr)
+            print(proj_32bit.stderr, file=sys.stderr)
+            sys.exit(1)
+
+        print("PASS: 32-bit static compilation check (sizeof(size_t) == 4, static compile only; no host 32-bit runtime available)")
 
 print("PASS: target registry ABI configuration mismatch caught at link time")
