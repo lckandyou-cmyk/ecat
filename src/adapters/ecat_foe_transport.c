@@ -28,6 +28,26 @@ int ecat_foe_transport_init_transfer(ecat_foe_transport_t *t, ecat_transfer_t *t
     return 0;
 }
 
+static uint8_t *get_staged_buffer(ecat_foe_transport_t *t, size_t *out_cap)
+{
+    if (t->custom_staging_buf != NULL && t->custom_staging_cap > 0U) {
+        if (out_cap != NULL) *out_cap = t->custom_staging_cap;
+        return t->custom_staging_buf;
+    }
+    if (out_cap != NULL) *out_cap = sizeof(t->default_staging_buf);
+    return t->default_staging_buf;
+}
+
+int ecat_foe_transport_set_staged_buffer(ecat_foe_transport_t *t, uint8_t *buffer, size_t capacity)
+{
+    if (t == NULL) return -1;
+    if (t->pending || t->begin_pending || t->has_staged_packet) return -1;
+    if (buffer == NULL && capacity != 0U) return -1;
+    t->custom_staging_buf = buffer;
+    t->custom_staging_cap = capacity;
+    return 0;
+}
+
 static ecat_upgrade_session_t *get_transport_session(const ecat_foe_transport_t *t)
 {
     if (t->transfer != NULL) return t->transfer->session_ptr;
@@ -75,9 +95,13 @@ void ecat_foe_transport_abort(void *ctx)
     t->finish_after_write = false;
     t->finishing = false;
     t->has_staged_packet = false;
-    t->staged_data = NULL;
     t->staged_length = 0U;
     t->staged_more_data = false;
+    size_t cap = 0;
+    uint8_t *sbuf = get_staged_buffer(t, &cap);
+    if (sbuf != NULL && cap > 0U) {
+        memset(sbuf, 0, cap);
+    }
 }
 
 int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t length)
@@ -172,8 +196,21 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
         if (t->transfer != NULL) {
             ecat_transfer_result_t poll_res = ecat_transfer_poll(t->transfer, t, t->token);
             if (poll_res == ECAT_TRANSFER_PENDING) {
-                /* begin 阶段尚未完成：暂存首包并向协议栈返回 PENDING，由 SSC 异步门向主站回复 BUSY */
-                t->staged_data = data;
+                /* begin 阶段尚未完成：必须深拷贝首包至受控暂存区并向协议栈返回 PENDING */
+                size_t cap = 0;
+                uint8_t *sbuf = get_staged_buffer(t, &cap);
+                if (length > cap) {
+                    /* 单包长度超出受控暂存容量上限：严格安全失败并 abort */
+                    ecat_foe_transport_abort(t);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                if (length > 0U) {
+                    if (data == NULL) {
+                        ecat_foe_transport_abort(t);
+                        return ECAT_UPGRADE_ASYNC_FAILED;
+                    }
+                    memcpy(sbuf, data, length);
+                }
                 t->staged_length = length;
                 t->staged_more_data = more_data;
                 t->has_staged_packet = true;
@@ -190,7 +227,19 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
         } else {
             ecat_upgrade_result_t upg_poll = ecat_upgrade_poll(t->upgrade, t, t->token);
             if (upg_poll == ECAT_UPGRADE_PENDING) {
-                t->staged_data = data;
+                size_t cap = 0;
+                uint8_t *sbuf = get_staged_buffer(t, &cap);
+                if (length > cap) {
+                    ecat_foe_transport_abort(t);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                if (length > 0U) {
+                    if (data == NULL) {
+                        ecat_foe_transport_abort(t);
+                        return ECAT_UPGRADE_ASYNC_FAILED;
+                    }
+                    memcpy(sbuf, data, length);
+                }
                 t->staged_length = length;
                 t->staged_more_data = more_data;
                 t->has_staged_packet = true;
@@ -258,15 +307,15 @@ ecat_upgrade_async_result_t ecat_foe_transport_poll(void *ctx)
                 if (!t->has_staged_packet) {
                     return ECAT_UPGRADE_ASYNC_COMPLETE;
                 }
-                /* 存在暂存的首包数据，在 begin 就绪后自动无缝触发首包写入 */
-                const uint8_t *data = t->staged_data;
+                /* 存在暂存的首包数据，在 begin 就绪后从内部稳定受控暂存区触发写入 */
+                size_t cap = 0;
+                const uint8_t *sbuf = get_staged_buffer(t, &cap);
                 size_t length = t->staged_length;
                 bool more_data = t->staged_more_data;
                 t->has_staged_packet = false;
-                t->staged_data = NULL;
                 t->staged_length = 0U;
                 t->staged_more_data = false;
-                return ecat_foe_transport_start(t, data, length, more_data);
+                return ecat_foe_transport_start(t, sbuf, length, more_data);
             } else {
                 ecat_foe_transport_abort(t);
                 return ECAT_UPGRADE_ASYNC_FAILED;
@@ -281,14 +330,15 @@ ecat_upgrade_async_result_t ecat_foe_transport_poll(void *ctx)
                 if (!t->has_staged_packet) {
                     return ECAT_UPGRADE_ASYNC_COMPLETE;
                 }
-                const uint8_t *data = t->staged_data;
+                /* 存在暂存的首包数据，在 begin 就绪后从内部稳定受控暂存区触发写入 */
+                size_t cap = 0;
+                const uint8_t *sbuf = get_staged_buffer(t, &cap);
                 size_t length = t->staged_length;
                 bool more_data = t->staged_more_data;
                 t->has_staged_packet = false;
-                t->staged_data = NULL;
                 t->staged_length = 0U;
                 t->staged_more_data = false;
-                return ecat_foe_transport_start(t, data, length, more_data);
+                return ecat_foe_transport_start(t, sbuf, length, more_data);
             } else {
                 ecat_foe_transport_abort(t);
                 return ECAT_UPGRADE_ASYNC_FAILED;

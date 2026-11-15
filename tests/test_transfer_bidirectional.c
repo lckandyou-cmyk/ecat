@@ -10,6 +10,7 @@
 #include "ecat_foe_efw.h"
 #include "ecat_foe_core_async.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <string.h>
 
@@ -182,6 +183,57 @@ typedef struct {
 
     int override_read_actual;
 } test_async_data_hardware_t;
+
+typedef struct {
+    ecat_async_op_result_t init_res;
+    uint8_t received[128];
+    size_t received_len;
+    unsigned write_calls;
+} foe_staged_mock_t;
+
+static foe_staged_mock_t s_mock_staged_ctx;
+
+static ecat_async_op_result_t foe_staged_start(void *ctx, ecat_async_data_op_t *op) {
+    foe_staged_mock_t *m = (foe_staged_mock_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        return m->init_res;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_INVALIDATE) {
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_WRITE) {
+        m->write_calls++;
+        m->received_len = op->length;
+        if (op->length <= sizeof(m->received) && op->buffer != NULL) {
+            memcpy(m->received, op->buffer, op->length);
+        }
+        op->actual_length = op->length;
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
+        op->erased_end = op->need_end;
+        return ECAT_ASYNC_OP_COMPLETE;
+    }
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+
+static ecat_async_op_result_t foe_staged_poll(void *ctx, ecat_async_data_op_t *op) {
+    foe_staged_mock_t *m = (foe_staged_mock_t *)ctx;
+    if (op->kind == ECAT_ASYNC_DATA_OP_INIT) {
+        return m->init_res;
+    }
+    return ECAT_ASYNC_OP_COMPLETE;
+}
+
+static void foe_staged_abort(void *ctx) {
+    (void)ctx;
+}
+
+static const ecat_async_data_ops_t s_foe_staged_ops = {
+    .start = foe_staged_start,
+    .poll = foe_staged_poll,
+    .abort = foe_staged_abort
+};
 
 static test_async_data_hardware_t s_hw_stage_test;
 
@@ -2638,6 +2690,114 @@ int main(void)
         assert(ecat_transfer_get_last_error(&test_mgr) == ECAT_TRANSFER_ERR_DRIVER_FINALIZE);
         assert(test_mgr.active == false);
         assert(ecat_transfer_is_active(&test_mgr) == false);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 10.15 FoE 适配桥首包受控深拷贝暂存、调用方 buffer 释放后不可变性与 ASan 验证 */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 10.15: FoE 适配桥首包受控深拷贝暂存与生命周期隔离防御 ---\n");
+    {
+        memset(&s_mock_staged_ctx, 0, sizeof(s_mock_staged_ctx));
+        s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+
+        ecat_target_registry_t test_reg;
+        assert(ecat_target_registry_init(&test_reg) == 0);
+        ecat_target_desc_t target_desc = {
+            .target_id = 92U,
+            .name = "staged_test",
+            .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = 2048U,
+            .enabled = true,
+            .asynchronous = true,
+            .user_ctx = &s_mock_staged_ctx,
+            .driver = {
+                .async_ops = &s_foe_staged_ops
+            }
+        };
+        assert(ecat_target_registry_add(&test_reg, &target_desc) == 0);
+
+        ecat_foe_core_t test_core;
+        ecat_foe_core_cfg_t test_core_cfg;
+        memset(&test_core_cfg, 0, sizeof(test_core_cfg));
+        test_core_cfg.project_name = "DRIVE_SERVO";
+        test_core_cfg.hardware_id = 0x0001U;
+        test_core_cfg.local_hw_ver = 0x0100U;
+        test_core_cfg.max_header_size = 148U;
+        test_core_cfg.targets[0].enabled = true;
+        test_core_cfg.targets[0].max_payload_size = 1024U * 1024U;
+        test_core_cfg.targets[0].write_unit = 8U;
+        test_core_cfg.targets[0].driver = &param_desc.driver.io;
+        assert(ecat_foe_core_init(&test_core, &test_core_cfg) == 0);
+
+        ecat_transfer_t test_mgr;
+        assert(ecat_transfer_init(&test_mgr, &test_reg, &test_core) == 0);
+        uint8_t staging_buf[512];
+        assert(ecat_transfer_set_staging_buffer(&test_mgr, staging_buf, sizeof(staging_buf)) == 0);
+
+        ecat_foe_transport_t foe_tr;
+        assert(ecat_foe_transport_init_transfer(&foe_tr, &test_mgr) == 0);
+
+        /* 1. 手动发起 begin_import 进入 begin_pending 状态 */
+        ecat_transfer_request_t req = {
+            .transport_id = 1U,
+            .target_id = 92U,
+            .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = 64U
+        };
+        assert(ecat_transfer_begin(&test_mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+        foe_tr.pending = true;
+        foe_tr.begin_pending = true;
+        assert(ecat_foe_transport_owns(&foe_tr) == true);
+
+        /* 2. 在堆上动态分配 volatile 输入缓冲，填入特征字节 0xA5 */
+        uint8_t *volatile_pkt = (uint8_t *)malloc(64);
+        assert(volatile_pkt != NULL);
+        memset(volatile_pkt, 0xA5, 64);
+
+        /* 3. 调用 start: 此时由于底层处于 begin_pending，必须深拷贝入受控暂存并返回 PENDING */
+        assert(ecat_foe_transport_start(&foe_tr, volatile_pkt, 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
+        assert(foe_tr.has_staged_packet == true);
+
+        /* 4. 关键所有权防御验证: 立即 free 掉 volatile 输入内存并置 NULL！
+         * 若内部仅持有悬空裸指针，后续 poll 读取必将触发 ASan 的 heap-use-after-free 报错！ */
+        free(volatile_pkt);
+        volatile_pkt = NULL;
+
+        /* 5. 底层驱动完成 INIT 阶段，推进 poll */
+        s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_COMPLETE;
+        assert(ecat_foe_transport_poll(&foe_tr) == ECAT_UPGRADE_ASYNC_COMPLETE);
+        assert(foe_tr.has_staged_packet == false);
+        assert(s_mock_staged_ctx.write_calls == 1U);
+        assert(s_mock_staged_ctx.received_len == 64U);
+
+        /* 6. 验证落盘数据完全不可变且为最初深拷贝的 0xA5 */
+        for (size_t i = 0; i < 64; i++) {
+            assert(s_mock_staged_ctx.received[i] == 0xA5);
+        }
+
+        /* 7. 测试容量超限严格拒绝: 默认容量 512，传入 600 字节必须返回 FAILED 并 abort */
+        ecat_foe_transport_abort(&foe_tr);
+        s_mock_staged_ctx.init_res = ECAT_ASYNC_OP_PENDING;
+        assert(ecat_transfer_begin(&test_mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+        foe_tr.pending = true;
+        foe_tr.begin_pending = true;
+
+        uint8_t overflow_buf[600];
+        memset(overflow_buf, 0x55, sizeof(overflow_buf));
+        assert(ecat_foe_transport_start(&foe_tr, overflow_buf, sizeof(overflow_buf), true) == ECAT_UPGRADE_ASYNC_FAILED);
+        assert(ecat_foe_transport_owns(&foe_tr) == false);
+
+        /* 8. 测试自定义外部暂存区扩容至 1024 字节后支持大包暂存 */
+        uint8_t custom_1k[1024];
+        assert(ecat_foe_transport_set_staged_buffer(&foe_tr, custom_1k, sizeof(custom_1k)) == 0);
+        assert(ecat_transfer_begin(&test_mgr, &foe_tr, &req, &foe_tr.token) == ECAT_TRANSFER_PENDING);
+        foe_tr.pending = true;
+        foe_tr.begin_pending = true;
+        assert(ecat_foe_transport_start(&foe_tr, overflow_buf, sizeof(overflow_buf), true) == ECAT_UPGRADE_ASYNC_PENDING);
+        assert(foe_tr.has_staged_packet == true);
+        ecat_foe_transport_abort(&foe_tr);
+        assert(ecat_foe_transport_owns(&foe_tr) == false);
     }
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
