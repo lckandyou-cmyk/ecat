@@ -43,6 +43,18 @@ static size_t make_test_efw(uint8_t *out, const uint8_t *payload, uint32_t lengt
     return ECAT_FOE_EFW_HEADER_MIN_LEN + length;
 }
 
+static size_t make_test_signed_efw(uint8_t *out, const uint8_t *payload, uint32_t length, uint16_t target_id)
+{
+    size_t total = make_test_efw(out, payload, length, target_id);
+    out[66] = 1U; /* algorithm: Ed25519ph */
+    out[68] = ECAT_FOE_EFW_SIGNATURE_LEN;
+    out[70] = ECAT_FOE_EFW_KEY_ID_LEN;
+    for (size_t i = 0; i < ECAT_FOE_EFW_KEY_ID_LEN; ++i) out[72U + i] = (uint8_t)(0x10U + i);
+    memset(out + 80U, 0xA5, ECAT_FOE_EFW_SIGNATURE_LEN);
+    put32_le(out + 144, ecat_foe_crc32_calc(out, 144U));
+    return total;
+}
+
 int port_get_version_floor(uint16_t id, uint32_t *v)
 {
     (void)id;
@@ -333,6 +345,7 @@ typedef struct {
     uint32_t erased_watermark;
     bool valid;
     bool pending;
+    bool fail_finalize;
     int starts;
     int polls;
     int abort_calls;
@@ -382,6 +395,7 @@ static ecat_foe_target_async_result_t fw_flash_poll(void *ctx, ecat_foe_target_a
         memcpy(op->data, f->flash + op->offset, op->length);
         break;
     case ECAT_FOE_TARGET_OP_FINALIZE:
+        if (f->fail_finalize) return ECAT_FOE_TARGET_ASYNC_FAILED;
         f->valid = true;
         break;
     }
@@ -404,6 +418,29 @@ static void fw_flash_abort_session(void *ctx) {
 static const ecat_foe_target_async_ops_t s_fw_flash_ops = {
     fw_flash_start, fw_flash_poll, fw_flash_abort, fw_flash_abort_session
 };
+
+static int s_mock_verifier_abort_calls = 0;
+static int s_mock_verifier_begin_calls = 0;
+static int mock_sig_begin(const uint8_t key_id[ECAT_FOE_EFW_KEY_ID_LEN],
+                          const uint8_t signature[ECAT_FOE_EFW_SIGNATURE_LEN], void *user_ctx) {
+    (void)key_id; (void)signature; (void)user_ctx;
+    s_mock_verifier_begin_calls++;
+    return 0;
+}
+static int mock_sig_update(const uint8_t *data, size_t len, void *user_ctx) {
+    (void)data; (void)len; (void)user_ctx;
+    return 0;
+}
+static int s_mock_verifier_fail_finish = 0;
+static int mock_sig_finish(void *user_ctx) {
+    (void)user_ctx;
+    if (s_mock_verifier_fail_finish) return -1;
+    return 0;
+}
+static void mock_sig_abort(void *user_ctx) {
+    (void)user_ctx;
+    s_mock_verifier_abort_calls++;
+}
 
 static int lifecycle_read_open(void *ctx)
 {
@@ -2406,6 +2443,93 @@ int main(void)
     assert(g_read_close_called == false);
     assert(!async_xfer.active);
     s_hw_stage_test.override_read_actual = -1;
+
+    /* 10.12: 异步固件导入单次精确 abort 与验签核心资源彻底复位验证 */
+    printf("--- 测试 10.12: 异步固件导入单次精确 abort 与验签核心资源复位 ---\n");
+    /* 10.12.1: 异步固件导入 expected_size 长度不符触发 finish 失败: 硬件 abort 精确执行 1 次 */
+    ecat_foe_core_on_abort(&core);
+    s_fw_test_flash.abort_calls = 0;
+    s_fw_test_flash.fail_finalize = false;
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    /* 写入 150 字节 (EFW 头部 148 字节已解析且 target session 已启动，但未达到声明的 200 字节) */
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 150U) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.core_started == true);
+    assert(ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    /* 严格断言: 底层硬件驱动 abort 恰好 1 次，绝无连续调用两次 */
+    assert(s_fw_test_flash.abort_calls == 1);
+    assert(mgr_first.core_started == false);
+    assert(mgr_first.active == false);
+
+    /* 10.12.2: 异步固件导入验签 finish 失败: 验签资源 (verifier.abort) 与核心彻底复位 */
+    ecat_foe_core_on_abort(&core);
+    s_fw_test_flash.abort_calls = 0;
+    s_fw_test_flash.fail_finalize = false;
+    s_mock_verifier_abort_calls = 0;
+    s_mock_verifier_fail_finish = 1; /* 注入验签 finish 失败 */
+    core.cfg.signature_verify_enable = true;
+    core.cfg.signature_verifier.begin = mock_sig_begin;
+    core.cfg.signature_verifier.update = mock_sig_update;
+    core.cfg.signature_verifier.finish = mock_sig_finish;
+    core.cfg.signature_verifier.abort = mock_sig_abort;
+    uint8_t signed_efw[200];
+    assert(make_test_signed_efw(signed_efw, fw_payload, sizeof(fw_payload), 1U) == 200U);
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    /* 完整写入 200 字节 */
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, signed_efw, 200U) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.core_started == true);
+    /* 调用 finish 触发校验，验签器报失败 */
+    ecat_transfer_result_t f12_res = ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok);
+    if (f12_res == ECAT_TRANSFER_PENDING) {
+        assert(ecat_transfer_is_pending(&mgr_first) == true);
+        assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_FAILED);
+    } else {
+        assert(f12_res == ECAT_TRANSFER_FAILED);
+    }
+    assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_CORE_UPGRADE);
+    /* 严格断言: 验签资源 abort 精确调用 1 次，底层硬件 abort 精确调用 1 次，核心状态彻底重置 */
+    assert(s_mock_verifier_abort_calls == 1);
+    assert(s_fw_test_flash.abort_calls == 1);
+    assert(mgr_first.core_started == false);
+    assert(mgr_first.active == false);
+    assert(!ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, fw_tok));
+
+    /* 10.12.3: 异步固件导入底层驱动 finalize 失败: 驱动 abort 恰好执行 1 次且核心安全释放 */
+    ecat_foe_core_on_abort(&core);
+    s_fw_test_flash.abort_calls = 0;
+    s_fw_test_flash.fail_finalize = true; /* 驱动提交失败 */
+    s_mock_verifier_abort_calls = 0;
+    s_mock_verifier_fail_finish = 0;     /* 验签通过 */
+    assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
+                                    s_fw10_op, sizeof(s_fw10_op)) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, signed_efw, 200U) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_first.core_started == true);
+    ecat_transfer_result_t f13_res = ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok);
+    if (f13_res == ECAT_TRANSFER_PENDING) {
+        assert(ecat_transfer_is_pending(&mgr_first) == true);
+        assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_FAILED);
+    } else {
+        assert(f13_res == ECAT_TRANSFER_FAILED);
+    }
+    assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_CORE_UPGRADE);
+    assert(s_fw_test_flash.abort_calls == 1);
+    assert(mgr_first.core_started == false);
+    assert(!mgr_first.active);
+
+    /* 清理恢复 */
+    s_fw_test_flash.fail_finalize = false;
+    s_mock_verifier_fail_finish = 0;
+    memset(&core.cfg.signature_verifier, 0, sizeof(core.cfg.signature_verifier));
+    core.cfg.signature_verify_enable = false;
+    ecat_foe_core_on_abort(&core);
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
