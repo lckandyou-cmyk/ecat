@@ -2815,7 +2815,17 @@ int main(void)
             assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)ack_res, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
             assert(core.req_target_id == 1);
             mock_master_read_outbox();
-            soes_abort_core(&adapter);
+
+            /* 主站下发标准 FOE_OP_ERR 报文复位 SOES 协议机回 FOE_READY */
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req = (_FOE *)&MBX[0];
+            req->mbxheader.length = (uint16_t)sizeof(_FOEh);
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_ERR;
+            req->foeheader.errorcode = 0x8000;
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+            ESC_foeprocess();
+            mock_master_read_outbox();
 
             /* 3. FoE 尝试访问异步目标 2: pre_process_hook 识别实际目标为异步，
              *    必须在发 ACK 前切断 n_files 并返回错误，真实 SOES 回复 FOE_OP_ERR (0x8001)，绝不发 ACK(0)！ */
@@ -2862,7 +2872,7 @@ int main(void)
             assert(ack2->foeheader.packetnumber == 0);
             assert(ecat_foe_soes_post_process_hook(&adapter, &s_foe_cfg, (const uint8_t *)ack2, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
             mock_master_read_outbox();
-            soes_abort_core(&adapter);
+            ecat_foe_transport_abort(&adapter.transport);
 
             printf("  [PASS] 深度风险 10: 异步目标在 SOES 下前置预检切断与原生 ERR(0x8001) 拦截验证通过 (防假 ACK)\n");
         }
