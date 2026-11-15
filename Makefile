@@ -2,19 +2,6 @@ CC ?= clang
 CFLAGS ?= -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -Itests/stubs -O2
 PYTHON ?= python3
 
-# 外部依赖路径智能回退 (若未显式指定，优先回退到独立审阅基线目录)
-ifeq ($(origin SOES_DIR),undefined)
-    ifneq ($(wildcard /tmp/ecat-review-deps/soes-baseline/esc_foe.c),)
-        SOES_DIR ?= /tmp/ecat-review-deps/soes-baseline
-    endif
-endif
-
-ifeq ($(origin MONOCYPHER_DIR),undefined)
-    ifneq ($(wildcard /tmp/ecat-review-deps/monocypher-4.0.3/src/monocypher.c),)
-        MONOCYPHER_DIR ?= /tmp/ecat-review-deps/monocypher-4.0.3/src
-    endif
-endif
-
 # 阶段 A: efw 容器解析测试源码
 SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
@@ -25,7 +12,7 @@ TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 
 # 阶段 C: 真实 SOES 源码宿主独立 Harness 测试源码 (按需检测外部 SOES 源码)
 TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
-SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp -I$(SOES_DIR)
+SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp $(if $(SOES_DIR),-I"$(SOES_DIR)",)
 
 # 阶段 D: 宿主机参考示例与驱动模板源码
 EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
@@ -63,7 +50,7 @@ endif
 
 BUILD_DIR ?= build
 OVERWRITE ?= 0
-SOES_DIR ?= /tmp/soes_src/soes
+SOES_DIR ?=
 SOES_HASH_STRICT ?= 0
 MONOCYPHER_DIR ?=
 PDF_SOURCES_DIR ?= $(HOME)/ecat-sources
@@ -96,7 +83,7 @@ build-upgrade:
 	trap 'rm -rf "$$TMP_LIBRARY_DIR"' EXIT INT TERM && \
 	for source in $(UPGRADE_LIBRARY_SOURCES); do \
 		object="$$TMP_LIBRARY_DIR/$$(basename "$$source" .c).o"; \
-		$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) $(UPGRADE_STACK_CFLAGS) -I"$(SOES_DIR)" -c "$$source" -o "$$object" || exit 1; \
+		$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) $(UPGRADE_STACK_CFLAGS) $(if $(SOES_DIR),-I"$(SOES_DIR)",) -c "$$source" -o "$$object" || exit 1; \
 	done && \
 	$(AR) rcs "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$$TMP_LIBRARY_DIR/"*.o && \
 	$(PYTHON) -c 'import shutil,sys; src=open(sys.argv[1], "rb"); dst=open(sys.argv[2], "xb"); shutil.copyfileobj(src,dst); dst.close(); src.close()' "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$(UPGRADE_BUILD_DIR)/libecat_upgrade.a" && \
@@ -146,6 +133,7 @@ test: test-examples test-ssc-async test-target-async test-core-async test-upgrad
 	VECTORS_DIR="$$TMP_BUILD_DIR/vectors" "$$TMP_BUILD_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	$(PYTHON) tests/test_check_soes_hash.py && \
+	$(PYTHON) tests/test_external_deps_guard.py && \
 	$(PYTHON) tests/test_review_docs.py && \
 	CC="$(CC)" $(PYTHON) tests/test_config_override.py && \
 	CC="$(CC)" $(PYTHON) tests/test_target_registry_abi.py && \
