@@ -153,6 +153,7 @@ typedef struct {
     bool pending_invalidate;
     bool pending_erase;
     bool pending_write;
+    bool pending_read;
     bool pending_finalize;
     bool pending_read_open;
     bool pending_read_close;
@@ -162,9 +163,12 @@ typedef struct {
     bool fail_invalidate;
     bool fail_erase;
     bool fail_write;
+    bool fail_read;
     bool fail_finalize;
     bool fail_read_open;
     bool fail_read_close;
+
+    int override_read_actual;
 } test_async_data_hardware_t;
 
 static test_async_data_hardware_t s_hw_stage_test;
@@ -210,6 +214,18 @@ static ecat_async_op_result_t stage_driver_start(void *ctx, ecat_async_data_op_t
         }
         if (hw->pending_write) return ECAT_ASYNC_OP_PENDING;
         return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ) {
+        if (hw->fail_read) return ECAT_ASYNC_OP_FAILED;
+        if (hw->override_read_actual >= 0) {
+            op->actual_length = (size_t)hw->override_read_actual;
+        } else {
+            op->actual_length = op->length;
+        }
+        if (op->offset + op->length <= sizeof(hw->memory) && op->buffer != NULL) {
+            memcpy(op->buffer, hw->memory + op->offset, op->length);
+        }
+        if (hw->pending_read) return ECAT_ASYNC_OP_PENDING;
+        return ECAT_ASYNC_OP_COMPLETE;
     } else if (op->kind == ECAT_ASYNC_DATA_OP_FINALIZE) {
         hw->finalize_called = true;
         if (hw->fail_finalize) return ECAT_ASYNC_OP_FAILED;
@@ -249,6 +265,18 @@ static ecat_async_op_result_t stage_driver_poll(void *ctx, ecat_async_data_op_t 
         if (op->offset + op->length <= sizeof(hw->memory)) {
             memcpy(hw->memory + op->offset, op->buffer, op->length);
         }
+        return ECAT_ASYNC_OP_COMPLETE;
+    } else if (op->kind == ECAT_ASYNC_DATA_OP_READ) {
+        if (hw->fail_read) return ECAT_ASYNC_OP_FAILED;
+        if (hw->override_read_actual >= 0) {
+            op->actual_length = (size_t)hw->override_read_actual;
+        } else {
+            op->actual_length = op->length;
+        }
+        if (op->offset + op->length <= sizeof(hw->memory) && op->buffer != NULL) {
+            memcpy(op->buffer, hw->memory + op->offset, op->length);
+        }
+        if (hw->pending_read) return ECAT_ASYNC_OP_PENDING;
         return ECAT_ASYNC_OP_COMPLETE;
     } else if (op->kind == ECAT_ASYNC_DATA_OP_FINALIZE) {
         if (hw->fail_finalize) return ECAT_ASYNC_OP_FAILED;
@@ -2290,6 +2318,94 @@ int main(void)
     }
     assert(foe_bridge.committed == true);
     assert(mgr_first.active == false);
+
+    /* 10.10: 异步 FIRMWARE 目标 EXPORT 导出完整生命周期与操作后端分发 */
+    printf("--- 测试 10.10: 异步 FIRMWARE 目标 EXPORT 导出与操作后端分发 ---\n");
+    ecat_target_desc_t fw_async_exp_desc;
+    memset(&fw_async_exp_desc, 0, sizeof(fw_async_exp_desc));
+    fw_async_exp_desc.target_id = 13U;
+    strncpy(fw_async_exp_desc.name, "fw_async_exp", sizeof(fw_async_exp_desc.name));
+    fw_async_exp_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    fw_async_exp_desc.permissions = ECAT_PERM_RW;
+    fw_async_exp_desc.max_size = 512U;
+    fw_async_exp_desc.enabled = true;
+    fw_async_exp_desc.asynchronous = true;
+    fw_async_exp_desc.driver.async_ops = &s_stage_data_ops;
+    fw_async_exp_desc.user_ctx = &s_hw_stage_test;
+    assert(ecat_target_registry_add(&async_reg, &fw_async_exp_desc) == 0);
+
+    /* 10.10.1: 异步固件导出 open pending -> poll complete -> read pending -> poll complete -> finish pending -> poll complete */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    s_hw_stage_test.override_read_actual = -1;
+    for (size_t i = 0; i < 64; i++) s_hw_stage_test.memory[i] = (uint8_t)(i ^ 0x5C);
+    ecat_transfer_request_t req_13_exp = {
+        .transport_id = 1U, .target_id = 13U, .direction = ECAT_TRANSFER_DIR_EXPORT, .expected_size = 64U
+    };
+    uint64_t tok_13 = 0;
+    s_hw_stage_test.pending_read_open = true;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_13_exp, &tok_13) == ECAT_TRANSFER_PENDING);
+    assert(s_hw_stage_test.read_open_called == true);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    s_hw_stage_test.pending_read_open = false;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_13) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_is_pending(&async_xfer) == false);
+
+    /* read pending */
+    uint8_t fw_exp_buf[64];
+    size_t fw_exp_act = 0;
+    s_hw_stage_test.pending_read = true;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_13, fw_exp_buf, sizeof(fw_exp_buf), &fw_exp_act) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    s_hw_stage_test.pending_read = false;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_13) == ECAT_TRANSFER_COMPLETE);
+    assert(fw_exp_act == 64U);
+    assert(memcmp(fw_exp_buf, s_hw_stage_test.memory, 64) == 0);
+
+    /* finish pending (READ_CLOSE) */
+    s_hw_stage_test.pending_read_close = true;
+    assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_13) == ECAT_TRANSFER_PENDING);
+    assert(s_hw_stage_test.read_close_called == true);
+    assert(ecat_transfer_is_pending(&async_xfer) == true);
+    s_hw_stage_test.pending_read_close = false;
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_13) == ECAT_TRANSFER_COMPLETE);
+    assert(!async_xfer.active);
+    assert(s_hw_stage_test.abort_calls == 0);
+
+    /* 10.10.2: 异步固件导出中途 cancel，精确触发 async abort 一次，不触发固件写 abort */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    s_hw_stage_test.override_read_actual = -1;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_13_exp, &tok_13) == ECAT_TRANSFER_COMPLETE);
+    s_hw_stage_test.pending_read = true;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_13, fw_exp_buf, sizeof(fw_exp_buf), &fw_exp_act) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_13) == ECAT_TRANSFER_COMPLETE);
+    assert(s_hw_stage_test.abort_calls == 1);
+    assert(!async_xfer.active);
+
+    /* 10.11: 异步读立即失败与报告超长时的清理 (exactly-once abort & no read_close) */
+    printf("--- 测试 10.11: 异步读立即失败与报告超长时单次精确中止 ---\n");
+    /* 10.11.1: 异步 read 立即失败 (start 返回 FAILED) */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    s_hw_stage_test.override_read_actual = -1;
+    g_read_close_called = false;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12_exp, &tok_12_exp) == ECAT_TRANSFER_COMPLETE);
+    s_hw_stage_test.fail_read = true;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_12_exp, fw_exp_buf, sizeof(fw_exp_buf), &fw_exp_act) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_READ);
+    assert(s_hw_stage_test.abort_calls == 1); /* 必须调用 async abort */
+    assert(g_read_close_called == false);    /* 绝不误调同步 read_close */
+    assert(!async_xfer.active);
+
+    /* 10.11.2: 异步 read 立即完成但报告超长 (actual_length > need) */
+    memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+    g_read_close_called = false;
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12_exp, &tok_12_exp) == ECAT_TRANSFER_COMPLETE);
+    s_hw_stage_test.override_read_actual = 100; /* 请求 64 字节，驱动返回 100 字节 */
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_12_exp, fw_exp_buf, 64U, &fw_exp_act) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(s_hw_stage_test.abort_calls == 1);
+    assert(g_read_close_called == false);
+    assert(!async_xfer.active);
+    s_hw_stage_test.override_read_actual = -1;
 
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
