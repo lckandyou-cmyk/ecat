@@ -294,46 +294,82 @@ ecat_transfer_result_t ecat_transfer_begin(
             t->total_size = target->max_size;
         }
 
-        /* 只读生命周期安全校验:
-         * 1. 允许完全无生命周期的纯 read 驱动 (read_open == NULL && read_close == NULL && io.init == NULL)
-         * 2. 安全配对的只读驱动 (read_open != NULL && read_close != NULL)
-         * 3. 拒绝任何未安全配对或缺少只读关闭的驱动:
-         *    - read_open 与 read_close 仅提供其一 (不配对)
-         *    - 需要打开资源 (io.init != NULL) 但缺少 safe read_close (防止资源泄漏或误调 abort 损坏镜像)
-         */
-        bool has_read_open = (target->driver.read_open != NULL);
-        bool has_read_close = (target->driver.read_close != NULL);
-        bool has_io_init = (target->driver.io.init != NULL);
-
-        if (has_read_open != has_read_close) {
-            t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
-            t->active = false;
-            t->driver_initialized = false;
-            release_session(t, owner, acquired_token);
-            return ECAT_TRANSFER_FAILED;
-        }
-
-        if (has_io_init && !has_read_close) {
-            t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
-            t->active = false;
-            t->driver_initialized = false;
-            release_session(t, owner, acquired_token);
-            return ECAT_TRANSFER_FAILED;
-        }
-
-        if (has_read_open && has_read_close) {
-            int init_rc = target->driver.read_open(target->user_ctx);
-            if (init_rc != 0) {
+        if (t->is_async) {
+            /* 异步 EXPORT 模式: 严格使用 async_ops 进行只读打开生命周期控制 */
+            if (target->driver.async_ops == NULL ||
+                target->driver.async_ops->start == NULL ||
+                target->driver.async_ops->poll == NULL ||
+                target->driver.async_ops->abort == NULL) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
                 t->active = false;
                 t->driver_initialized = false;
                 release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
-            t->driver_initialized = true;
+
+            memset(&t->async_data_op, 0, sizeof(t->async_data_op));
+            t->async_data_op.kind = ECAT_ASYNC_DATA_OP_READ_OPEN;
+            ecat_async_op_result_t ares = target->driver.async_ops->start(target->user_ctx, &t->async_data_op);
+            if (ares == ECAT_ASYNC_OP_PENDING) {
+                t->pending = true;
+                t->stage = ECAT_TRANSFER_STAGE_READ_OPEN;
+                t->driver_initialized = true;
+                *token = acquired_token;
+                return ECAT_TRANSFER_PENDING;
+            } else if (ares == ECAT_ASYNC_OP_COMPLETE) {
+                t->driver_initialized = true;
+                *token = acquired_token;
+                return ECAT_TRANSFER_COMPLETE;
+            } else {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+                target->driver.async_ops->abort(target->user_ctx);
+                t->active = false;
+                t->driver_initialized = false;
+                release_session(t, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
         } else {
-            /* 纯 read 驱动，无生命周期开销 */
-            t->driver_initialized = false;
+            /* 同步 EXPORT 模式只读生命周期安全校验:
+             * 1. 允许完全无生命周期的纯 read 驱动 (read_open == NULL && read_close == NULL && io.init == NULL)
+             * 2. 安全配对的只读驱动 (read_open != NULL && read_close != NULL)
+             * 3. 拒绝任何未安全配对或缺少只读关闭的驱动:
+             *    - read_open 与 read_close 仅提供其一 (不配对)
+             *    - 需要打开资源 (io.init != NULL) 但缺少 safe read_close (防止资源泄漏或误调 abort 损坏镜像)
+             */
+            bool has_read_open = (target->driver.read_open != NULL);
+            bool has_read_close = (target->driver.read_close != NULL);
+            bool has_io_init = (target->driver.io.init != NULL);
+
+            if (has_read_open != has_read_close) {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+                t->active = false;
+                t->driver_initialized = false;
+                release_session(t, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
+            if (has_io_init && !has_read_close) {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+                t->active = false;
+                t->driver_initialized = false;
+                release_session(t, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
+            if (has_read_open && has_read_close) {
+                int init_rc = target->driver.read_open(target->user_ctx);
+                if (init_rc != 0) {
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+                    t->active = false;
+                    t->driver_initialized = false;
+                    release_session(t, owner, acquired_token);
+                    return ECAT_TRANSFER_FAILED;
+                }
+                t->driver_initialized = true;
+            } else {
+                /* 纯 read 驱动，无生命周期开销 */
+                t->driver_initialized = false;
+            }
         }
     } else {
         /* IMPORT 模式 */
@@ -443,8 +479,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 }
 
                 memset(&t->async_data_op, 0, sizeof(t->async_data_op));
-                t->async_data_op.kind = (request->direction == ECAT_TRANSFER_DIR_EXPORT) ?
-                    ECAT_ASYNC_DATA_OP_READ_OPEN : ECAT_ASYNC_DATA_OP_INIT;
+                t->async_data_op.kind = ECAT_ASYNC_DATA_OP_INIT;
 
                 ecat_async_op_result_t ares = target->driver.async_ops->start(target->user_ctx, &t->async_data_op);
                 if (ares == ECAT_ASYNC_OP_PENDING) {
@@ -455,8 +490,27 @@ ecat_transfer_result_t ecat_transfer_begin(
                     return ECAT_TRANSFER_PENDING;
                 } else if (ares == ECAT_ASYNC_OP_COMPLETE) {
                     t->driver_initialized = true;
-                    *token = acquired_token;
-                    return ECAT_TRANSFER_COMPLETE;
+                    /* 第一阶段 INIT 立即完成，必须立即启动第二阶段 INVALIDATE，绝不能暗中省略 */
+                    memset(&t->async_data_op, 0, sizeof(t->async_data_op));
+                    t->async_data_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
+                    ecat_async_op_result_t inv_res = target->driver.async_ops->start(target->user_ctx, &t->async_data_op);
+                    if (inv_res == ECAT_ASYNC_OP_PENDING) {
+                        t->pending = true;
+                        t->stage = ECAT_TRANSFER_STAGE_INVALIDATE;
+                        *token = acquired_token;
+                        return ECAT_TRANSFER_PENDING;
+                    } else if (inv_res == ECAT_ASYNC_OP_COMPLETE) {
+                        t->driver_invalidated = true;
+                        *token = acquired_token;
+                        return ECAT_TRANSFER_COMPLETE;
+                    } else {
+                        t->last_error = ECAT_TRANSFER_ERR_DRIVER_INVALIDATE;
+                        target->driver.async_ops->abort(target->user_ctx);
+                        t->active = false;
+                        t->driver_initialized = false;
+                        release_session(t, owner, acquired_token);
+                        return ECAT_TRANSFER_FAILED;
+                    }
                 } else {
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
                     target->driver.async_ops->abort(target->user_ctx);
@@ -761,9 +815,6 @@ ecat_transfer_result_t ecat_transfer_write(
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 if (t->target->driver.async_ops && t->target->driver.async_ops->abort) {
                     t->target->driver.async_ops->abort(t->target->user_ctx);
-                }
-                if (t->driver_initialized && t->target->driver.io.abort != NULL) {
-                    t->target->driver.io.abort(t->target->user_ctx);
                 }
                 t->driver_initialized = false;
                 t->active = false;
@@ -1218,8 +1269,42 @@ ecat_transfer_result_t ecat_transfer_poll(
             return ECAT_TRANSFER_PENDING;
         } else if (res == ECAT_ASYNC_OP_COMPLETE) {
             if (t->stage == ECAT_TRANSFER_STAGE_INIT) {
+                /* INIT 轮询完成，无缝启动第二阶段 INVALIDATE */
+                t->driver_initialized = true;
+                memset(&t->async_data_op, 0, sizeof(t->async_data_op));
+                t->async_data_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
+                ecat_async_op_result_t inv_res = t->target->driver.async_ops->start(t->target->user_ctx, &t->async_data_op);
+                if (inv_res == ECAT_ASYNC_OP_PENDING) {
+                    t->stage = ECAT_TRANSFER_STAGE_INVALIDATE;
+                    return ECAT_TRANSFER_PENDING;
+                } else if (inv_res == ECAT_ASYNC_OP_COMPLETE) {
+                    t->pending = false;
+                    t->stage = ECAT_TRANSFER_STAGE_NONE;
+                    t->driver_invalidated = true;
+                    return ECAT_TRANSFER_COMPLETE;
+                } else {
+                    t->pending = false;
+                    t->stage = ECAT_TRANSFER_STAGE_NONE;
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_INVALIDATE;
+                    if (t->target->driver.async_ops->abort != NULL) {
+                        t->target->driver.async_ops->abort(t->target->user_ctx);
+                    }
+                    t->driver_initialized = false;
+                    t->active = false;
+                    release_session(t, owner, token);
+                    return ECAT_TRANSFER_FAILED;
+                }
+            } else if (t->stage == ECAT_TRANSFER_STAGE_INVALIDATE) {
+                /* INVALIDATE 轮询完成 */
                 t->pending = false;
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
+                t->driver_invalidated = true;
+                return ECAT_TRANSFER_COMPLETE;
+            } else if (t->stage == ECAT_TRANSFER_STAGE_READ_OPEN) {
+                /* 异步 READ_OPEN 轮询完成 */
+                t->pending = false;
+                t->stage = ECAT_TRANSFER_STAGE_NONE;
+                t->driver_initialized = true;
                 return ECAT_TRANSFER_COMPLETE;
             } else if (t->stage == ECAT_TRANSFER_STAGE_ERASE) {
                 uint32_t actual_erased = t->async_data_op.erased_end;
@@ -1360,13 +1445,15 @@ ecat_transfer_result_t ecat_transfer_poll(
             t->pending = false;
             ecat_transfer_stage_t failed_stage = t->stage;
             t->stage = ECAT_TRANSFER_STAGE_NONE;
-            if (failed_stage == ECAT_TRANSFER_STAGE_INIT) {
+            if (failed_stage == ECAT_TRANSFER_STAGE_INIT || failed_stage == ECAT_TRANSFER_STAGE_READ_OPEN) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_INIT;
+            } else if (failed_stage == ECAT_TRANSFER_STAGE_INVALIDATE) {
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_INVALIDATE;
             } else if (failed_stage == ECAT_TRANSFER_STAGE_ERASE) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_ERASE;
             } else if (failed_stage == ECAT_TRANSFER_STAGE_READ) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
-            } else if (failed_stage == ECAT_TRANSFER_STAGE_FINALIZE) {
+            } else if (failed_stage == ECAT_TRANSFER_STAGE_FINALIZE || failed_stage == ECAT_TRANSFER_STAGE_CLOSING) {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_FINALIZE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;

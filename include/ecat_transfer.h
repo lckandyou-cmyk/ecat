@@ -64,6 +64,8 @@ typedef enum {
 typedef enum {
     ECAT_TRANSFER_STAGE_NONE = 0,
     ECAT_TRANSFER_STAGE_INIT,
+    ECAT_TRANSFER_STAGE_INVALIDATE,
+    ECAT_TRANSFER_STAGE_READ_OPEN,
     ECAT_TRANSFER_STAGE_ERASE,
     ECAT_TRANSFER_STAGE_WRITE,
     ECAT_TRANSFER_STAGE_READ,
@@ -98,6 +100,7 @@ typedef struct {
     uint32_t running_crc32;             /* 传输流实时 CRC32 校验码 */
     bool active;                        /* 会话是否处于激活状态 */
     bool driver_initialized;            /* 驱动是否成功初始化 (用于保证 abort 契约) */
+    bool driver_invalidated;            /* 驱动是否成功执行过使能失效 (用于保证擦写前失效契约) */
     bool core_started;                  /* 是否已向底层 core 发起请求 */
     uint32_t saved_core_max_payload;    /* 会话期间暂存的 core 原始容量，防止永久污染配置 */
     uint32_t saved_core_target_idx;     /* 暂存容量对应的目标索引 */
