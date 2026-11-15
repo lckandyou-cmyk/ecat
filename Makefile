@@ -224,7 +224,7 @@ test-transport-endpoint:
 test-end-to-end:
 	@TMP_E2E_DIR=$$(mktemp -d /tmp/ecat_e2e_XXXXXX) && \
 	trap 'rm -rf "$$TMP_E2E_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ecat_upgrade.c tests/test_end_to_end_multitransport.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ecat_upgrade.c src/adapters/ecat_foe_transport.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_upgrade_file.c tests/test_end_to_end_multitransport.c && \
 	"$$TMP_E2E_DIR/test_end_to_end"
 
 test-examples:

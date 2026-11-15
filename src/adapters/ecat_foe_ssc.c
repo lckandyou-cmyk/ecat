@@ -42,10 +42,15 @@ void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
     adapter->async_final_acked = false;
 }
 
+static inline bool ssc_has_transport(const ecat_foe_ssc_adapter_t *a)
+{
+    return (a != NULL && (a->transport.upgrade != NULL || a->transport.transfer != NULL));
+}
+
 int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *a, ecat_upgrade_t *upgrade)
 {
     if (a == NULL || upgrade == NULL || upgrade->core == NULL || a->core != upgrade->core ||
-        a->transport.upgrade != NULL || a->session_active) return -1;
+        ssc_has_transport(a) || a->session_active) return -1;
     if (a->async_gate != NULL && (a->async_gate->pending || a->async_gate->completed ||
         a->async_gate->ops != ecat_foe_transport_async_ops() ||
         a->async_gate->ops_ctx != &a->transport)) return -1;
@@ -57,15 +62,31 @@ int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *a, ecat_upgrade_t *upgrade
     return ecat_foe_transport_init(&a->transport, upgrade);
 }
 
+int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *a, ecat_transfer_t *transfer)
+{
+    if (a == NULL || transfer == NULL || transfer->core == NULL || a->core != transfer->core ||
+        ssc_has_transport(a) || a->session_active) return -1;
+    if (a->async_gate != NULL && (a->async_gate->pending || a->async_gate->completed ||
+        a->async_gate->ops != ecat_foe_transport_async_ops() ||
+        a->async_gate->ops_ctx != &a->transport)) return -1;
+    if (a->async_gate == NULL) {
+        for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
+            if (transfer->core->cfg.targets[i].enabled && transfer->core->cfg.targets[i].asynchronous)
+                return -1;
+        }
+    }
+    return ecat_foe_transport_init_transfer(&a->transport, transfer);
+}
+
 static void ssc_abort_core(ecat_foe_ssc_adapter_t *a)
 {
-    if (a->transport.upgrade != NULL) ecat_foe_transport_abort(&a->transport);
+    if (ssc_has_transport(a)) ecat_foe_transport_abort(&a->transport);
     else ecat_foe_core_on_abort(a->core);
 }
 
 static int ssc_end_core(ecat_foe_ssc_adapter_t *a)
 {
-    if (a->transport.upgrade == NULL) return ecat_foe_core_on_end(a->core);
+    if (!ssc_has_transport(a)) return ecat_foe_core_on_end(a->core);
     int rc = ecat_foe_transport_start(&a->transport, NULL, 0U, false) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1;
     if (rc == 0) a->async_final_acked = true;
     return rc;
@@ -73,7 +94,7 @@ static int ssc_end_core(ecat_foe_ssc_adapter_t *a)
 
 static bool ssc_completed(const ecat_foe_ssc_adapter_t *a)
 {
-    return a->transport.upgrade != NULL ? a->async_final_acked :
+    return ssc_has_transport(a) ? a->async_final_acked :
         (a->core->state == ECAT_FOE_STATE_SUCCESS || a->async_final_acked);
 }
 
@@ -108,7 +129,7 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
         ecat_foe_ssc_async_abort(adapter->async_gate);
     }
     /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
-    int rc = adapter->transport.upgrade != NULL
+    int rc = ssc_has_transport(adapter)
         ? ecat_foe_transport_begin(&adapter->transport, pName, (size_t)nameSize)
         : ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
     if (rc != 0) {
@@ -170,7 +191,7 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
     }
 
     /* 写入常规数据块 */
-    int data_rc = adapter->transport.upgrade != NULL
+    int data_rc = ssc_has_transport(adapter)
         ? (ecat_foe_transport_start(&adapter->transport, pData, length, true) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1)
         : ecat_foe_core_on_data(adapter->core, pData, (size_t)length);
     if (data_rc != 0) {
@@ -224,7 +245,7 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
         return result;
     }
     if (!data_following) {
-        if (adapter->transport.upgrade != NULL ? !adapter->transport.committed :
+        if (ssc_has_transport(adapter) ? !adapter->transport.committed :
             adapter->core->state != ECAT_FOE_STATE_SUCCESS) {
             ecat_foe_ssc_async_abort(adapter->async_gate);
             ssc_abort_core(adapter);

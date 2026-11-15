@@ -278,6 +278,16 @@ ecat_transfer_result_t ecat_transfer_poll(
 bool ecat_transfer_is_pending(const ecat_transfer_t *t);
 
 /**
+ * @brief 查询管理器当前是否有会话处于激活状态
+ * @param t 管理器上下文指针
+ * @return true 处于激活状态，false 处于空闲态
+ */
+static inline bool ecat_transfer_is_active(const ecat_transfer_t *t)
+{
+    return (t != NULL && t->active);
+}
+
+/**
  * @brief 获取当前会话已计算的 IEEE 802.3 CRC32
  */
 uint32_t ecat_transfer_get_crc32(const ecat_transfer_t *t);

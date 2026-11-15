@@ -14,6 +14,7 @@
 
 #include "ecat_foe_core.h"
 #include "ecat_foe_transport.h"
+#include "ecat_transfer.h"
 #include "ecat_foe_ssc_async.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -62,6 +63,17 @@ void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, u
  * the gate with ecat_foe_transport_async_ops() and &adapter->transport first.
  * The shared manager must refer to this same core. */
 int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *adapter, ecat_upgrade_t *upgrade);
+
+/**
+ * @brief 将 SSC 适配层绑定至权威统一双向传输管理器 (ecat_transfer_t)
+ *
+ * 绑定后 SSC 协议栈 (同步或配有 async_gate 的异步) 直接接入统一传输核心。
+ *
+ * @param adapter SSC 适配层指针
+ * @param transfer 权威统一传输管理器指针
+ * @return 0 成功，-1 参数非法或冲突
+ */
+int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *adapter, ecat_transfer_t *transfer);
 
 
 /**

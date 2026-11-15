@@ -8,6 +8,7 @@
 
 #include "ecat_foe_core.h"
 #include "ecat_foe_transport.h"
+#include "ecat_transfer.h"
 #include "esc_foe.h"
 
 #ifdef __cplusplus
@@ -122,6 +123,17 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
  * SOES write callbacks support only synchronous targets. Legacy init alone
  * keeps the existing exclusive-core behavior. */
 int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t *upgrade);
+
+/**
+ * @brief 将 SOES 适配层绑定至权威统一双向传输管理器 (ecat_transfer_t)
+ *
+ * 绑定后 SOES 协议栈直接接入统一传输核心，受管于统一状态机、会话仲裁与 ACL 矩阵。
+ *
+ * @param adapter SOES 适配层指针
+ * @param transfer 权威统一传输管理器指针
+ * @return 0 成功，-1 参数非法或冲突
+ */
+int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_t *transfer);
 
 
 /**

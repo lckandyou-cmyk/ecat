@@ -26,9 +26,111 @@
 #include "ecat_transfer.h"
 #include "ecat_foe_efw.h"
 #include "ecat_upgrade.h"
+#include "ecat_foe_soes.h"
+#include "ecat_foe_ssc.h"
+#include "ecat_foe_ssc_async.h"
+#include "ecat_upgrade_file.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
+
+/* Mock 固件包构造器 */
+static size_t build_e2e_firmware(uint8_t *out_buf, size_t buf_size, uint16_t target_id,
+                                 uint32_t fw_ver, const uint8_t *payload, uint32_t payload_len)
+{
+    assert(buf_size >= ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len);
+    memset(out_buf, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    out_buf[0] = 0x45; out_buf[1] = 0x43; out_buf[2] = 0x46; out_buf[3] = 0x57; /* ECFW */
+    out_buf[4] = 0x02; out_buf[5] = 0x00;                                         /* v2 */
+    out_buf[6] = 0x94; out_buf[7] = 0x00;                                         /* 148 字节头 */
+
+    /* hardware_id = 1 */
+    out_buf[12] = 0x01; out_buf[13] = 0x00; out_buf[14] = 0x00; out_buf[15] = 0x00;
+    /* hw_ver_min = 0x0100, hw_ver_max = 0x0100 */
+    out_buf[16] = 0x00; out_buf[17] = 0x01;
+    out_buf[18] = 0x00; out_buf[19] = 0x01;
+
+    out_buf[20] = (uint8_t)(target_id & 0xFF);
+    out_buf[21] = (uint8_t)((target_id >> 8) & 0xFF);
+    out_buf[22] = 0x00; out_buf[23] = 0x00;
+
+    out_buf[24] = (uint8_t)(fw_ver & 0xFF);
+    out_buf[25] = (uint8_t)((fw_ver >> 8) & 0xFF);
+    out_buf[26] = (uint8_t)((fw_ver >> 16) & 0xFF);
+    out_buf[27] = (uint8_t)((fw_ver >> 24) & 0xFF);
+
+    out_buf[32] = (uint8_t)(payload_len & 0xFF);
+    out_buf[33] = (uint8_t)((payload_len >> 8) & 0xFF);
+    out_buf[34] = (uint8_t)((payload_len >> 16) & 0xFF);
+    out_buf[35] = (uint8_t)((payload_len >> 24) & 0xFF);
+
+    uint32_t p_crc = (payload != NULL && payload_len > 0) ? ecat_foe_crc32_calc(payload, payload_len) : 0U;
+    out_buf[36] = (uint8_t)(p_crc & 0xFF);
+    out_buf[37] = (uint8_t)((p_crc >> 8) & 0xFF);
+    out_buf[38] = (uint8_t)((p_crc >> 16) & 0xFF);
+    out_buf[39] = (uint8_t)((p_crc >> 24) & 0xFF);
+
+    memcpy(out_buf + 60, "SIG2", 4);
+    out_buf[64] = 1U; /* flags: signed */
+    out_buf[66] = 1U; /* algorithm: Ed25519ph */
+    out_buf[68] = ECAT_FOE_EFW_SIGNATURE_LEN;
+    out_buf[70] = ECAT_FOE_EFW_KEY_ID_LEN;
+    for (size_t i = 0; i < ECAT_FOE_EFW_KEY_ID_LEN; ++i) out_buf[72U + i] = (uint8_t)(0x10U + i);
+    memset(out_buf + 80U, 0xA5, ECAT_FOE_EFW_SIGNATURE_LEN);
+    uint32_t h_crc = ecat_foe_crc32_calc(out_buf, 144U);
+    out_buf[144] = (uint8_t)(h_crc & 0xFF);
+    out_buf[145] = (uint8_t)((h_crc >> 8) & 0xFF);
+    out_buf[146] = (uint8_t)((h_crc >> 16) & 0xFF);
+    out_buf[147] = (uint8_t)((h_crc >> 24) & 0xFF);
+
+    if (payload != NULL && payload_len > 0) {
+        memcpy(out_buf + ECAT_FOE_EFW_HEADER_MIN_LEN, payload, payload_len);
+    }
+    return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
+}
+
+/* Mock 签名验证器 (Ed25519 / Monocypher 流式核验) */
+typedef struct {
+    bool fail_finish;
+    unsigned begin_calls;
+    unsigned update_calls;
+    unsigned finish_calls;
+    unsigned abort_calls;
+} test_e2e_sig_verifier_t;
+
+static int e2e_sig_begin(const uint8_t key_id[ECAT_FOE_EFW_KEY_ID_LEN],
+                         const uint8_t signature[ECAT_FOE_EFW_SIGNATURE_LEN],
+                         void *user_ctx)
+{
+    (void)key_id; (void)signature;
+    test_e2e_sig_verifier_t *v = (test_e2e_sig_verifier_t *)user_ctx;
+    if (v) v->begin_calls++;
+    return 0;
+}
+
+static int e2e_sig_update(const uint8_t *data, size_t len, void *user_ctx)
+{
+    (void)data; (void)len;
+    test_e2e_sig_verifier_t *v = (test_e2e_sig_verifier_t *)user_ctx;
+    if (v) v->update_calls++;
+    return 0;
+}
+
+static int e2e_sig_finish(void *user_ctx)
+{
+    test_e2e_sig_verifier_t *v = (test_e2e_sig_verifier_t *)user_ctx;
+    if (v) {
+        v->finish_calls++;
+        return v->fail_finish ? -1 : 0;
+    }
+    return 0;
+}
+
+static void e2e_sig_abort(void *user_ctx)
+{
+    test_e2e_sig_verifier_t *v = (test_e2e_sig_verifier_t *)user_ctx;
+    if (v) v->abort_calls++;
+}
 
 /* Mock 异步数据驱动 */
 static ecat_async_op_result_t s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
@@ -391,6 +493,210 @@ int main(void)
     /* 释放后新端点可再次正常发起 */
     assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, &log_size) == ECAT_TRANSFER_COMPLETE);
     ecat_transport_endpoint_abort(&ep_can);
+
+    /* ---------------------------------------------------------------------- */
+    /* 测试阶段 D: SOES、SSC 与文件流直接接入权威统一传输核心调用链与互斥仲裁   */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试阶段 D: SOES、SSC 与文件流直接接入统一传输核心真实调用链验证 ---\n");
+
+    /* D1: SOES 适配器直连统一传输核心 (ecat_foe_soes_bind_transfer) */
+    /* 开启 core 目标 3 (SII，固件) 用于 ACL 权限拦截对比 */
+    core.cfg.targets[2].enabled = true;
+    core.cfg.targets[2].max_payload_size = 64U * 1024U;
+    core.cfg.targets[2].write_unit = 8U;
+    core.cfg.targets[2].driver = &param_desc.driver.io;
+
+    ecat_foe_soes_adapter_t soes_adapter;
+    ecat_foe_soes_init(&soes_adapter, &core, 128U);
+    assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == 0);
+    /* 重复绑定防御拦截 */
+    assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
+    assert(ecat_foe_soes_bind_upgrade(&soes_adapter, &legacy_upgrade) == -1);
+
+    /* D1.1: ACL 越权拦截 - FoE (通道 1) 未获权写入目标 3 (SII) */
+    const char *soes_sii_fn = "DRIVE_SERVO_SII_V1.0.0.0.efw";
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_sii_fn, strlen(soes_sii_fn)) != 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D1.2: 合法固件全流程烧录 - FoE 写入目标 1 (MCU) */
+    const char *soes_mcu_fn = "DRIVE_SERVO_MCU_V1.0.0.0.efw";
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 互斥检查: 此时 UART 试图写系统参数必须被仲裁拦截 (BUSY) */
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 3U, 16, 0) == ECAT_TRANSFER_BUSY);
+
+    /* 构造合法的 180 字节固件包 (148 头 + 32 负载) */
+    uint8_t fw_payload[32];
+    for (size_t i = 0; i < sizeof(fw_payload); i++) fw_payload[i] = (uint8_t)(i + 0x33);
+    uint8_t fw_buf[256];
+    size_t fw_len = build_e2e_firmware(fw_buf, sizeof(fw_buf), 1U, 0x01000000U, fw_payload, sizeof(fw_payload));
+    assert(fw_len == 180U);
+
+    /* 写入第 1 块 (128 字节，全长包) */
+    assert(ecat_foe_soes_write_cb(NULL, fw_buf, 128U) == 0U);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 写入第 2 块 (52 字节 < 128U，短包触发 finalize 提交) */
+    assert(ecat_foe_soes_write_cb(NULL, fw_buf + 128U, 52U) == 0U);
+    /* 校验写入数据一致性与会话干净释放 */
+    assert(memcmp(s_flash_mcu, fw_payload, sizeof(fw_payload)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D1.3: 损坏固件包防御与单次精确中止清理 */
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    uint8_t bad_fw[128];
+    memcpy(bad_fw, fw_buf, sizeof(bad_fw));
+    bad_fw[0] = 0x00; /* 破坏魔数 */
+    assert(ecat_foe_soes_write_cb(NULL, bad_fw, sizeof(bad_fw)) != 0U);
+    /* 发生错误后必须自动释放租约并重置状态，无泄漏 */
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* D1.4: 重复 WRQ 序列与断链自愈 */
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 在未写入数据时再次发起新的 WRQ，旧会话安全自愈重置并重新建立 */
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    ecat_foe_transport_abort(&soes_adapter.transport);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D2: SSC 适配器直连统一传输核心 (ecat_foe_ssc_bind_transfer)             */
+    /* ---------------------------------------------------------------------- */
+    ecat_foe_ssc_adapter_t ssc_adapter;
+    ecat_foe_ssc_init(&ssc_adapter, &core, 128U);
+    assert(ecat_foe_ssc_bind_transfer(&ssc_adapter, &mgr) == 0);
+    assert(ecat_foe_ssc_bind_transfer(&ssc_adapter, &mgr) == -1);
+
+    /* D2.1: SSC 同步模式固件写入与全流程校验 */
+    assert(ecat_foe_ssc_on_write(&ssc_adapter, soes_mcu_fn, (uint16_t)strlen(soes_mcu_fn), 0U) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 跨通道互斥检查: CAN 试图导出被阻断 (BUSY) */
+    assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
+
+    /* 改变 payload 数据以区分来源 */
+    for (size_t i = 0; i < sizeof(fw_payload); i++) fw_payload[i] = (uint8_t)(i + 0x88);
+    fw_len = build_e2e_firmware(fw_buf, sizeof(fw_buf), 1U, 0x01000000U, fw_payload, sizeof(fw_payload));
+    assert(fw_len == 180U);
+
+    /* 递交第 1 块 (128 字节) */
+    assert(ecat_foe_ssc_on_data(&ssc_adapter, fw_buf, 128U) == 0);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 递交尾包 (52 字节短包结束) */
+    assert(ecat_foe_ssc_on_data(&ssc_adapter, fw_buf + 128U, 52U) == 0);
+    assert(memcmp(s_flash_mcu, fw_payload, sizeof(fw_payload)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3: 文件流适配器直连统一传输核心 (ecat_upgrade_file_init_transfer)      */
+    /* ---------------------------------------------------------------------- */
+    ecat_upgrade_file_t file_tr;
+    uint8_t file_chunk_buf[64];
+    assert(ecat_upgrade_file_init_transfer(&file_tr, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == 0);
+    assert(ecat_upgrade_file_init_transfer(NULL, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == -1);
+
+    /* D3.1: ACL 越权拦截 - FILE 通道 (通道 2) 初始未被授权写 MCU 固件 (目标 1) */
+    ecat_upgrade_request_t upg_mcu_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    FILE *tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
+    rewind(tmp_fp);
+
+    /* 未授权写目标 1，begin 必须返回 FAILED 且租约未激活 */
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_FAILED);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    fclose(tmp_fp);
+
+    /* D3.2: 授权后流式写入与完成校验 */
+    /* 为通道 2 授予写目标 1 权限 */
+    assert(ecat_target_registry_add_acl(&reg, 2U, 1U, ECAT_PERM_WRITE) == 0);
+
+    /* 重新准备固件负载数据 */
+    for (size_t i = 0; i < sizeof(fw_payload); i++) fw_payload[i] = (uint8_t)(i + 0xEE);
+    fw_len = build_e2e_firmware(fw_buf, sizeof(fw_buf), 1U, 0x01000000U, fw_payload, sizeof(fw_payload));
+    tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
+    rewind(tmp_fp);
+
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 此时 FoE 端点被互斥阻断 */
+    assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
+
+    /* 循环 step 流式写入直到 EOF */
+    ecat_upgrade_result_t f_step_res = ECAT_UPGRADE_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
+        f_step_res = ecat_upgrade_file_step(&file_tr);
+    }
+    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(memcmp(s_flash_mcu, fw_payload, sizeof(fw_payload)) == 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    fclose(tmp_fp);
+
+    /* D3.3: 文件流中途 cancel 安全取消与租约释放 */
+    tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
+    rewind(tmp_fp);
+
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_is_active(&mgr) == true);
+    /* 写入第 1 块 */
+    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    /* 调用 cancel 取消传输 */
+    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    /* 释放后 UART 端点可立即发起新操作 */
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 3U, &param_export_size) == ECAT_TRANSFER_COMPLETE);
+    ecat_transport_endpoint_abort(&ep_uart);
+    fclose(tmp_fp);
+
+    /* D3.4: 固件数字签名 (Ed25519) 流式核验与失败防御 */
+    test_e2e_sig_verifier_t sig_verifier;
+    memset(&sig_verifier, 0, sizeof(sig_verifier));
+    core.cfg.signature_verify_enable = true;
+    core.cfg.signature_verifier.begin = e2e_sig_begin;
+    core.cfg.signature_verifier.update = e2e_sig_update;
+    core.cfg.signature_verifier.finish = e2e_sig_finish;
+    core.cfg.signature_verifier.abort = e2e_sig_abort;
+    core.cfg.signature_verifier.user_ctx = &sig_verifier;
+
+    /* 路径 1: 签名验证通过全流程 */
+    tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
+    rewind(tmp_fp);
+
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    f_step_res = ECAT_UPGRADE_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
+        f_step_res = ecat_upgrade_file_step(&file_tr);
+    }
+    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(sig_verifier.begin_calls == 1U);
+    assert(sig_verifier.update_calls > 0U);
+    assert(sig_verifier.finish_calls == 1U);
+    assert(sig_verifier.abort_calls == 0U);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    fclose(tmp_fp);
+
+    /* 路径 2: 签名验证失败拦截与安全回滚 */
+    sig_verifier.fail_finish = true;
+    tmp_fp = tmpfile();
+    assert(tmp_fp != NULL);
+    assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
+    rewind(tmp_fp);
+
+    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    f_step_res = ECAT_UPGRADE_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
+        f_step_res = ecat_upgrade_file_step(&file_tr);
+    }
+    assert(f_step_res == ECAT_UPGRADE_FAILED);
+    assert(sig_verifier.abort_calls > 0U);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    fclose(tmp_fp);
 
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
