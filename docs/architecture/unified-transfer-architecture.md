@@ -272,10 +272,13 @@ flowchart TD
 1. **静态结构体上下文 (Static Context Overhead)**：
    - 全路径零动态内存分配（Zero heap malloc），所有结构体大小编译期固定，可在 `.bss`、数据段或任务栈分配。
    - `ecat_transfer_t` 新增异步支持增量仅 48 字节；`ecat_transport_endpoint_t` 增量仅 8 字节。
-   - **FoE 首包受控暂存瘦身实测**：移除适配桥内部写死的 512 字节静态数组，改为调用方显式配置外部暂存区；SSC 异步模式自动复用 gate 已有的 `packet_storage`。实测静态上下文瘦身效果：
+   - **FoE 首包受控暂存瘦身与共享生命周期实测**：移除适配桥内部写死的 512 字节静态数组，改为调用方显式配置外部暂存区；SSC 异步模式自动复用 gate 已有的 `packet_storage` 并通过 `staged_shared` 标志受控管理。实测静态上下文瘦身效果：
      - `ecat_foe_transport_t`：宿主 64-bit 由 576 降至 64 字节（-512B, -88.9%），32-bit Cortex-M ABI 下由 552 降至 40 字节（-512B, -92.8%）；
      - `ecat_foe_soes_adapter_t`：宿主 64-bit 由 704 降至 192 字节，32-bit Cortex-M 下由 664 降至 152 字节；
      - `ecat_foe_ssc_adapter_t`：宿主 64-bit 由 608 降至 96 字节，32-bit Cortex-M 下由 576 降至 64 字节。
+   - **共享缓存生命周期与重叠拷贝消除**：
+     - 当复用门控已有暂存区时，传输层 abort 中止操作但不提前擦除共享暂存区，保留有效载荷供重发包比对，直至门控握手闭环或错误终结时由门控集中清零；
+     - 当暂存区与传入数据指针重合时显式跳过内存拷贝，100% 消除重叠拷贝的未定义行为。
 2. **调用方数据缓冲区 (Caller Buffers)**：
    - 流式分块传输缓冲（如 `fbuffer`、`staging_buf`）由调用方显式配置传入，核心函数内部绝不定义隐式大数组局部变量。
 3. **运行时调用栈与环境边界 (Runtime Stack & Measurement Boundaries)**：
@@ -304,8 +307,9 @@ flowchart TD
    - **未在此仓库内置**具体的物理芯片硬件外设寄存器驱动（如 STM32/GD32 片上 USART 中断/DMA 驱动、物理 SJA1000/CANopen 控制器寄存器驱动、硬件 QSPI 外设驱动等）。
    - 架构设计中的 UART、CAN 等通道 ID 属于通道规范编号；单元测试中的 `ep_uart`、`ep_can` 属于通用传输端点接口（`ecat_transport_endpoint_t`）的原型验证。实际嵌入式板级工程集成时，须由集成方根据目标芯片 SDK 实现对应外设中断收发与 DMA 回调。
 2. **总线协议栈异步重传能力与纯同步适配器边界**：
-   - **SOES 协议栈**：原生 SOES 缺乏异步重传与暂存重发握手门控机制，其写入回调为纯同步阻塞调用。在 `ecat_foe_soes_bind_transfer` 阶段允许包含给其他通道使用的异步目标的混合注册表成功绑定；但在运行时 WRQ 阶段，若主站请求的目标属于异步目标（`desc->asynchronous == true`），前置钩子将直接切断条目（`foe_cfg->n_files = 0`）由原生 SOES 向主站回复 0x8001 拒绝，坚决防止发送 ACK(0) 接收会话后在数据阶段意外失败，且绝不激活会话、不影响其他通道正常读写该异步目标；
-   - **Beckhoff SSC 纯同步模式**：未挂载异步门（`async_gate == NULL`）的纯同步 SSC 适配器在 `bind_transfer` 同样允许混合注册表绑定；而在 `on_write` 阶段当请求目标为异步目标时返回 `ECAT_FOE_SSC_ERR_ILLEGAL` (0x8004) 拦截，不发 ACK(0) 且不激活会话；仅在挂载了官方标准异步门控（`ecat_foe_ssc_async_t`）时方可承载异步目标。
+   - **SOES 协议栈**：原生 SOES 缺乏异步重传与暂存重发握手门控机制，其写入回调为纯同步阻塞调用。在 `ecat_foe_soes_bind_transfer` 及遗留兼容接口 `ecat_foe_soes_bind_upgrade` 阶段均允许包含给其他通道使用的异步目标的混合注册表或核心配置成功绑定；但在运行时 WRQ 阶段，若主站请求的目标属于异步目标（`desc->asynchronous == true`），前置钩子将直接切断条目（`foe_cfg->n_files = 0`）由原生 SOES 向主站回复 0x8001 拒绝，坚决防止发送 ACK(0) 接收会话后在数据阶段意外失败，且绝不激活会话、不影响其他通道正常读写该异步目标；
+   - **Beckhoff SSC 纯同步模式**：未挂载异步门（`async_gate == NULL`）的纯同步 SSC 适配器在 `bind_transfer` 与 `bind_upgrade` 同样允许混合配置绑定；而在 `on_write` 阶段当请求目标为异步目标时返回 `ECAT_FOE_SSC_ERR_ILLEGAL` (0x8004) 拦截，不发 ACK(0) 且不激活会话；仅在挂载了官方标准异步门控（`ecat_foe_ssc_async_t`）时方可承载异步目标；
+   - **SSC 异步重发与超时错误码契约实测**：在挂载异步门控场景下，同包首包在挂起超时后重发准确返回 `ECAT_FOE_SSC_ERR_PROGERROR` (0x800B)；若超时后收到异包或包号被篡改则严格返回 `ECAT_FOE_SSC_ERR_PACKETNO` (0x8005) 并安全终止会话，协议错误码与重试逻辑经真实 SSC 回调端到端验证无误。
 3. **物理 32 位 MCU 动态联调边界**：
    - 当前所有测试（562 项单元测试、SOES Harness、Bootloader 集成）均在宿主机仿真环境下 100% 绿灯通过，并通过了 32 位静态编译检查（`sizeof(size_t) == 4` 编译检查）；
    - **尚未在真实物理 32 位 MCU 硬件上进行动态烧录与在线双向传输实测**；
