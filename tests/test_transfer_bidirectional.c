@@ -2010,6 +2010,81 @@ int main(void)
     fake_poll_ops.poll = test_fw_async_poll; /* 篡改 poll */
     assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_poll_ops, &real_fw_async_core) == -1);
 
+    /* 10.9 FoE 工业总线适配器直接接入权威统一传输核心 (ecat_foe_transport_init_transfer) */
+    printf("--- 测试 10.9: FoE 适配桥直连统一传输核心与会话互斥仲裁 ---\n");
+    assert(ecat_target_registry_add_acl(&reg, 2U, 1U, ECAT_PERM_WRITE) == 0);
+    uint8_t fw_sec_staging[256];
+    assert(ecat_transfer_init_async_firmware(&mgr_second, ecat_foe_core_async_ops(), &real_fw_async_core) == 0);
+    assert(ecat_transfer_set_staging_buffer(&mgr_second, fw_sec_staging, sizeof(fw_sec_staging)) == 0);
+    ecat_foe_transport_t foe_bridge;
+    /* 参数非法检查 */
+    assert(ecat_foe_transport_init_transfer(NULL, &mgr_first) == -1);
+    assert(ecat_foe_transport_init_transfer(&foe_bridge, NULL) == -1);
+    assert(ecat_foe_transport_init_transfer(&foe_bridge, &mgr_no_core) == -1);
+
+    /* 正确初始化直连统一核心的 FoE 桥 */
+    assert(ecat_foe_transport_init_transfer(&foe_bridge, &mgr_first) == 0);
+    assert(foe_bridge.transfer == &mgr_first);
+    assert(foe_bridge.upgrade == NULL);
+
+    /* 核心未就绪或非法文件名测试 */
+    assert(ecat_foe_transport_begin(&foe_bridge, NULL, 100) == ECAT_FOE_ERRCODE_ILLEGAL);
+    const char *unknown_file = "UNKNOWN_FILE.bin";
+    assert(ecat_foe_transport_begin(&foe_bridge, unknown_file, strlen(unknown_file)) != 0);
+
+    /* 合法 WRQ 请求通过统一传输核心发起传输: TEST_PROJ_MCU_V1.0.0.0.efw */
+    const char *wrq_foe_name = "TEST_PROJ_MCU_V1.0.0.0.efw";
+    assert(ecat_foe_transport_begin(&foe_bridge, wrq_foe_name, strlen(wrq_foe_name)) == 0);
+    assert(ecat_foe_transport_owns(&foe_bridge) == true);
+    assert(mgr_first.active == true);
+    assert(mgr_first.direction == ECAT_TRANSFER_DIR_IMPORT);
+    assert(mgr_first.target != NULL && mgr_first.target->target_id == 1U);
+
+    /* 互斥仲裁验证: 在 FoE 传输占用期间，另一个管理器尝试 begin 必须被排他互斥拦截 */
+    ecat_transfer_request_t foe_conflict_req = {
+        .transport_id = 2U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT, .expected_size = 200U
+    };
+    uint64_t conflict_tok = 0;
+    assert(ecat_transfer_begin(&mgr_second, &client_owner2, &foe_conflict_req, &conflict_tok) == ECAT_TRANSFER_BUSY);
+
+    /* 跨所有者 abort 验证: 非当前租约所有者调用 abort 无效，原租约不受影响 */
+    int foreign_owner_dummy = 999;
+    (void)ecat_transfer_cancel(&mgr_first, &foreign_owner_dummy, foe_bridge.token);
+    assert(mgr_first.active == true);
+    assert(ecat_foe_transport_owns(&foe_bridge) == true);
+
+    /* 通过 FoE abort 正常安全终止 */
+    ecat_foe_transport_abort(&foe_bridge);
+    assert(mgr_first.active == false);
+    assert(ecat_foe_transport_owns(&foe_bridge) == false);
+
+    /* 释放后冲突消除: mgr_second 此时可以正常 begin */
+    assert(ecat_transfer_begin(&mgr_second, &client_owner2, &foe_conflict_req, &conflict_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_second.active == true);
+    /* 此时 FoE 尝试重新 begin 会因 mgr_second 占用而失败 */
+    assert(ecat_foe_transport_begin(&foe_bridge, wrq_foe_name, strlen(wrq_foe_name)) == ECAT_FOE_ERRCODE_NOTDEFINED);
+    /* 取消 mgr_second */
+    assert(ecat_transfer_cancel(&mgr_second, &client_owner2, conflict_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(mgr_second.active == false);
+
+    /* 完整流程测试: 通过 FoE 适配器直接驱动统一核心写入合法固件并提交 */
+    assert(ecat_foe_transport_begin(&foe_bridge, wrq_foe_name, strlen(wrq_foe_name)) == 0);
+    assert(ecat_foe_transport_owns(&foe_bridge) == true);
+
+    /* 写入第 1 块 100 字节 (more_data = true) */
+    assert(ecat_foe_transport_start(&foe_bridge, fw_efw, 100U, true) == ECAT_UPGRADE_ASYNC_COMPLETE);
+    assert(foe_bridge.committed == false);
+
+    /* 写入第 2 块 100 字节 (more_data = false，自动触发 finish) */
+    ecat_upgrade_async_result_t foe_res = ecat_foe_transport_start(&foe_bridge, fw_efw + 100, 100U, false);
+    if (foe_res == ECAT_UPGRADE_ASYNC_PENDING) {
+        assert(ecat_foe_transport_poll(&foe_bridge) == ECAT_UPGRADE_ASYNC_COMPLETE);
+    } else {
+        assert(foe_res == ECAT_UPGRADE_ASYNC_COMPLETE);
+    }
+    assert(foe_bridge.committed == true);
+    assert(mgr_first.active == false);
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

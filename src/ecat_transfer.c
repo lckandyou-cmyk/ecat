@@ -663,7 +663,8 @@ ecat_transfer_result_t ecat_transfer_write(
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
             if (t->is_async && t->fw_async_ops != NULL && t->fw_async_ops->abort != NULL) {
                 t->fw_async_ops->abort(t->fw_async_ctx);
-            } else if (t->core != NULL) {
+            }
+            if (t->core != NULL && t->core_started) {
                 ecat_foe_core_on_abort(t->core);
             }
             t->core_started = false;
@@ -676,6 +677,9 @@ ecat_transfer_result_t ecat_transfer_write(
             if (t->staging_buf == NULL || length > t->staging_capacity) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 if (t->fw_async_ops->abort) t->fw_async_ops->abort(t->fw_async_ctx);
+                if (t->core != NULL && t->core_started) {
+                    ecat_foe_core_on_abort(t->core);
+                }
                 t->core_started = false;
                 t->active = false;
                 release_session(t, owner, token);
@@ -695,6 +699,9 @@ ecat_transfer_result_t ecat_transfer_write(
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 if (t->fw_async_ops->abort) t->fw_async_ops->abort(t->fw_async_ctx);
+                if (t->core != NULL && t->core_started) {
+                    ecat_foe_core_on_abort(t->core);
+                }
                 t->core_started = false;
                 t->active = false;
                 release_session(t, owner, token);
@@ -709,6 +716,7 @@ ecat_transfer_result_t ecat_transfer_write(
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
             }
+            ecat_foe_core_on_abort(t->core);
             t->core_started = false;
             t->active = false;
             release_session(t, owner, token);
@@ -1056,6 +1064,7 @@ ecat_transfer_result_t ecat_transfer_finish(
             }
             if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+                ecat_foe_core_on_abort(t->core);
                 t->core_started = false;
                 t->driver_initialized = false;
                 t->active = false;
@@ -1113,6 +1122,9 @@ ecat_transfer_result_t ecat_transfer_cancel(
         if (t->target != NULL && t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             if (t->fw_async_ops != NULL && t->fw_async_ops->abort != NULL) {
                 t->fw_async_ops->abort(t->fw_async_ctx);
+            }
+            if (t->core_started && t->core != NULL) {
+                ecat_foe_core_on_abort(t->core);
             }
         } else if (t->target != NULL && t->target->driver.async_ops != NULL) {
             if (t->target->driver.async_ops->abort != NULL) {
@@ -1185,6 +1197,9 @@ ecat_transfer_result_t ecat_transfer_poll(
             t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
             if (t->fw_async_ops->abort != NULL) {
                 t->fw_async_ops->abort(t->fw_async_ctx);
+            }
+            if (t->core != NULL && t->core_started) {
+                ecat_foe_core_on_abort(t->core);
             }
             t->core_started = false;
             t->driver_initialized = false;
