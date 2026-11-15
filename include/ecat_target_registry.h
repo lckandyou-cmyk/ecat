@@ -68,15 +68,20 @@ typedef struct {
     uint32_t (*get_data_size)(void *user_ctx);
 
     /**
-     * @brief 可选只读打开回调 (EXPORT 开始时优先调用)
+     * @brief 可选只读打开回调 (EXPORT 开始时调用)
+     * @note 仅用于获取只读资源与互斥锁。read_open 与 read_close 必须成对提供；
+     *       若两者皆为 NULL 且 io.init == NULL，则作为无生命周期纯 read 驱动放行；
+     *       若驱动包含 io.init 但缺少 read_close，为防止资源泄漏或误调 abort 损坏介质镜像，
+     *       导出请求将在 begin 阶段被直接拒绝 (返回 ECAT_TRANSFER_ERR_DRIVER_INIT)，
+     *       绝不回退调用写生命周期的 io.init。
      * @param user_ctx 用户自定义上下文指针
-     * @return 0 成功，非 0 失败；若为 NULL 则回退到 io.init
+     * @return 0 成功，非 0 失败
      */
     int (*read_open)(void *user_ctx);
 
     /**
      * @brief 可选只读关闭回调 (EXPORT 结束或取消时调用)
-     * 仅释放只读会话资源/锁，绝不触碰镜像有效性标记或触发写入失效。
+     * @note 必须与 read_open 成对提供。仅释放只读会话资源/锁，绝不触碰镜像有效性标记或触发写入失效。
      * @param user_ctx 用户自定义上下文指针
      */
     void (*read_close)(void *user_ctx);

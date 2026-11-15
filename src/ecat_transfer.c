@@ -21,11 +21,13 @@ static bool target_registry_acl_adapter(
 }
 
 /**
- * @brief 动态计算固件容器物理上限 (header + payload + padding)
+ * @brief 动态计算固件容器物理上限 (header + payload)
  *
- * 依据 EFW v0.2 规范 (docs/spec/efw-format-v0.2.md)，固件容器头部恒定为 148 字节 (ECAT_FOE_EFW_HEADER_MIN_LEN)。
- * 核心配置的 max_header_size 仅为内部头部装配缓冲容量 (>= 148 字节)，非协议支持扩展头格式。
- * 容器最大尺寸 = eff_payload + 148U + max_padding。
+ * 依据 EFW v0.2 规范 (docs/spec/efw-format-v0.2.md:53)，固件容器头部恒定为 148 字节 (ECAT_FOE_EFW_HEADER_MIN_LEN)；
+ * 空包规避填充若存在亦计入 payload_length，容器传输流中绝不存在独立的尾部未覆盖填充区，
+ * 传输流总字节数恒定有界于 header_length + payload_length。
+ * 核心驱动层对物理介质不足 write_unit 的尾部对齐填充仅发生在设备内部缓冲写入阶段，不属于传输流容器尺寸。
+ * 因此容器流物理总上限精确为: eff_payload + 148U。
  * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕。
  */
 static uint32_t calc_firmware_container_limit(
@@ -34,7 +36,6 @@ static uint32_t calc_firmware_container_limit(
 {
     uint32_t eff_payload = target->max_size;
     uint32_t max_hdr = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    uint32_t max_pad = 7U;
 
     if (core != NULL) {
         if (target->target_id >= 1U && target->target_id <= ECAT_FOE_TARGET_COUNT) {
@@ -43,12 +44,10 @@ static uint32_t calc_firmware_container_limit(
                 core->cfg.targets[target_idx].max_payload_size < eff_payload) {
                 eff_payload = core->cfg.targets[target_idx].max_payload_size;
             }
-            uint32_t wunit = core->cfg.targets[target_idx].write_unit;
-            max_pad = (wunit > 0U) ? (wunit - 1U) : 0U;
         }
     }
 
-    uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr + (uint64_t)max_pad;
+    uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr;
     return (wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap;
 }
 

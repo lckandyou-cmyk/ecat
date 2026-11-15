@@ -560,7 +560,7 @@ int main(void)
     exp_req.target_id = 11U;
     assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(g_read_open_called == true);
-    assert(g_init_called == false); /* read_open 优先于 io.init */
+    assert(g_init_called == false); /* 导出流程绝不调用写生命周期的 io.init */
     assert(g_driver_locked == 1);
     assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(g_read_close_called == true);
@@ -1064,12 +1064,14 @@ int main(void)
     assert(fw_manager.session.owner == NULL); /* finish 失败时安全释放会话锁与资源 */
     assert(fw_manager.active == false);
 
-    /* 8.7 物理容器上限越界拒绝测试 (172 字节 > 171 字节物理上限)，验证拒绝前无驱动副作用 */
+    /* 8.7 物理容器流上限越界精确拒绝测试 (165 字节 > 164 字节物理上限 = 16B payload + 148B header) */
+    /* 依据 docs/spec/efw-format-v0.2.md:53，流中不存在额外的尾部对齐填充；
+     * 即使仅超出 1 字节 (在 write_unit - 1 的对齐补齐窗口内)，亦必须在 begin 阶段被精确拦截，验证拒绝前无驱动副作用 */
     ecat_transfer_request_t oversize_fw_req = {
         .transport_id = 1U,
         .target_id = 1U,
         .direction = ECAT_TRANSFER_DIR_IMPORT,
-        .expected_size = 172U, /* 172 > 16 + 148 + 7 = 171 */
+        .expected_size = 165U, /* 165 > 16 + 148 = 164 */
         .fw_version = 0x01020304U
     };
     uint64_t oversize_fw_tok = 0;

@@ -55,7 +55,7 @@
 ecat_target_registry_t reg;
 ecat_target_registry_init(&reg);
 
-/* 注册参数区 (支持读写) */
+/* 注册参数区 (支持读写；若需导出且涉及硬件互斥/锁，提供成对的 read_open 与 read_close) */
 ecat_target_desc_t param_desc = {
     .target_id = 2U,
     .name = "sys_params",
@@ -72,7 +72,9 @@ ecat_target_desc_t param_desc = {
             .finalize = my_eeprom_finalize,
             .abort = my_eeprom_abort
         },
-        .get_data_size = my_eeprom_get_size
+        .get_data_size = my_eeprom_get_size,
+        .read_open = my_eeprom_read_open,   /* 导出只读生命周期: 与 read_close 成对 */
+        .read_close = my_eeprom_read_close  /* 导出结束/取消释放只读锁，绝不误伤镜像 */
     }
 };
 ecat_target_registry_add(&reg, &param_desc);
@@ -127,4 +129,14 @@ ecat_transport_endpoint_finish_import(&uart_ep);
 ### 5.2 异步传输标志完成度说明 (Asynchronous Flags)
 - **未实现的内容（标为未实现/规划中）**：
   - 目标描述符 `ecat_target_desc_t` 中的 `asynchronous` 标志目前在双向传输管理器 (`ecat_transfer_t`) 中**尚未实现**。
-  - 当前 `ecat_transfer_t` 的 `ecat_transfer_begin`、`ecat_transfer_write`、`ecat_transfer_read`、`ecat_transfer_finish` 等 API 严格采用同步调用模型；对于非阻塞分步轮询与异步完成回调，双向管理器尚未提供集成。当前对异步目标块的处理保留给底层的 `ecat_foe_core_async` 核心，双向传输层暂不执行异步调度。
+  - 当前 `ecat_transfer_t` 的 `ecat_transfer_begin`、`ecat_transfer_write`、`ecat_transfer_read`、`ecat_transfer_finish` 等 API 严格采用同步调用模型；对于非阻塞分步轮询与异步完成回调，双向传输层暂不执行异步调度。当前对异步目标块的处理保留给底层的 `ecat_foe_core_async` 核心，双向传输层暂不执行异步调度。
+
+### 5.3 只读生命周期契约与固件容器流上限规范说明 (Readonly Lifecycle & Container Limit)
+- **只读导出生命周期契约 (EXPORT Lifecycle)**：
+  - **无生命周期纯 read 驱动**：若 `read_open == NULL && read_close == NULL && io.init == NULL`，导出请求直接通过 `io.read` 执行，无需获取/释放生命周期锁；
+  - **有生命周期的只读驱动**：必须显式且成对提供 `.read_open` 与 `.read_close`。在导出开始时调用 `read_open`，导出正常结束或取消时调用 `read_close`（仅释放只读锁，绝不触碰镜像有效性标记）；
+  - **安全防御**：若驱动仅配置了写生命周期的 `io.init` 但缺少安全的 `read_close`，导出请求在 `begin` 阶段直接被拒绝（`ECAT_TRANSFER_ERR_DRIVER_INIT`），**绝不回退调用 `io.init`**，彻底杜绝因驱动在取消/失败时误调用 `io.abort` 损坏介质镜像有效性的隐患。
+- **固件容器流总长物理上限 (Firmware Container Limit)**：
+  - 依据 `docs/spec/efw-format-v0.2.md:53`，固件头部恒定为 148 字节，空包规避填充若存在亦计入 `payload_length`，传输流中绝不存在独立的尾部未覆盖填充区，流总长恒定为 `header_length + payload_length`；
+  - 驱动层不足 `write_unit` 的物理 Flash 补齐仅发生在设备内部缓冲写入阶段，不属于传输流尺寸；
+  - 固件容器流物理总上限精确为 `min(target.max_size, core.max_payload_size) + 148U`。任何超过此物理上限的流在 `begin` 阶段立即被精准拦截。
