@@ -1468,6 +1468,8 @@ int main(void)
     };
     int fw_dummy_ctx = 0;
     assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == 0);
+    uint8_t fw_staging[256];
+    assert(ecat_transfer_set_staging_buffer(&mgr_first, fw_staging, sizeof(fw_staging)) == 0);
 
     /* 注册固件异步目标 */
     ecat_target_desc_t *fw_t1_desc = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
@@ -1501,6 +1503,27 @@ int main(void)
     assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(s_fw_async_poll_called == true);
     assert(ecat_transfer_is_pending(&mgr_first) == false);
+
+    /* 关键断言 1: 异步固件写入经 poll 完成后，CRC32 必须正确更新并与计算值一致 */
+    uint32_t expected_fw_crc = ecat_foe_crc32_calc(fw_chunk, sizeof(fw_chunk));
+    assert(ecat_transfer_get_crc32(&mgr_first) == expected_fw_crc);
+
+    /* 关键断言 2: expected_size 为 200，目前仅写入 100，finish 必须被拒绝且报 BOUNDARY_EXCEEDED */
+    assert(ecat_transfer_finish(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr_first) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+    assert(!mgr_first.active);
+
+    /* 重新发起正常固件升级: expected_size 为 200，完整分块写入 200 字节后 finish */
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;
+    assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_chunk, sizeof(fw_chunk)) == ECAT_TRANSFER_PENDING);
+    s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+    assert(ecat_transfer_poll(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_get_bytes_transferred(&mgr_first) == 200U);
 
     /* finish 触发异步固件提交 */
     s_fw_async_next_res = ECAT_UPGRADE_ASYNC_PENDING;

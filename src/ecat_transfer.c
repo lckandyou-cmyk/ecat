@@ -627,6 +627,9 @@ ecat_transfer_result_t ecat_transfer_write(
         }
 
         if (t->is_async && t->fw_async_ops != NULL) {
+            if (t->staging_buf != NULL && length <= t->staging_capacity) {
+                memcpy(t->staging_buf, data, length);
+            }
             ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, data, length, true);
             if (res == ECAT_UPGRADE_ASYNC_PENDING) {
                 t->pending = true;
@@ -847,6 +850,33 @@ ecat_transfer_result_t ecat_transfer_finish(
 
     if (t->is_async) {
         if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
+            if (t->direction == ECAT_TRANSFER_DIR_EXPORT) {
+                if (t->driver_initialized && t->target->driver.read_close != NULL) {
+                    t->target->driver.read_close(t->target->user_ctx);
+                }
+                t->core_started = false;
+                t->driver_initialized = false;
+                t->active = false;
+                release_session(t, owner, token);
+                return ECAT_TRANSFER_COMPLETE;
+            }
+
+            /* 异步固件导入核验 expected_size */
+            if (t->total_size > 0U && t->current_offset != t->total_size) {
+                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                if (t->fw_async_ops != NULL && t->fw_async_ops->abort != NULL) {
+                    t->fw_async_ops->abort(t->fw_async_ctx);
+                }
+                if (t->core_started && t->core != NULL) {
+                    ecat_foe_core_on_abort(t->core);
+                }
+                t->core_started = false;
+                t->driver_initialized = false;
+                t->active = false;
+                release_session(t, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
             if (t->fw_async_ops != NULL) {
                 ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, NULL, 0U, false);
                 if (res == ECAT_UPGRADE_ASYNC_PENDING) {
@@ -1070,6 +1100,9 @@ ecat_transfer_result_t ecat_transfer_poll(
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->current_offset += (uint32_t)t->pending_length;
+                if (t->staging_buf != NULL && t->pending_length <= t->staging_capacity) {
+                    ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)t->pending_length);
+                }
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 return ECAT_TRANSFER_COMPLETE;
             }
