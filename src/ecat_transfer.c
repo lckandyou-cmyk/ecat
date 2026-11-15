@@ -320,6 +320,8 @@ ecat_transfer_result_t ecat_transfer_begin(
     if (request->direction == ECAT_TRANSFER_DIR_EXPORT) {
         if (target->driver.io.read == NULL && (!t->is_async || target->driver.async_ops == NULL)) {
             t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
+            t->active = false;
+            t->driver_initialized = false;
             release_session(t, owner, acquired_token);
             return ECAT_TRANSFER_FAILED;
         }
@@ -970,6 +972,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_COMPLETE;
                 } else {
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_FINALIZE;
                     transfer_abort_data(t);
                     t->driver_initialized = false;
                     t->active = false;

@@ -2531,6 +2531,115 @@ int main(void)
     core.cfg.signature_verify_enable = false;
     ecat_foe_core_on_abort(&core);
 
+    /* --- 测试 10.13: 导出目标缺少 read 回调时失败清理 active 状态并允许后续正常 begin --- */
+    printf("--- 测试 10.13: 导出目标缺少 read 回调时失败清理 active 状态与后续恢复 ---\n");
+    {
+        ecat_target_registry_t test_reg;
+        ecat_target_registry_init(&test_reg);
+
+        /* 注册一个初始合法的同步目标，随后清空 read 回调模拟驱动缺失 read */
+        ecat_target_desc_t no_read_target = {
+            .target_id = 88U,
+            .name = "no_read",
+            .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_RW,
+            .max_size = 512U,
+            .enabled = true,
+            .asynchronous = false,
+            .driver = {
+                .io = {
+                    .init = NULL,
+                    .erase_to = param_erase_to,
+                    .write = param_write,
+                    .read = param_read,
+                    .finalize = NULL,
+                    .abort = NULL
+                }
+            }
+        };
+        assert(ecat_target_registry_add(&test_reg, &no_read_target) == 0);
+        test_reg.targets[test_reg.target_count - 1U].driver.io.read = NULL;
+
+        ecat_transfer_t test_mgr;
+        assert(ecat_transfer_init(&test_mgr, &test_reg, NULL) == 0);
+
+        ecat_transfer_request_t exp_req = {
+            .transport_id = 1U,
+            .target_id = 88U,
+            .direction = ECAT_TRANSFER_DIR_EXPORT,
+            .expected_size = 0U
+        };
+        uint64_t tok88 = 0U;
+        ecat_transfer_result_t bres = ecat_transfer_begin(&test_mgr, &client_owner1, &exp_req, &tok88);
+        assert(bres == ECAT_TRANSFER_FAILED);
+        assert(ecat_transfer_get_last_error(&test_mgr) == ECAT_TRANSFER_ERR_DRIVER_READ);
+        /* 核心断言: 失败后 active 必须为 false，不能残存 active=true */
+        assert(test_mgr.active == false);
+        assert(ecat_transfer_is_active(&test_mgr) == false);
+        assert(ecat_transfer_is_pending(&test_mgr) == false);
+
+        /* 验证后续对合法目标调用 begin 可以正常执行，不被前次遗留状态影响 */
+        ecat_transfer_request_t valid_req = {
+            .transport_id = 1U,
+            .target_id = 88U, /* 88U 作为 IMPORT 是合法且具备写驱动的 */
+            .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = 64U
+        };
+        uint64_t valid_tok = 0U;
+        assert(ecat_transfer_begin(&test_mgr, &client_owner1, &valid_req, &valid_tok) == ECAT_TRANSFER_COMPLETE);
+        assert(test_mgr.active == true);
+        assert(ecat_transfer_cancel(&test_mgr, &client_owner1, valid_tok) == ECAT_TRANSFER_COMPLETE);
+        assert(test_mgr.active == false);
+    }
+
+    /* --- 测试 10.14: 异步 READ_CLOSE 立即失败设置正确的 last_error 分类 --- */
+    printf("--- 测试 10.14: 异步 READ_CLOSE 立即失败设置正确的 last_error 分类 ---\n");
+    {
+        ecat_target_registry_t test_reg;
+        ecat_target_registry_init(&test_reg);
+
+        test_async_data_hardware_t async_drv;
+        memset(&async_drv, 0, sizeof(async_drv));
+        async_drv.override_read_actual = -1;
+        async_drv.fail_read_close = true; /* READ_CLOSE 启动立即失败 */
+
+        ecat_target_desc_t async_export_target = {
+            .target_id = 89U,
+            .name = "async_exp_fail",
+            .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_RW,
+            .max_size = 512U,
+            .enabled = true,
+            .asynchronous = true,
+            .user_ctx = &async_drv,
+            .driver = {
+                .async_ops = &s_stage_data_ops
+            }
+        };
+        assert(ecat_target_registry_add(&test_reg, &async_export_target) == 0);
+
+        ecat_transfer_t test_mgr;
+        assert(ecat_transfer_init(&test_mgr, &test_reg, NULL) == 0);
+
+        ecat_transfer_request_t exp_req = {
+            .transport_id = 1U,
+            .target_id = 89U,
+            .direction = ECAT_TRANSFER_DIR_EXPORT,
+            .expected_size = 64U
+        };
+        uint64_t tok89 = 0U;
+        assert(ecat_transfer_begin(&test_mgr, &client_owner1, &exp_req, &tok89) == ECAT_TRANSFER_COMPLETE);
+        assert(test_mgr.active == true);
+
+        /* 触发 finish，由于 fail_read_close == true，立即失败 */
+        ecat_transfer_result_t fres = ecat_transfer_finish(&test_mgr, &client_owner1, tok89);
+        assert(fres == ECAT_TRANSFER_FAILED);
+        /* 核心断言: 必须将 last_error 设为 ECAT_TRANSFER_ERR_DRIVER_FINALIZE，与 poll 阶段一致 */
+        assert(ecat_transfer_get_last_error(&test_mgr) == ECAT_TRANSFER_ERR_DRIVER_FINALIZE);
+        assert(test_mgr.active == false);
+        assert(ecat_transfer_is_active(&test_mgr) == false);
+    }
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }
