@@ -6,7 +6,7 @@
 ### 1.1 核心设计理念
 为终结系统中 FoE 工业总线、本地文件流以及用户自定义通道（UART、CAN、BLE 等）并存导致的“双重状态机、重复会话仲裁、多头取消与权限碎片化”问题，本架构确立 **“权威统一传输引擎 (Unified Transfer Engine)”** 为全系统唯一的会话与调度核心：
 1. **单一权威调度核心**：以 `ecat_transfer_t` 为全系统统一核心，统管所有通道建立、ACL 权限核验、数据流导入/导出、同步/真正异步状态机推进、以及统一取消与硬件资源清理。
-2. **严禁引入第三套状态机**：不再引入任何旁路状态机。现有 FoE 协议栈（SOES / SSC）与本地文件流统一通过**轻量兼容适配层 (Compatibility Adapters)** 直接接入统一核心；原有 `ecat_upgrade_t` 仅作为针对旧版固件升级 API 的薄向下兼容层，内部直接委托统一会话仲裁器。
+2. **严禁引入第三套状态机**：不再引入任何旁路状态机。现有 FoE 协议栈（SOES / SSC）与本地文件流统一通过**轻量兼容适配层 (Compatibility Adapters)** 原生直连统一传输核心 (`ecat_transfer_t`)；原有 `ecat_upgrade_t` 保留其固件业务调度状态机以确保现有代码 100% 行为兼容，与权威统一传输核心在全局会话仲裁层 (`ecat_upgrade_session_t`) 与底层 core 状态层实现强绑定互斥与 ACL 协同（详见 6.2 节迁移边界）。
 3. **策略与机制严格分离**：
    - **固件专有策略机**（`ecat_foe_core_t` / `ecat_foe_core_async_t`）：独家负责 EFW 容器解析、Ed25519ph 密码学验签、物理回读 CRC32 比对、版本防回滚策略。
    - **双向传输引擎**（`ecat_transfer_t`）：独家负责会话租约生命周期（`ecat_upgrade_session_t`）、通道访问控制矩阵（ACL）、双向数据流动（IMPORT / EXPORT）、介质擦写前失效化、短写防御与非阻塞轮询调度。
@@ -153,7 +153,7 @@ flowchart TD
     subgraph Layer3["Layer 3: 传输管理核心与会话互斥 (Transfer & Session Core)"]
         L3_TRANSFER["ecat_transfer.c/.h\n双向传输引擎 (权威调度核心)"]
         L3_SESSION["ecat_upgrade_session.c/.h\n跨管理器全局单一租约仲裁器"]
-        L3_LEGACY["ecat_upgrade.c/.h\n遗留固件升级 API 薄向下兼容层"]
+        L3_LEGACY["ecat_upgrade.c/.h\n遗留固件升级状态机 (租约层强绑定互斥)"]
     end
 
     subgraph Layer2["Layer 2: 固件安全策略机 (Firmware Policy Engine)"]
@@ -229,10 +229,24 @@ flowchart TD
    - **保留理由**：固件升级涉及工业级物理安全，具备专有的状态序列（`IDLE -> WRQ_ACKED -> DATA -> SUCCESS / ERROR`）。负责严格校验 148 字节 EFW 头部、硬件版本/工程名称防回滚比对、Ed25519ph 密码学签名核验、物理回读 CRC32 比对。通用传输层无法也不应侵入此类高度专有的安全逻辑。
 2. **权威双向传输调度状态机 (`ecat_transfer_t`)**：
    - **保留理由**：负责双向数据流（IMPORT / EXPORT）的物理介质交互与调度，维护 `IDLE -> PENDING_INIT -> PENDING_INVALIDATE -> ACTIVE -> PENDING_OP -> COMPLETE / ERROR` 状态。负责跨通道租约仲裁、ACL 白名单安全过滤、擦写前介质失效化保护、分块短写完整性裁决。
-3. **消除第三套状态机**：
-   - 原有 `ecat_upgrade_t`、`ecat_foe_transport_t`、`ecat_upgrade_file_t` 不再维护独立的租约或状态机，全部收敛为轻量适配层，直接绑定权威核心 `ecat_transfer_t`，消除了状态撕裂与租约泄漏。
+3. **消除第三套旁路状态机**：
+   - 绝不引入第三套独立状态机。通用端点 (`ecat_transport_endpoint.c`)、FoE 通用适配桥 (`ecat_foe_transport.c`) 与本地文件流 (`ecat_upgrade_file.c`) 均原生接入唯一权威核心 `ecat_transfer_t`，避免状态分叉。
 
-### 6.2 有证据的重复分支合并事实 (Deduplication Evidence)
+### 6.2 遗留固件升级管理器 (`ecat_upgrade_t`) 的保留范围与迁移边界说明 (Legacy Upgrade Boundaries)
+
+特别针对 `ecat_upgrade.c` 的架构地位与演进边界作如下客观、求实界定：
+1. **保留范围（非纯薄包装，保留完整业务流转）**：
+   - `ecat_upgrade.c` 目前仍保留完整的固件业务流转状态机（调用 `ecat_foe_core_begin_request`、`ecat_foe_core_on_data`、`ecat_foe_core_on_end`、`ecat_foe_core_on_abort`），并维护自身的异步跟踪状态（`pending`、`ending`、`asynchronous`、`last_error`）。
+   - 它**不是**单纯委托 `ecat_transfer_write / finish` 的纯薄转接外壳，而是作为保证现有调用方（如现有单元测试套件、特定总线专用接口）100% 行为与二进制不变的独立固件升级管理器实体。
+2. **两者的统一机制（全局会话租约与底核状态排他）**：
+   - 两套管理器通过共享全局单一租约仲裁器 `ecat_upgrade_session_t` 实现了严格的 `manager + owner + token` 强绑定排他互斥，防止跨管理器抢占或误释放；
+   - `ecat_upgrade_begin` 会检查底核 `core->session_active` 与 `core->state`（如处于 `WRQ_ACKED`、`DATA` 时返回 `BUSY`），确保两套入口绝不同时并发操作同一个底层 core；
+   - `ecat_upgrade_begin` 主动挂接 `core->acl_check`，强行核验通道访问控制矩阵，杜绝旧接口成为越权后门。
+3. **后续演进与彻底统一边界条件**：
+   - **当前阶段（阶段一，双管理器安全互斥）**：两套入口在会话租约层、ACL 矩阵层和底核生命周期层已完全打通并消除竞争，保持各自上层调度的独立性与稳定性；
+   - **未来阶段（阶段二，收敛为纯薄转接层）**：必须待外部全部业务代码完成向 `ecat_transfer_t` 的迁移，并在 `ecat_transfer_t` 内部完全吸收固件专有细粒度错误分类与事件回调后，方可将 `ecat_upgrade.c` 抽空为纯薄转发函数。当前阶段严禁宣称“已彻底统一为单一函数外壳”。
+
+### 6.3 有证据的重复分支合并事实 (Deduplication Evidence)
 - **合并 1：异步驱动 ops 完整性校验收敛**：
   在 `ecat_transfer.c` 中，原实现在入口、EXPORT 模式、DATA IMPORT 模式三处各自重复进行 `async_ops != NULL && start != NULL && poll != NULL && abort != NULL` 检查。经收敛后在统一入口一次性强制校验，消除了 2 处共 20 行重复分支代码。
 - **合并 2：硬件中止路径收敛**：
@@ -251,7 +265,7 @@ flowchart TD
 | `ecat_foe_core_t` | 既管固件解析又承载部分通道调用 | **纯粹固件策略机**：内聚 EFW 解析、密码学验签、防回滚与固件存储驱动生命周期 | 职责单一化，边界严明 |
 | `ecat_foe_transport.c` | 仅支持旧版 `ecat_upgrade_t` | **双模式工业总线适配桥**：原生直连统一传输核心，保留旧 API 兼容路径 | 现有协议栈无感知平滑迁移 |
 | `ecat_upgrade_file.c` | 仅能通过旧升级管理器写文件 | **流式传输适配器**：原生直连统一传输核心，支持逐块流式读写与取消 | 本地文件流与总线传输对齐 |
-| `ecat_upgrade_t` | 独立升级管理器（与 transfer 竞争）| **薄向下兼容适配层**：仅供旧 API 编译兼容，底层共享会话仲裁器 | 零破坏向下兼容 |
+| `ecat_upgrade_t` | 独立升级管理器（与 transfer 竞争）| **遗留固件升级状态机**：保留独立业务调度，在全局会话层与 ACL 层实现排他互斥 | 100% 保证既有接口语义，消除多头租约冲突 |
 
 ### 7.2 内存预算与栈开销实测分析 (Memory Allocation & Stack Analysis)
 
