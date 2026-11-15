@@ -1,4 +1,7 @@
-/* Real CLI-to-core Ed25519ph integration; Monocypher is supplied externally. */
+/* Real CLI-to-core Ed25519ph integration; Monocypher is supplied externally.
+ * 边界说明: 本测试链接仓库外真实 Monocypher 4.0.3 密码学库，验证真实私钥签名与端到端密码学公钥验签；
+ * 常规单元测试 (如 test_core.c, test_transfer_bidirectional.c) 使用 mock_signature 回调验证状态机与生命周期契约。
+ */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>

@@ -2,6 +2,19 @@ CC ?= clang
 CFLAGS ?= -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -Itests/stubs -O2
 PYTHON ?= python3
 
+# 外部依赖路径智能回退 (若未显式指定，优先回退到独立审阅基线目录)
+ifeq ($(origin SOES_DIR),undefined)
+    ifneq ($(wildcard /tmp/ecat-review-deps/soes-baseline/esc_foe.c),)
+        SOES_DIR ?= /tmp/ecat-review-deps/soes-baseline
+    endif
+endif
+
+ifeq ($(origin MONOCYPHER_DIR),undefined)
+    ifneq ($(wildcard /tmp/ecat-review-deps/monocypher-4.0.3/src/monocypher.c),)
+        MONOCYPHER_DIR ?= /tmp/ecat-review-deps/monocypher-4.0.3/src
+    endif
+endif
+
 # 阶段 A: efw 容器解析测试源码
 SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
@@ -158,6 +171,7 @@ test-monocypher:
 	@if [ -z "$(MONOCYPHER_DIR)" ] || [ ! -f "$(MONOCYPHER_DIR)/monocypher.c" ] || [ ! -f "$(MONOCYPHER_DIR)/monocypher.h" ] || [ ! -f "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.c" ] || [ ! -f "$(MONOCYPHER_DIR)/optional/monocypher-ed25519.h" ]; then \
 		echo "错误: 请通过 MONOCYPHER_DIR 指定仓库外 Monocypher 4.0.3 的 src 目录"; exit 1; \
 	fi
+	@echo "--- 运行基于真实 Monocypher 4.0.3 的独立 Ed25519ph 真实加密运算与签名互操作验证 (目录: $(MONOCYPHER_DIR)) ---"
 	@TMP_MONOCYPHER_DIR=$$(mktemp -d /tmp/ecat_monocypher_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_MONOCYPHER_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -Iexamples/crypto -I"$(MONOCYPHER_DIR)" -I"$(MONOCYPHER_DIR)/optional" \
