@@ -24,7 +24,9 @@ static void finish_operation(ecat_foe_target_async_t *runner,
 {
     if (result == ECAT_FOE_TARGET_ASYNC_COMPLETE) {
         if (runner->op.kind == ECAT_FOE_TARGET_OP_READ && runner->op.length > 0U) {
-            memcpy(runner->read_destination, runner->storage, runner->op.length);
+            if (runner->read_destination != runner->storage) {
+                memmove(runner->read_destination, runner->storage, runner->op.length);
+            }
         } else if (runner->op.kind == ECAT_FOE_TARGET_OP_ERASE_TO) {
             *runner->erased_end_destination = runner->op.erased_end;
         }
@@ -97,8 +99,8 @@ ecat_foe_target_async_result_t ecat_foe_target_async_start(
     runner->read_destination = read_destination;
     runner->erased_end_destination = erased_end_destination;
     if (kind == ECAT_FOE_TARGET_OP_WRITE) {
-        if (runner->storage != data) {
-            memcpy(runner->storage, data, length);
+        if (runner->storage != data && length > 0U) {
+            memmove(runner->storage, data, length);
         }
         runner->op.data = runner->storage;
     } else if (kind == ECAT_FOE_TARGET_OP_READ) {

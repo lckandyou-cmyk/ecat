@@ -88,8 +88,8 @@ static ecat_upgrade_async_result_t async_start(void *ctx, const uint8_t *data,
     if (s->runner.failed && ecat_foe_target_async_reset(&s->runner) != 0) {
         return ECAT_UPGRADE_ASYNC_FAILED;
     }
-    if (length > 0U) {
-        memcpy(s->packet, data, length);
+    if (length > 0U && s->packet != data) {
+        memmove(s->packet, data, length);
     }
     s->packet_length = length;
     s->packet_cursor = 0U;
@@ -370,8 +370,8 @@ static int start_aligned_write(ecat_foe_core_async_t *s,
         c->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
         return -1;
     }
-    if (data != s->operation_storage) {
-        memcpy(s->operation_storage, data, length);
+    if (data != s->operation_storage && length > 0U) {
+        memmove(s->operation_storage, data, length);
     }
     if (s->operation_need_end > c->erased_watermark) {
         return begin_operation(s, ECAT_FOE_TARGET_OP_ERASE_TO, 0U,

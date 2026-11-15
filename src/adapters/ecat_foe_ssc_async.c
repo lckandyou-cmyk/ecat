@@ -108,8 +108,8 @@ uint16_t ecat_foe_ssc_async_on_data(ecat_foe_ssc_async_t *a,
         return a->packet_error_foe_code;
     }
 
-    if (length > 0U) {
-        memcpy(a->packet_storage, data, length);
+    if (length > 0U && a->packet_storage != data) {
+        memmove(a->packet_storage, data, length);
     }
     a->packet_length = length;
     a->following = data_following;

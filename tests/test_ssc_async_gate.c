@@ -110,6 +110,52 @@ int main(void)
     CHECK(ecat_foe_ssc_async_on_data(&adapter, (uint8_t[]){5U}, 1U, true, 410U) == 0x800BU);
     CHECK(mock.starts == 5U && mock.aborts == 3U);
 
+    /* ---------------------------------------------------------------------- */
+    /* 重叠内存安全防御与生命周期测试 (前向/后向部分重叠、相同地址与独立缓冲) */
+    /* ---------------------------------------------------------------------- */
+    {
+        uint8_t backing[64];
+        uint8_t expected[16];
+        for (size_t i = 0; i < sizeof(backing); i++) backing[i] = (uint8_t)(i + 0x30);
+        memcpy(expected, &backing[8], 16);
+
+        /* Case 1: 前向部分重叠 (packet_storage = &backing[0], data = &backing[8], len = 16) */
+        mock.polls = 0U;
+        mock.pending_polls = 1U;
+        CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, &backing[0], 32, 10U,
+                                      0x800AU, 0x8005U, 0x800BU) == 0);
+        CHECK(ecat_foe_ssc_async_on_data(&adapter, &backing[8], 16, true, 500U) == 0x800AU);
+        CHECK(adapter.pending);
+        CHECK(memcmp(mock.observed, expected, 16) == 0);
+        /* 重试同包匹配验证 */
+        CHECK(ecat_foe_ssc_async_on_data(&adapter, expected, 16, true, 501U) == 0x800AU);
+        /* 轮询完成与清零验证 */
+        CHECK(ecat_foe_ssc_async_poll(&adapter, 502U) == 0x800AU);
+        CHECK(ecat_foe_ssc_async_poll(&adapter, 503U) == 0U);
+        CHECK(adapter.completed && !adapter.pending);
+        CHECK(ecat_foe_ssc_async_on_data(&adapter, expected, 16, true, 504U) == 0U);
+        /* clear_packet 已清零 */
+        for (size_t i = 0; i < 16; i++) CHECK(backing[i] == 0U);
+
+        /* Case 2: 后向部分重叠 (packet_storage = &backing[8], data = &backing[0], len = 16) */
+        for (size_t i = 0; i < sizeof(backing); i++) backing[i] = (uint8_t)(i + 0x30);
+        memcpy(expected, &backing[0], 16);
+        CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, &backing[8], 32, 10U,
+                                      0x800AU, 0x8005U, 0x800BU) == 0);
+        CHECK(ecat_foe_ssc_async_on_data(&adapter, &backing[0], 16, true, 600U) == 0x800AU);
+        CHECK(memcmp(mock.observed, expected, 16) == 0);
+        ecat_foe_ssc_async_abort(&adapter);
+
+        /* Case 3: 完全相同地址 (packet_storage == data) */
+        for (size_t i = 0; i < sizeof(backing); i++) backing[i] = (uint8_t)(i + 0x30);
+        memcpy(expected, &backing[0], 16);
+        CHECK(ecat_foe_ssc_async_init(&adapter, &ops, &mock, &backing[0], 32, 10U,
+                                      0x800AU, 0x8005U, 0x800BU) == 0);
+        CHECK(ecat_foe_ssc_async_on_data(&adapter, &backing[0], 16, true, 700U) == 0x800AU);
+        CHECK(memcmp(mock.observed, expected, 16) == 0);
+        ecat_foe_ssc_async_abort(&adapter);
+    }
+
     puts("PASS: SSC async gate BUSY/retry, packet identity, following flag, timeout and abort");
     return 0;
 }
