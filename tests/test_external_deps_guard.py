@@ -18,17 +18,17 @@ def run_guarded_make(target: str, env_override=None, inject_makeflags=None, expl
     if explicit_args:
         cmd.extend(explicit_args)
     proc_env = os.environ.copy()
-    
+
     # 彻底隔离递归 make 变量与环境依赖变量，防止父 make 命令行覆盖参数渗入
     for key in ['SOES_DIR', 'MONOCYPHER_DIR', 'MAKEFLAGS', 'MAKEOVERRIDES', 'MFLAGS']:
         proc_env.pop(key, None)
-    
+
     if inject_makeflags is not None:
         # 用于特意测试注入特定 MAKEFLAGS 时隔离是否有效
         proc_env['MAKEFLAGS'] = inject_makeflags
     if env_override:
         proc_env.update(env_override)
-        
+
     return subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, env=proc_env)
 
 # ==============================================================================
@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix="ecat_fake_deps_") as fake_tmp:
     fake_soes.mkdir()
     (fake_soes / "esc.c").write_text("// fake", encoding="utf-8")
     (fake_soes / "esc.h").write_text("// fake", encoding="utf-8")
-    
+
     # 即使当前工作目录下或者临时路径中有同名文件，不显式指定时 Makefile 依然拒绝执行
     res_fake = run_guarded_make('test-soes')
     assert res_fake.returncode != 0

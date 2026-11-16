@@ -26,7 +26,7 @@ flowchart TD
         SSC_APP["SSC 轮询与重试门 (ecat_foe_ssc_step)"]
         FILE_APP["文件流调用 (ecat_transfer_file_step)"]
         CUSTOM_APP["自定义总线 (UART/CAN 中断或任务)"]
-        
+
         SOES_ADAPT["SOES 传输适配器\n(ecat_foe_soes.c)"]
         SSC_ADAPT["SSC 传输适配器\n(ecat_foe_ssc.c)"]
         FOE_BRIDGE["FoE 通用适配桥\n(ecat_foe_transport.c)"]
@@ -41,7 +41,7 @@ flowchart TD
         MGR_FINISH["ecat_transfer_finish()\n- 实际长度与 expected_size 严格核验\n- 异步 FINALIZE 提交 / READ_CLOSE 关闭\n- 会话租约释放 (release_mgr)"]
         MGR_POLL["ecat_transfer_poll()\n- 二阶段无缝推进 (INIT->INVALIDATE / ERASE->WRITE)\n- 单次硬件中止 (transfer_abort_data)"]
         MGR_CANCEL["ecat_transfer_cancel()\n- 单次精确硬件中止 (transfer_abort_*)\n- 会话租约释放 (release_mgr)"]
-        
+
         SESSION_MGR["全局单一会话仲裁器\n(ecat_upgrade_session.c)\n- manager + owner + token 强绑定互斥"]
     end
 
