@@ -2359,7 +2359,7 @@ int main(void)
     assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_WRITE);
     assert(!async_xfer.active);
 
-    /* 10.6.4 读取 poll 完成零字节短读契约与越界拦截 */
+    /* 10.6.4 读取 poll 零进展死循环拦截与越界拦截 (零字节短读安全拒绝契约) */
     ecat_transfer_request_t req_11_rd = {
         .transport_id = 1U, .target_id = 11U, .direction = ECAT_TRANSFER_DIR_EXPORT, .expected_size = 128U
     };
@@ -2370,13 +2370,15 @@ int main(void)
     s_override_actual_length = -1;
     s_next_async_result = ECAT_ASYNC_OP_PENDING;
     assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_rd, rd_buf_test, sizeof(rd_buf_test), &actual_rd_test) == ECAT_TRANSFER_PENDING);
-    /* poll 返回 0 字节短读: 必须正确写入 actual_read = 0，不可被当成 64 */
+    /* poll 返回 0 字节零进展: 契约要求判定为驱动错误，安全释放会话防死循环 */
     s_override_actual_length = 0;
     s_next_async_result = ECAT_ASYNC_OP_COMPLETE;
-    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_rd) == ECAT_TRANSFER_CONTINUE);
-    assert(actual_rd_test == 0);
+    assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_rd) == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&async_xfer) == ECAT_TRANSFER_ERR_DRIVER_READ);
+    assert(!async_xfer.active);
 
-    /* 再次发起读取并注入越界 actual_length */
+    /* 重新开启会话，发起读取并注入越界 actual_length */
+    assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_11_rd, &tok_rd) == ECAT_TRANSFER_COMPLETE);
     s_override_actual_length = -1;
     s_next_async_result = ECAT_ASYNC_OP_PENDING;
     assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_rd, rd_buf_test, sizeof(rd_buf_test), &actual_rd_test) == ECAT_TRANSFER_PENDING);
