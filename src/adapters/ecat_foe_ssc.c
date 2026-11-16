@@ -45,24 +45,7 @@ void ecat_foe_ssc_init_async(ecat_foe_ssc_adapter_t *adapter,
 
 static inline bool ssc_has_transport(const ecat_foe_ssc_adapter_t *a)
 {
-    return (a != NULL && (a->transport.upgrade != NULL || a->transport.transfer != NULL));
-}
-
-int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *a, ecat_upgrade_t *upgrade)
-{
-    if (a == NULL || upgrade == NULL || upgrade->core == NULL || a->core != upgrade->core ||
-        ssc_has_transport(a) || a->session_active) return -1;
-    if (a->async_gate != NULL && (a->async_gate->pending || a->async_gate->completed ||
-        a->async_gate->ops != ecat_foe_transport_async_ops() ||
-        a->async_gate->ops_ctx != &a->transport)) return -1;
-    int rc = ecat_foe_transport_init(&a->transport, upgrade);
-    if (rc == 0 && a->async_gate != NULL && a->transport.staged_buf == NULL) {
-        /* 自动复用 SSC 异步门控已有稳定分配的 packet_storage，标记为共享暂存 */
-        (void)ecat_foe_transport_set_shared_staged_buffer(&a->transport,
-                                                          a->async_gate->packet_storage,
-                                                          a->async_gate->packet_capacity);
-    }
-    return rc;
+    return (a != NULL && a->transport.transfer != NULL);
 }
 
 int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *a, ecat_transfer_t *transfer)

@@ -59,11 +59,6 @@ typedef struct {
  * @param max_packet_size SSC 邮箱单包大小 (通常为邮箱数据载荷容量)
  */
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size);
-/* Bind once after init, before accepting requests. For async mode initialize
- * the gate with ecat_foe_transport_async_ops() and &adapter->transport first.
- * The shared manager must refer to this same core. */
-int ecat_foe_ssc_bind_upgrade(ecat_foe_ssc_adapter_t *adapter, ecat_upgrade_t *upgrade);
-
 /**
  * @brief 将 SSC 适配层绑定至权威统一双向传输管理器 (ecat_transfer_t)
  *

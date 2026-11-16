@@ -61,9 +61,21 @@ int bootloader_app_init(bootloader_app_t *app,
 
     /* 4. 初始化 SOES 适配层并绑定信箱上下文 (传入 SOES 文件写缓冲容量 foe_cfg->buffer_size) */
     uint32_t foe_buf_size = (foe_cfg != NULL) ? foe_cfg->buffer_size : 0;
-    if (ecat_upgrade_init(&app->upgrade, &app->core) != 0) return -1;
+    ecat_target_desc_t target;
+    memset(&target, 0, sizeof(target));
+    target.target_id = BOOTLOADER_TARGET_MCU_ID;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.max_size = APP_FLASH_MAX_SIZE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.enabled = true;
+    target.driver.io = *bootloader_flash_driver_get_ops();
+    target.user_ctx = &app->flash_drv;
+    if (ecat_target_registry_init(&app->registry) != 0 ||
+        ecat_target_registry_add(&app->registry, &target) != 0 ||
+        ecat_transfer_init(&app->transfer, &app->registry, &app->core) != 0) return -1;
     ecat_foe_soes_init(&app->adapter, &app->core, foe_buf_size);
-    if (ecat_foe_soes_bind_upgrade(&app->adapter, &app->upgrade) != 0) return -1;
+    if (ecat_foe_soes_bind_transfer(&app->adapter, &app->transfer) != 0) return -1;
     if (ecat_foe_soes_set_mbx_context(&app->adapter, mbxcontrol, mbx, num_slots, slot_size) != 0) {
         return -1;
     }

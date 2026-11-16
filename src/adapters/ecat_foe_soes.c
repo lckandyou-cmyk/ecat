@@ -46,14 +46,7 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
 
 static inline bool soes_has_transport(const ecat_foe_soes_adapter_t *adapter)
 {
-    return (adapter != NULL && (adapter->transport.upgrade != NULL || adapter->transport.transfer != NULL));
-}
-
-int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t *upgrade)
-{
-    if (adapter == NULL || upgrade == NULL || upgrade->core == NULL || adapter->core != upgrade->core ||
-        soes_has_transport(adapter) || adapter->has_staged_wrq) return -1;
-    return ecat_foe_transport_init(&adapter->transport, upgrade);
+    return (adapter != NULL && adapter->transport.transfer != NULL);
 }
 
 int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_t *transfer)
@@ -178,8 +171,15 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
     s_active_adapter = adapter;
     uint16_t tid = 0;
     uint32_t ver = 0;
-    if (ecat_foe_core_validate_wrq(adapter->core, filename, filename_len, &tid, &ver) != 0 ||
-        soes_target_is_async(adapter, tid)) {
+    int vrc = ecat_foe_core_validate_wrq(adapter->core, filename, filename_len, &tid, &ver);
+    if (vrc != 0) {
+        if (soes_has_transport(adapter)) {
+            ecat_foe_transport_abort(&adapter->transport);
+            return vrc;
+        }
+        return ecat_foe_core_on_wrq(adapter->core, filename, filename_len);
+    }
+    if (soes_target_is_async(adapter, tid)) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     if (soes_has_transport(adapter))

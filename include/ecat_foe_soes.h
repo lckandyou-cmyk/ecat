@@ -119,11 +119,6 @@ typedef struct {
  * @param buffer_size SOES 配置的 fbuffer 尺寸
  */
 void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core, uint32_t buffer_size);
-/* Bind after init, before dispatch. Shared manager must own the same core;
- * SOES write callbacks support only synchronous targets. Legacy init alone
- * keeps the existing exclusive-core behavior. */
-int ecat_foe_soes_bind_upgrade(ecat_foe_soes_adapter_t *adapter, ecat_upgrade_t *upgrade);
-
 /**
  * @brief 将 SOES 适配层绑定至权威统一双向传输管理器 (ecat_transfer_t)
  *

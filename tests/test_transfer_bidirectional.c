@@ -2418,7 +2418,6 @@ int main(void)
     /* 正确初始化直连统一核心的 FoE 桥 */
     assert(ecat_foe_transport_init_transfer(&foe_bridge, &mgr_first) == 0);
     assert(foe_bridge.transfer == &mgr_first);
-    assert(foe_bridge.upgrade == NULL);
 
     /* 核心未就绪或非法文件名测试 */
     assert(ecat_foe_transport_begin(&foe_bridge, NULL, 100) == ECAT_FOE_ERRCODE_ILLEGAL);

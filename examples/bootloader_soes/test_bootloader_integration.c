@@ -225,20 +225,21 @@ int main(void)
                                           NULL);
         assert(init_rc == 0);
         assert(app.is_initialized == true);
-        assert(app.adapter.transport.upgrade == &app.upgrade);
+        assert(app.adapter.transport.transfer == &app.transfer);
         {
             int file_entry = 0;
             uint64_t token = 0;
-            ecat_upgrade_request_t request = {BOOTLOADER_TARGET_MCU_ID, 0x01000000U};
+            ecat_transfer_request_t request = {2U, BOOTLOADER_TARGET_MCU_ID,
+                ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
             master_foe_response_t rejected;
             const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
-            assert(ecat_upgrade_begin(&app.upgrade, &file_entry, &request, &token) == ECAT_UPGRADE_COMPLETE);
+            assert(ecat_transfer_begin(&app.transfer, &file_entry, &request, &token) == ECAT_TRANSFER_COMPLETE);
             assert(bootloader_master_send_wrq(&app, &s_foe_cfg, name, 0U, &rejected) == 0);
             assert(rejected.opcode == BOOTLOADER_FOE_OP_ERR);
-            assert(ecat_upgrade_session_owns(&app.upgrade.session, &file_entry, token));
+            assert(ecat_upgrade_session_owns_mgr(app.transfer.session_ptr, &app.transfer, &file_entry, token));
             bootloader_app_abort(&app);
-            assert(ecat_upgrade_session_owns(&app.upgrade.session, &file_entry, token));
-            assert(ecat_upgrade_cancel(&app.upgrade, &file_entry, token) == ECAT_UPGRADE_COMPLETE);
+            assert(ecat_upgrade_session_owns_mgr(app.transfer.session_ptr, &app.transfer, &file_entry, token));
+            assert(ecat_transfer_cancel(&app.transfer, &file_entry, token) == ECAT_TRANSFER_COMPLETE);
         }
 
 

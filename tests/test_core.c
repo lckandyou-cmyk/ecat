@@ -406,11 +406,30 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(core, &cfg), 0, "启用验签且回调齐全的配置可以初始化");
 }
 
+static int setup_test_transfer(ecat_transfer_t *transfer, ecat_target_registry_t *registry,
+                               ecat_foe_core_t *core, mock_driver_t *mcu)
+{
+    ecat_target_desc_t target;
+    memset(&target, 0, sizeof(target));
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.max_size = sizeof(mcu->mem);
+    target.permissions = ECAT_PERM_WRITE;
+    target.enabled = true;
+    target.driver.io = mcu->driver;
+    target.user_ctx = mcu;
+    if (ecat_target_registry_init(registry) != 0 ||
+        ecat_target_registry_add(registry, &target) != 0) return -1;
+    return ecat_transfer_init(transfer, registry, core);
+}
+
 static void test_file_and_foe_signature_failure_equivalence(void)
 {
     static mock_driver_t mcu;
     ecat_foe_core_t core;
-    ecat_upgrade_t upgrade;
+    ecat_transfer_t transfer;
+    ecat_target_registry_t registry;
     uint8_t payload[16] = {1}, efw[256], buffer[64];
     ecat_upgrade_request_t request = {1U, 0x01000000U};
     for (unsigned transport = 0; transport < 2U; transport++) {
@@ -421,14 +440,14 @@ static void test_file_and_foe_signature_failure_equivalence(void)
         memcpy(verifier.expected, efw, length);
         verifier.expected_len = length;
         verifier.fail_finish = true;
-        TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "signed manager ready");
+        TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "signed manager ready");
         if (transport == 0U) {
             FILE *stream = tmpfile();
             TEST_ASSERT(stream != NULL, "signature stream");
             TEST_ASSERT_EQ_INT(fwrite(efw, 1U, length, stream), length, "signed fixture");
             rewind(stream);
             ecat_upgrade_file_t file;
-            TEST_ASSERT_EQ_INT(ecat_upgrade_file_init(&file, &upgrade, buffer, sizeof(buffer)), 0, "file ready");
+            TEST_ASSERT_EQ_INT(ecat_upgrade_file_init_transfer(&file, &transfer, buffer, sizeof(buffer)), 0, "file ready");
             TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_COMPLETE, "signed file begins");
             ecat_upgrade_result_t result = ECAT_UPGRADE_PENDING;
             for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
@@ -438,11 +457,11 @@ static void test_file_and_foe_signature_failure_equivalence(void)
         } else {
             ecat_foe_transport_t foe;
             const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
-            TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE ready");
+            TEST_ASSERT_EQ_INT(ecat_foe_transport_init_transfer(&foe, &transfer), 0, "FoE ready");
             TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "signed FoE begins");
             TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, length, false), ECAT_UPGRADE_ASYNC_FAILED, "signature failure rejects FoE");
         }
-        TEST_ASSERT_EQ_INT(upgrade.last_error, ECAT_FOE_CORE_ERR_SIGNATURE_INVALID, "same diagnostic across transports");
+        TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_SIGNATURE_INVALID, "same diagnostic across transports");
         TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "same cleanup once");
         TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "no commit on bad signature");
         TEST_ASSERT_EQ_INT(verifier.finish_calls, 1, "verification reached");
@@ -454,16 +473,17 @@ static void test_optional_file_transport(void)
 {
     static mock_driver_t mcu;
     ecat_foe_core_t core;
-    ecat_upgrade_t upgrade;
+    ecat_transfer_t transfer;
+    ecat_target_registry_t registry;
     ecat_upgrade_file_t file;
     ecat_foe_transport_t foe;
     uint8_t buffer[32], payload[32] = {1, 3, 5}, efw[256];
     ecat_upgrade_request_t request = {1U, 0x01020304U};
     mock_driver_init(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "shared manager ready");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_file_init(&file, &upgrade, buffer, sizeof(buffer)), 0, "file adapter ready");
-    TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE adapter ready");
+    TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "shared manager ready");
+    TEST_ASSERT_EQ_INT(ecat_upgrade_file_init_transfer(&file, &transfer, buffer, sizeof(buffer)), 0, "file adapter ready");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_init_transfer(&foe, &transfer), 0, "FoE adapter ready");
     size_t length = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
                                   request.fw_version, 0U, payload, sizeof(payload));
     unsigned commits = 0, aborts = 0;
@@ -488,15 +508,15 @@ static void test_optional_file_transport(void)
         TEST_ASSERT_EQ_INT(result, scenario == 0U ? ECAT_UPGRADE_COMPLETE : ECAT_UPGRADE_FAILED, "file result follows integrity checks");
         if (scenario == 0U) commits++; else aborts++;
         TEST_ASSERT_EQ_INT(mcu.count_finalize, commits, "only valid file commits");
-        ecat_foe_core_err_t file_error = upgrade.last_error;
-        TEST_ASSERT(upgrade.session.owner == NULL, "terminal file releases lease");
+        ecat_foe_core_err_t file_error = core.last_error;
+        TEST_ASSERT(transfer.session.owner == NULL, "terminal file releases lease");
         TEST_ASSERT_EQ_INT(fseek(stream, 0, SEEK_SET), 0, "caller still owns FILE lifetime");
         fclose(stream);
         TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "same EFW through FoE");
         TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&foe, efw, written, false),
             scenario == 0U ? ECAT_UPGRADE_ASYNC_COMPLETE : ECAT_UPGRADE_ASYNC_FAILED,
             "same result through FoE");
-        TEST_ASSERT_EQ_INT(upgrade.last_error, file_error, "same detailed diagnostic through FoE");
+        TEST_ASSERT_EQ_INT(core.last_error, file_error, "same detailed diagnostic through FoE");
         if (scenario == 0U) commits++; else aborts++;
         TEST_ASSERT_EQ_INT(mcu.count_finalize, commits, "same commit rule");
         TEST_ASSERT_EQ_INT(mcu.count_abort, aborts, "same abort rule");
@@ -509,21 +529,22 @@ static void test_foe_transport_shares_upgrade_ownership(void)
 {
     static mock_driver_t mcu;
     ecat_foe_core_t core;
-    ecat_upgrade_t upgrade;
+    ecat_transfer_t transfer;
+    ecat_target_registry_t registry;
     ecat_foe_transport_t foe;
     int other = 0;
     uint64_t other_token = 0;
-    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    ecat_transfer_request_t request = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     mock_driver_init(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "manager ready");
-    TEST_ASSERT_EQ_INT(ecat_foe_transport_init(&foe, &upgrade), 0, "FoE bridge ready");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &other, &request, &other_token), ECAT_UPGRADE_COMPLETE, "other entry owns core");
+    TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "manager ready");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_init_transfer(&foe, &transfer), 0, "FoE bridge ready");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &other, &request, &other_token), ECAT_TRANSFER_COMPLETE, "other entry owns core");
     const char *name = "SERVO_DRV_MCU_V1.2.3.4.efw";
     TEST_ASSERT(ecat_foe_transport_begin(&foe, name, strlen(name)) != 0, "FoE cannot steal other entry");
     ecat_foe_transport_abort(&foe);
-    TEST_ASSERT(ecat_upgrade_session_owns(&upgrade.session, &other, other_token), "FoE abort preserves other owner");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &other, other_token), ECAT_UPGRADE_COMPLETE, "other owner cancels");
+    TEST_ASSERT(ecat_upgrade_session_owns(&transfer.session, &other, other_token), "FoE abort preserves other owner");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, other_token), ECAT_TRANSFER_COMPLETE, "other owner cancels");
     TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE begins");
     uint8_t payload[32] = {7, 8}, efw[256];
     size_t len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
@@ -540,14 +561,14 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "old FoE session cleaned");
     ecat_foe_soes_adapter_t adapter;
     ecat_foe_soes_init(&adapter, &core, 512U);
-    TEST_ASSERT_EQ_INT(ecat_foe_soes_bind_upgrade(&adapter, &upgrade), 0, "SOES binds shared manager");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &other, &request, &other_token), ECAT_UPGRADE_COMPLETE, "other owns before SOES");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_bind_transfer(&adapter, &transfer), 0, "SOES binds shared manager");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &other, &request, &other_token), ECAT_TRANSFER_COMPLETE, "other owns before SOES");
     TEST_ASSERT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)) != 0, "SOES WRQ rejected while other owns");
     TEST_ASSERT(ecat_foe_soes_write_cb(NULL, efw, len) != 0, "unsolicited SOES DATA rejected");
     uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT(ecat_upgrade_session_owns(&upgrade.session, &other, other_token), "SOES state hook preserves other owner");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &other, other_token), ECAT_UPGRADE_COMPLETE, "other releases");
+    TEST_ASSERT(ecat_upgrade_session_owns(&transfer.session, &other, other_token), "SOES state hook preserves other owner");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, other_token), ECAT_TRANSFER_COMPLETE, "other releases");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)), 0, "SOES acquires shared core");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw, len), 0, "SOES short callback explicitly commits");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 2, "SOES committed through manager");
@@ -558,34 +579,35 @@ static void test_owned_sync_upgrade_stream(void)
 {
     static mock_driver_t mcu;
     ecat_foe_core_t core;
-    ecat_upgrade_t upgrade;
+    ecat_transfer_t transfer;
+    ecat_target_registry_t registry;
     int foe = 0, file = 0;
     uint64_t token = 0, other = 0;
-    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    ecat_transfer_request_t request = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     mock_driver_init(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    TEST_ASSERT_EQ_INT(ecat_upgrade_init(&upgrade, &core), 0, "manager initialized");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &foe, &request, &token), ECAT_UPGRADE_COMPLETE, "owner begins");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &file, &request, &other), ECAT_UPGRADE_BUSY, "other entry busy");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, token, NULL, 0), ECAT_UPGRADE_STALE, "other entry rejected");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &file, token), ECAT_UPGRADE_STALE, "other entry cannot cancel");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &foe, token, NULL, 0), ECAT_UPGRADE_COMPLETE, "empty write is no-op");
+    TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "manager initialized");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &foe, &request, &token), ECAT_TRANSFER_COMPLETE, "owner begins");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_BUSY, "other entry busy");
+    TEST_ASSERT_EQ_INT(ecat_transfer_write(&transfer, &file, token, NULL, 0), ECAT_TRANSFER_STALE, "other entry rejected");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, token), ECAT_TRANSFER_STALE, "other entry cannot cancel");
+    TEST_ASSERT_EQ_INT(ecat_transfer_write(&transfer, &foe, token, NULL, 0), ECAT_TRANSFER_COMPLETE, "empty write is no-op");
     TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_WRQ_ACKED, "empty write did not finish");
     uint8_t payload[32] = {1, 2, 3}, efw[256];
     size_t len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
                                 0x01020304U, 0U, payload, sizeof(payload));
-    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &foe, token, efw, len), ECAT_UPGRADE_COMPLETE, "stream written");
+    TEST_ASSERT_EQ_INT(ecat_transfer_write(&transfer, &foe, token, efw, len), ECAT_TRANSFER_COMPLETE, "stream written");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 0, "explicit finish required");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_finish(&upgrade, &foe, token), ECAT_UPGRADE_COMPLETE, "finish commits");
+    TEST_ASSERT_EQ_INT(ecat_transfer_finish(&transfer, &foe, token), ECAT_TRANSFER_COMPLETE, "finish commits");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 1, "committed once");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &foe, token), ECAT_UPGRADE_STALE, "completed token stale");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_begin(&upgrade, &file, &request, &other), ECAT_UPGRADE_COMPLETE, "next owner starts");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &foe, token), ECAT_TRANSFER_STALE, "completed token stale");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE, "next owner starts");
     TEST_ASSERT(other > token, "new token generation");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, other, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), ECAT_UPGRADE_COMPLETE, "driver active");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_write(&upgrade, &file, other, NULL, 1), ECAT_UPGRADE_FAILED, "invalid input fails session");
-    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "failure cleans driver once");
-    TEST_ASSERT_EQ_INT(upgrade.last_error, ECAT_FOE_CORE_ERR_INVALID_ARG, "diagnostic retained");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_cancel(&upgrade, &file, other), ECAT_UPGRADE_STALE, "failed token stale");
+    TEST_ASSERT_EQ_INT(ecat_transfer_write(&transfer, &file, other, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), ECAT_TRANSFER_COMPLETE, "driver active");
+    TEST_ASSERT_EQ_INT(ecat_transfer_write(&transfer, &file, other, NULL, 1), ECAT_TRANSFER_INVALID, "invalid input leaves session available for retry");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "invalid argument does not abort session");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "owner cancels session");
+    TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "cancel cleans driver once");
 }
 
 static void test_begin_request_without_filename(void)
@@ -1458,6 +1480,11 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     ecat_foe_soes_adapter_t adapter;
     ecat_foe_soes_init(&adapter, &core, 512);
+
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "", 0), ECAT_FOE_ERRCODE_ILLEGAL, "SOES preserves invalid WRQ error");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26), 0, "SOES starts WRQ");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "", 0), ECAT_FOE_ERRCODE_ILLEGAL, "SOES rejects invalid replacement");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "invalid replacement closes prior legacy session");
 
     foe_file_cfg_t file_cfg;
     memset(&file_cfg, 0, sizeof(file_cfg));
