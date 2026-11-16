@@ -43,7 +43,10 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
     }
 
     /* 检查驱动基本有效性 */
-    if (desc->asynchronous && desc->driver.async_ops != NULL) {
+    if (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous &&
+        (desc->permissions & ECAT_PERM_READ) == 0U && desc->driver.async_ops == NULL) {
+        /* Firmware import uses the async firmware core, not the data driver. */
+    } else if (desc->asynchronous && desc->driver.async_ops != NULL) {
         if (desc->driver.async_ops->start == NULL || desc->driver.async_ops->poll == NULL) {
             return -5;
         }

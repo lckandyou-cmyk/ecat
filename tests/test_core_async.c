@@ -223,8 +223,80 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
     return 0;
 }
 
+/* An asynchronous firmware target needs only its firmware async driver;
+ * requiring unrelated synchronous callbacks defeats the unified path. */
+static int test_async_firmware_without_sync_driver(void)
+{
+    async_flash_t flash = {0};
+    ecat_foe_core_t core;
+    ecat_foe_core_cfg_t cfg = {0};
+    ecat_foe_core_async_t async;
+    ecat_target_registry_t registry;
+    ecat_transfer_t transfer;
+    uint8_t packet[128], operation[128], staging[128];
+    uint8_t image[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
+    const uint8_t payload[16] = {1U, 2U, 3U};
+    ecat_target_desc_t target = {0};
+    ecat_transfer_request_t request = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
+    uint64_t token = 0;
+    int owner = 0;
+    cfg.project_id = 0x10010001U;
+    cfg.project_name = "SERVO_DRV";
+    cfg.hardware_id = 1U;
+    cfg.local_hw_ver = 1U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    cfg.targets[0].target_id = 1U;
+    cfg.targets[0].enabled = true;
+    cfg.targets[0].asynchronous = true;
+    cfg.targets[0].async_ops = &flash_ops;
+    cfg.targets[0].async_user_ctx = &flash;
+    cfg.targets[0].max_payload_size = sizeof(flash.flash);
+    cfg.targets[0].write_unit = 4U;
+    CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+    CHECK(ecat_foe_core_async_init(&async, &core, packet, sizeof(packet), operation, sizeof(operation)) == 0);
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.max_size = sizeof(flash.flash);
+    target.enabled = true;
+    target.asynchronous = true;
+    CHECK(ecat_target_registry_init(&registry) == 0);
+    CHECK(ecat_target_registry_add(&registry, &target) == 0);
+    CHECK(ecat_transfer_init(&transfer, &registry, &core) == 0);
+    CHECK(ecat_transfer_init_async_firmware(&transfer, ecat_foe_core_async_ops(), &async) == 0);
+    CHECK(ecat_transfer_set_staging_buffer(&transfer, staging, sizeof(staging)) == 0);
+    CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
+    size_t image_len = make_efw(image, payload, sizeof(payload));
+    for (size_t pos = 0; pos < image_len;) {
+        size_t length = image_len - pos > sizeof(staging) ? sizeof(staging) : image_len - pos;
+        ecat_transfer_result_t result = ecat_transfer_write(&transfer, &owner, token, image + pos, length);
+        for (unsigned poll = 0; result == ECAT_TRANSFER_PENDING && poll < 64U; ++poll)
+            result = ecat_transfer_poll(&transfer, &owner, token);
+        CHECK(result == ECAT_TRANSFER_COMPLETE);
+        pos += length;
+    }
+    ecat_transfer_result_t result = ecat_transfer_finish(&transfer, &owner, token);
+    for (unsigned poll = 0; result == ECAT_TRANSFER_PENDING && poll < 64U; ++poll)
+        result = ecat_transfer_poll(&transfer, &owner, token);
+    CHECK(result == ECAT_TRANSFER_COMPLETE);
+    CHECK(flash.valid && memcmp(flash.flash, payload, sizeof(payload)) == 0);
+    CHECK(ecat_transfer_cancel(&transfer, &owner, token) == ECAT_TRANSFER_STALE);
+    registry.targets[0].asynchronous = false;
+    CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_FAILED);
+    CHECK(!transfer.active && transfer.session.owner == NULL);
+    registry.targets[0].asynchronous = true;
+    core.cfg.targets[0].asynchronous = false;
+    CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_FAILED);
+    CHECK(!transfer.active && transfer.session.owner == NULL);
+    core.cfg.targets[0].asynchronous = true;
+    CHECK(ecat_foe_core_deinit(&core) == 0);
+    return 0;
+}
+
 int main(void)
 {
+    CHECK(test_async_firmware_without_sync_driver() == 0);
     CHECK(ecat_foe_core_async_ops() == ecat_foe_core_async_ssc_ops());
     static async_flash_t flash;
     static uint8_t packet_storage[128];

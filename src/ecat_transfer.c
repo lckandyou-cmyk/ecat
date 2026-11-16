@@ -432,11 +432,20 @@ ecat_transfer_result_t ecat_transfer_begin(
                 return ECAT_TRANSFER_FAILED;
             }
 
+            if (target->asynchronous != t->core->cfg.targets[target_idx].asynchronous) {
+                t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+                t->active = false;
+                release_session(t, owner, acquired_token);
+                return ECAT_TRANSFER_FAILED;
+            }
+
             /* 校验并绑定底层驱动映射: 验证上下文与所有非空驱动回调一致性 */
             const ecat_foe_target_driver_t *cdrv = t->core->cfg.targets[target_idx].driver;
             const ecat_foe_target_driver_t *rdrv = &target->driver.io;
 
-            if (cdrv == NULL) {
+            if (target->asynchronous) {
+                /* The firmware core owns the async driver and its context. */
+            } else if (cdrv == NULL) {
                 if (rdrv->write == NULL) {
                     t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
                     t->active = false;
