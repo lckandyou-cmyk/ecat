@@ -60,7 +60,8 @@ timeout, and single-call abort behavior with a host mock. It does not verify the
 SSC binary, the async core (not implemented in this stage), a real Flash driver,
 a board, or a master.
 
-`tests/test_ssc_async_adapter.c` verifies the public SSC adapter wrapper routes
-`bDataFollowing`, returns BUSY while pending, advances from the application
-main loop, and acknowledges only after the matching retry. It also uses mocks
-and is not a real SSC or hardware test.
+The current `tests/test_core_async.c` and `tests/test_end_to_end_multitransport.c`
+exercise the SSC adapter through the unified transfer manager, including
+`bDataFollowing`, BUSY, polling and retry. `tests/test_ssc_async_adapter.c`
+checks that an unbound or arbitrary gate cannot bypass that manager. These are
+host tests, not validation against a real SSC stack or target hardware.
