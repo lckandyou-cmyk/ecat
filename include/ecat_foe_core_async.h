@@ -79,9 +79,6 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *session,
 /* Backend consumed by the unified transfer manager. */
 const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
 
-/* Close the engine and its bound core session. */
-void ecat_foe_core_async_abort(ecat_foe_core_async_t *session);
-
 #ifdef __cplusplus
 }
 #endif

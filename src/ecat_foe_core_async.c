@@ -630,10 +630,3 @@ static void async_abort(void *ctx)
     s->packet_complete = false;
     s->end_requested = false;
 }
-
-void ecat_foe_core_async_abort(ecat_foe_core_async_t *s)
-{
-    if (s != NULL && s->core != NULL) {
-        ecat_foe_core_on_abort(s->core);
-    }
-}
