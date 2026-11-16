@@ -275,6 +275,32 @@ static void reset_soes_environment(void)
 }
 
 /* Test 1: WRQ 阶段首块回调时机核查 */
+/* Protocol exercises use a registered manager, matching production wiring. */
+static void init_managed_soes(ecat_foe_soes_adapter_t *adapter,
+                              ecat_foe_core_t *core, uint32_t buffer_size)
+{
+    static ecat_target_registry_t registry;
+    static ecat_transfer_t transfer;
+    assert(ecat_target_registry_init(&registry) == 0);
+    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; ++i) {
+        if (!core->cfg.targets[i].enabled) continue;
+        ecat_target_desc_t target = {0};
+        target.target_id = (uint16_t)(i + 1U);
+        (void)snprintf(target.name, sizeof(target.name), "target%u", (unsigned)target.target_id);
+        target.type = ECAT_TARGET_TYPE_FIRMWARE;
+        target.permissions = ECAT_PERM_WRITE;
+        target.max_size = core->cfg.targets[i].max_payload_size;
+        target.enabled = true;
+        target.asynchronous = core->cfg.targets[i].asynchronous;
+        if (core->cfg.targets[i].driver != NULL) target.driver.io = *core->cfg.targets[i].driver;
+        target.user_ctx = core->cfg.targets[i].user_ctx;
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+    }
+    assert(ecat_transfer_init(&transfer, &registry, core) == 0);
+    ecat_foe_soes_init(adapter, core, buffer_size);
+    assert(ecat_foe_soes_bind_transfer(adapter, &transfer) == 0);
+}
+
 static void test_real_soes_wrq_callback_timing(void)
 {
     printf("--- [Harness Test 1] 真实 SOES WRQ 首块回调时机核查 ---\n");
@@ -606,7 +632,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     assert(ret_init == 0);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
 
     /* 1. 主站发送 WRQ 报文 */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -691,7 +717,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     memset(&core, 0, sizeof(core));
     ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
-    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
 
     /* WRQ */
     MBXcontrol[0].state = MBXstate_inclaim;
@@ -772,7 +798,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
     assert(ret_init == 0);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
     _FOE *res_mbx = NULL;
 
     /* 1. 主站下发 WRQ 报文 */
@@ -812,9 +838,9 @@ static void test_real_soes_without_on_wrq_production_reality(void)
     res_mbx = get_last_outbound_foe();
     assert(res_mbx->foeheader.opcode == FOE_OP_ERR);
     assert(res_mbx->foeheader.errorcode == 0x800B);
-    assert(core.last_error == ECAT_FOE_CORE_ERR_INVALID_STATE);
+    assert(core.state == ECAT_FOE_STATE_IDLE);
     assert(s_harness_drv.count_init == 0);
-    printf("  [PASS] [宿主观察] 生产现实路径: 未调用 on_wrq 时数据到达，核心机拒绝(-1, 0x001B)，适配层回调返回非零(1)，SOES 向主站回复 0x800B\n");
+    printf("  [PASS] [宿主观察] 未调用 on_wrq 时数据被适配层拒绝，SOES 向主站回复 0x800B\n");
 }
 
 /* V3-b: 名字匹配完整矩阵核验 [宿主观察] */
@@ -1075,7 +1101,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     assert(ret_init == 0);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+    init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
     _FOE *res_mbx = NULL;
 
     /* 1. WRQ 握手 */
@@ -1287,7 +1313,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+        init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* Case 1A: 报文总长不足 12 字节 (例如只有 8 字节) */
@@ -1335,7 +1361,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+        init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         /* 从站针对 files[0] 配置专属密码 */
@@ -1408,7 +1434,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 128);
+        init_managed_soes(&adapter, &core, 128);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -1447,7 +1473,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 128);
+        init_managed_soes(&adapter, &core, 128);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -1542,7 +1568,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
         init_harness_cfg(&cfg, &s_harness_drv);
         assert(ecat_foe_core_init(&core, &cfg) == 0);
         ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, s_foe_cfg.buffer_size);
+        init_managed_soes(&adapter, &core, s_foe_cfg.buffer_size);
         assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
         s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -1639,7 +1665,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -1736,7 +1762,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "firmware_mcu.bin";
@@ -1769,7 +1795,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 模拟条目 0 已缓存长文件名 */
@@ -1805,7 +1831,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 从站 SOES 只有 1 个文件配置 (MCU) */
@@ -1852,7 +1878,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 启动合法 Target 1 会话 */
@@ -1937,7 +1963,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 构造伪造的 ACK(1) 报文 (包号为 1 而非 WRQ 应有的 0) */
@@ -1999,7 +2025,7 @@ int main(void)
             assert(ecat_foe_core_init(&core, &cfg) == 0);
 
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 从站 SOES 声明紧凑文件表: 仅 2 个条目 */
@@ -2106,7 +2132,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 构造声明载荷超出传入缓冲区的畸形报文 */
@@ -2141,7 +2167,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 启动合法 Target 1 会话 */
@@ -2210,7 +2236,7 @@ int main(void)
         {
             ecat_foe_soes_adapter_t adapter;
             ecat_foe_core_t core;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
 
             /* 测试重复目标映射拦截 */
             ecat_foe_soes_reset_target_file_map(&adapter);
@@ -2236,7 +2262,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].filepass = 0x12345678U;
@@ -2284,6 +2310,8 @@ int main(void)
             req->foeheader.errorcode = 0x8000;
             req->foeheader.opcode = FOE_OP_ERR;
             req->mbxheader.length = (uint16_t)sizeof(_FOEh);
+            assert(ecat_foe_soes_pre_process_hook(&adapter, &s_foe_cfg, MBX,
+                   sizeof(_MBXh) + sizeof(_FOEh)) == 0);
             ESC_foeprocess();
             mock_master_read_outbox();
 
@@ -2332,7 +2360,7 @@ int main(void)
 
             MBXcontrol[2].state = MBXstate_backup;
 
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -2385,7 +2413,7 @@ int main(void)
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].filepass = 0;
@@ -2444,7 +2472,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -2486,7 +2514,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             MBXcontrol[0].state = MBXstate_inclaim;
@@ -2535,7 +2563,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -2606,7 +2634,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "SERVO_DRV_MCU.efw";
@@ -2671,7 +2699,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             /* 注册协议栈复位函数 FOE_init */
@@ -2723,7 +2751,7 @@ int main(void)
             reset_soes_environment();
             init_harness_cfg(&cfg, &s_harness_drv);
             assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_init(&adapter, &core, 128);
+            init_managed_soes(&adapter, &core, 128);
             assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
 
             s_foe_files[0].name = "SERVO_DRV_MCU.efw";
