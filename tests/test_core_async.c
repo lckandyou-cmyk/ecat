@@ -267,6 +267,14 @@ static int test_async_firmware_without_sync_driver(void)
     CHECK(ecat_transfer_init_async_firmware(&transfer, &async) == 0);
     CHECK(ecat_transfer_set_staging_buffer(&transfer, staging, sizeof(staging)) == 0);
     CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
+    CHECK(ecat_transfer_init(&transfer, &registry, &core) == -1);
+    CHECK(ecat_upgrade_session_owns_mgr(transfer.session_ptr, &transfer, &owner, token));
+    ecat_foe_core_async_t replacement = {0};
+    uint8_t other_packet[128], other_operation[128];
+    CHECK(ecat_foe_core_async_init(&replacement, &core, other_packet, sizeof(other_packet),
+                                  other_operation, sizeof(other_operation)) == -1);
+    CHECK(core.async_abort_ctx == &async);
+    CHECK(ecat_transfer_init_async_firmware(&transfer, &async) == -1);
     size_t image_len = make_efw(image, payload, sizeof(payload));
     for (size_t pos = 0; pos < image_len;) {
         size_t length = image_len - pos > sizeof(staging) ? sizeof(staging) : image_len - pos;

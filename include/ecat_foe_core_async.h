@@ -68,6 +68,7 @@ typedef struct {
  * - 允许边界相邻 (如 packet 结尾与 operation 开头相接)；
  * - 函数内部严格防御容量与地址加法溢出，若发生溢出或区间交叠一律返回 -1 拒绝；
  * - packet_capacity 必须容纳单个输入分块；operation_capacity 必须覆盖最大写入单位且至少 64 字节。
+ * - 关联核心或传输管理器存在活跃会话时拒绝重新初始化，不替换现有中止钩子。
  */
 int ecat_foe_core_async_init(ecat_foe_core_async_t *session,
                              ecat_foe_core_t *core,

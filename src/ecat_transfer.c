@@ -60,6 +60,10 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
     }
 
     if (core != NULL) {
+        if (core->shared_session != NULL &&
+            ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL) {
+            return -1;
+        }
         if (core->registry != NULL && core->registry != reg) {
             /* 严禁冲突绑定: 核心状态机已绑定不同的权威注册表，杜绝 last-writer-wins 劫持 */
             return -1;
@@ -104,6 +108,8 @@ int ecat_transfer_set_staging_buffer(
 int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session)
 {
     if (t == NULL || t->core == NULL || session == NULL) return -1;
+    const ecat_upgrade_session_t *lease = t->session_ptr != NULL ? t->session_ptr : &t->session;
+    if (t->active || lease->owner != NULL) return -1;
     const ecat_upgrade_async_ops_t *ops = ecat_foe_core_async_ops();
     if (session->core != t->core || t->core->async_abort_hook != ops->abort ||
         t->core->async_abort_ctx != session) return -1;

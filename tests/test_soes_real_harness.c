@@ -2229,6 +2229,7 @@ int main(void)
             for (uint8_t s = 1; s < ESC_MBXBUFFERS; s++) {
                 MBXcontrol[s].state = MBXstate_idle;
             }
+            ecat_foe_transport_abort(&adapter.transport);
 
             printf("  [PASS] 深度风险 6: 暂存WRQ在SOES密码拒绝且无输出邮箱时安全丢弃，新鲜度保障防范旧ACK残留且绝不篡改待发报文\n");
         }
@@ -2236,8 +2237,8 @@ int main(void)
         /* 7. 深度风险 7: 重复目标映射拦截与取消映射流转核查 */
         {
             ecat_foe_soes_adapter_t adapter;
-            ecat_foe_core_t core;
-            init_managed_soes(&adapter, &core, 128);
+            ecat_foe_core_t core = {0};
+            ecat_foe_soes_init(&adapter, &core, 128);
 
             /* 测试重复目标映射拦截 */
             ecat_foe_soes_reset_target_file_map(&adapter);

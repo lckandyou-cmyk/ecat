@@ -133,6 +133,7 @@ typedef struct {
  *
  * 【多管理器共享与生命周期契约】：
  * - 若 core != NULL，首个初始化的管理器将向 core 绑定权威注册表与会话仲裁器 (core->shared_session)；
+ * - 绑定核心的共享会话活跃时拒绝初始化；对不含 core 的管理器，调用方须在所有会话结束后才能重新初始化。
  * - 主管理器及其会话存储的生命周期必须覆盖 core 的绑定期及任何共享该 core 的后发管理器；
  *   释放这些对象前须先完成或取消会话，再反初始化 core。
  * - 共享同一个 core 的后续管理器必须传入相同的权威注册表指针 (reg == core->registry)，
@@ -301,7 +302,7 @@ int ecat_transfer_set_staging_buffer(
 
 /**
  * @brief 将已初始化的固件异步会话绑定到传输管理器。
- * 会话必须由该管理器关联的固件核心初始化，且核心的中止钩子仍指向该会话。
+ * 会话必须由该管理器关联的固件核心初始化，且核心的中止钩子仍指向该会话；传输活跃期间不得重新绑定。
  * @return 0 成功，-1 参数非法或会话不属于该核心
  */
 int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session);

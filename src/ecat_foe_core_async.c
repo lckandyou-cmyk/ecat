@@ -1,5 +1,6 @@
 #include "ecat_foe_core_internal.h"
 #include "ecat_foe_core_async.h"
+#include "ecat_upgrade_session.h"
 
 #include <string.h>
 
@@ -47,6 +48,14 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *s,
         packet_storage == NULL || packet_capacity == 0U ||
         operation_storage == NULL ||
         operation_capacity < sizeof(s->readback)) {
+        return -1;
+    }
+
+    /* Never replace the abort hook while a transfer owns this core. */
+    if (core->session_active || core->state == ECAT_FOE_STATE_WRQ_ACKED ||
+        core->state == ECAT_FOE_STATE_DATA ||
+        (core->shared_session != NULL &&
+         ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL)) {
         return -1;
     }
 
