@@ -30,7 +30,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "ecat_foe_async_compat.h"
+#include "ecat_upgrade_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,7 +38,7 @@ extern "C" {
 
 
 typedef struct {
-    const ecat_foe_ssc_async_ops_t *ops;
+    const ecat_upgrade_async_ops_t *ops;
     void *ops_ctx;
     uint8_t *packet_storage;       /* Caller-owned static storage. */
     size_t packet_capacity;
@@ -60,7 +60,7 @@ typedef struct {
  * context must outlive the adapter.
  */
 int ecat_foe_ssc_async_init(ecat_foe_ssc_async_t *adapter,
-                            const ecat_foe_ssc_async_ops_t *ops,
+                            const ecat_upgrade_async_ops_t *ops,
                             void *ops_ctx,
                             uint8_t *packet_storage,
                             size_t packet_capacity,

@@ -18,24 +18,24 @@ typedef struct {
     uint8_t observed[32];
 } mock_t;
 
-static ecat_foe_ssc_async_result_t mock_start(void *ctx, const uint8_t *data,
+static ecat_upgrade_async_result_t mock_start(void *ctx, const uint8_t *data,
                                                size_t length, bool following)
 {
     mock_t *m = (mock_t *)ctx;
     m->starts++;
     m->last_length = length;
     m->last_following = following;
-    if (length > sizeof(m->observed)) return ECAT_FOE_SSC_ASYNC_FAILED;
+    if (length > sizeof(m->observed)) return ECAT_UPGRADE_ASYNC_FAILED;
     if (length > 0U) memcpy(m->observed, data, length);
-    return ECAT_FOE_SSC_ASYNC_PENDING;
+    return ECAT_UPGRADE_ASYNC_PENDING;
 }
 
-static ecat_foe_ssc_async_result_t mock_poll(void *ctx)
+static ecat_upgrade_async_result_t mock_poll(void *ctx)
 {
     mock_t *m = (mock_t *)ctx;
     m->polls++;
-    if (m->polls <= m->pending_polls) return ECAT_FOE_SSC_ASYNC_PENDING;
-    return m->fail_poll ? ECAT_FOE_SSC_ASYNC_FAILED : ECAT_FOE_SSC_ASYNC_COMPLETE;
+    if (m->polls <= m->pending_polls) return ECAT_UPGRADE_ASYNC_PENDING;
+    return m->fail_poll ? ECAT_UPGRADE_ASYNC_FAILED : ECAT_UPGRADE_ASYNC_COMPLETE;
 }
 
 static void mock_abort(void *ctx)
@@ -45,7 +45,7 @@ static void mock_abort(void *ctx)
 
 int main(void)
 {
-    static const ecat_foe_ssc_async_ops_t ops = {mock_start, mock_poll, mock_abort};
+    static const ecat_upgrade_async_ops_t ops = {mock_start, mock_poll, mock_abort};
     ecat_foe_ssc_async_t adapter;
     mock_t mock = {0};
     uint8_t packet_storage[32];

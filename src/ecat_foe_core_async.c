@@ -35,11 +35,6 @@ const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void)
     return &s_async_ops;
 }
 
-const ecat_upgrade_async_ops_t *ecat_foe_core_async_ssc_ops(void)
-{
-    return &s_async_ops;
-}
-
 int ecat_foe_core_async_init(ecat_foe_core_async_t *s,
                              ecat_foe_core_t *core,
                              uint8_t *packet_storage,

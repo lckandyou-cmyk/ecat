@@ -52,7 +52,7 @@ static void mark_timeout(ecat_foe_ssc_async_t *a)
 }
 
 int ecat_foe_ssc_async_init(ecat_foe_ssc_async_t *a,
-                            const ecat_foe_ssc_async_ops_t *ops,
+                            const ecat_upgrade_async_ops_t *ops,
                             void *ops_ctx,
                             uint8_t *packet_storage,
                             size_t packet_capacity,
@@ -115,13 +115,13 @@ uint16_t ecat_foe_ssc_async_on_data(ecat_foe_ssc_async_t *a,
     a->following = data_following;
     a->deadline = now_ticks + a->timeout_ticks;
 
-    ecat_foe_ssc_async_result_t result =
+    ecat_upgrade_async_result_t result =
         a->ops->start(a->ops_ctx, a->packet_storage, length, data_following);
-    if (result == ECAT_FOE_SSC_ASYNC_PENDING) {
+    if (result == ECAT_UPGRADE_ASYNC_PENDING) {
         a->pending = true;
         return a->busy_foe_code;
     }
-    if (result == ECAT_FOE_SSC_ASYNC_COMPLETE) {
+    if (result == ECAT_UPGRADE_ASYNC_COMPLETE) {
         clear_packet(a);
         return 0U;
     }
@@ -143,14 +143,14 @@ uint16_t ecat_foe_ssc_async_poll(ecat_foe_ssc_async_t *a,
         return a->operation_error_foe_code;
     }
 
-    ecat_foe_ssc_async_result_t result = a->ops->poll(a->ops_ctx);
-    if (result == ECAT_FOE_SSC_ASYNC_PENDING) {
+    ecat_upgrade_async_result_t result = a->ops->poll(a->ops_ctx);
+    if (result == ECAT_UPGRADE_ASYNC_PENDING) {
         return a->busy_foe_code;
     }
 
     a->pending = false;
     a->completed = true;
-    a->operation_failed = (result != ECAT_FOE_SSC_ASYNC_COMPLETE);
+    a->operation_failed = (result != ECAT_UPGRADE_ASYNC_COMPLETE);
     if (a->operation_failed) {
         a->ops->abort(a->ops_ctx);
         return a->operation_error_foe_code;

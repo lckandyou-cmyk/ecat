@@ -53,7 +53,7 @@ FoE 默认启用；宿主文件流入口显式启用。后续硬件传输各自�
 - `include/ecat_upgrade_request.h`：只携带目标与候选版本，无物理地址。旧 WRQ 文件名解析复用同一元数据 begin 路径。
 - `include/ecat_upgrade_session.h`：独占所有者和单调会话代号，无协议和硬件依赖。
 - `include/ecat_transfer.h`：统一传输会话、导入导出与同步/异步调度。
-- `include/ecat_upgrade_async.h`：独立异步后端契约；引擎公开头不包含 SSC gate。旧 SSC 类型及 getter 保留兼容别名。
+- `include/ecat_upgrade_async.h`：独立异步后端契约；引擎公开头不包含 SSC gate。SSC 门控使用同一后端类型。
 - `include/ecat_foe_transport.h`：FoE 文件名及结束包桥接。末包提交结果独立保存，防止延迟重试错误读取新所有者的核心状态。
 - `include/ecat_transfer_file.h`：默认关闭的宿主 FILE 流参考入口，详见 [文件流接入](../../examples/file_stream/README.md)。
 

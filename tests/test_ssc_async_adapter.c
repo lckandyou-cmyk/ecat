@@ -14,7 +14,7 @@ typedef struct {
     unsigned aborts;
 } async_mock_t;
 
-static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
+static ecat_upgrade_async_result_t async_start(void *ctx, const uint8_t *data,
                                                  size_t length, bool following)
 {
     async_mock_t *m = (async_mock_t *)ctx;
@@ -23,14 +23,14 @@ static ecat_foe_ssc_async_result_t async_start(void *ctx, const uint8_t *data,
     (void)following;
     m->starts++;
     m->polls = 0U;
-    return ECAT_FOE_SSC_ASYNC_PENDING;
+    return ECAT_UPGRADE_ASYNC_PENDING;
 }
 
-static ecat_foe_ssc_async_result_t async_poll(void *ctx)
+static ecat_upgrade_async_result_t async_poll(void *ctx)
 {
     async_mock_t *m = (async_mock_t *)ctx;
     m->polls++;
-    return (m->polls == 1U) ? ECAT_FOE_SSC_ASYNC_PENDING : ECAT_FOE_SSC_ASYNC_COMPLETE;
+    return (m->polls == 1U) ? ECAT_UPGRADE_ASYNC_PENDING : ECAT_UPGRADE_ASYNC_COMPLETE;
 }
 
 static void async_abort(void *ctx)
@@ -56,7 +56,7 @@ int main(void)
 {
     static mock_driver_t driver;
     static uint8_t packet_storage[64];
-    static const ecat_foe_ssc_async_ops_t ops = {async_start, async_poll, async_abort};
+    static const ecat_upgrade_async_ops_t ops = {async_start, async_poll, async_abort};
     ecat_foe_core_t core;
     ecat_foe_core_cfg_t cfg;
     ecat_foe_ssc_async_t gate;
