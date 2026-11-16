@@ -2681,7 +2681,7 @@ static void test_reproduce_soes_data_callback_without_wrq_stream_rejection(void)
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 64);
     (void)efw_len;
 
-    /* 关键条件: 全程不调用 ecat_foe_core_on_wrq 或 ecat_foe_soes_on_wrq !
+    /* 关键条件: 全程不建立传输会话或调用 ecat_foe_soes_on_wrq !
      * 直接按 SOES 原生流程灌入数据块:
      * 块 1: 首块数据 (包含 64 字节 .efw 头及部分 payload)
      * 块 2: 满块数据 (512 字节)

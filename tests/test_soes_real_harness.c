@@ -2444,7 +2444,7 @@ int main(void)
             assert(orig_mbxcnt != 0);
             assert((((uint8_t *)res_foe)[5] >> 4) == orig_mbxcnt);
 
-            /* 故意将核心配置标记置为 false，导致 ecat_foe_core_on_wrq 拒绝激活 */
+            /* 故意将核心配置标记置为 false，导致统一入口拒绝激活 */
             core.is_configured = false;
 
             /* 执行后置钩子: 检测到 core_on_wrq 失败，必须就地中和 ACK 为 FOE_OP_ERR (0x8000) 并返回 -1 */
