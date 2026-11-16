@@ -146,11 +146,20 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
 
 /**
  * @brief 发起双向传输会话 (导入或导出)
+ *
+ * 【并发与异步生命周期契约】：
+ * - 成功同步就绪时返回 ECAT_TRANSFER_COMPLETE，并传出有效的会话令牌 *token；
+ * - 若底层异步驱动启动耗时操作 (如异步硬件初始化/失效化/擦除/打开)，返回 ECAT_TRANSFER_PENDING，
+ *   此时会话已成功建立并分配 *token，但处于 pending 状态，调用方必须通过 ecat_transfer_poll 推进
+ *   直到返回 ECAT_TRANSFER_COMPLETE 后方可开始读取或写入；
+ * - 若引擎当前已被其他会话占用，或当前会话仍有前序操作处于 PENDING 态，返回 ECAT_TRANSFER_BUSY；
+ * - 若 ACL 权限不足返回 ECAT_TRANSFER_DENIED；目标不存在或参数非法返回 ECAT_TRANSFER_INVALID。
+ *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识指针 (通道实例地址)
  * @param request 传输请求参数
  * @param token 传出获得的独占会话令牌
- * @return 传输结果码
+ * @return 传输结果码 (ECAT_TRANSFER_COMPLETE, ECAT_TRANSFER_PENDING, ECAT_TRANSFER_BUSY 等)
  */
 ecat_transfer_result_t ecat_transfer_begin(
     ecat_transfer_t *t,
@@ -160,15 +169,34 @@ ecat_transfer_result_t ecat_transfer_begin(
 
 /**
  * @brief 数据导出分块读取 (EXPORT 模式)
+ *
+ * 【异步 I/O 与指针持有生命周期契约 (Strict Lifetime Contract)】：
+ * - 异步驱动模式下，若底层驱动返回 PENDING，本函数返回 ECAT_TRANSFER_PENDING；
+ * - **指针生命周期与有效性要求**：调用方传入的 out_buf 缓冲区和 actual_read 指针在返回
+ *   ECAT_TRANSFER_PENDING 后，会被传输引擎持续持有并记录于内部上下文。调用方必须保证：
+ *   1) out_buf 所指向的内存在整个 pending 期间保持有效、未被释放、未被并发修改或移动；
+ *   2) actual_read 所指向的指针变量在整个 pending 期间必须持续存活且不可重用；
+ *   3) 在 pending 期间，*actual_read 不会被赋值，调用方切勿读取未完成的残留值；
+ *   4) 直到后续 ecat_transfer_poll 返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE 时，
+ *      引擎才将实际读取字节数写入 *actual_read 并就地累加 CRC；
+ *   5) 若调用 ecat_transfer_cancel 中止会话，引擎保证在返回前同步调用驱动底层 abort 停止硬件
+ *      DMA/外设传输，并安全解除对 out_buf 和 actual_read 指针的持有，调用方随后方可释放该内存；
+ * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
+ *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入；
+ * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
+ * - 令牌失效返回 ECAT_TRANSFER_STALE；驱动错误返回 ECAT_TRANSFER_FAILED。
+ *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
  * @param token 会话令牌
- * @param out_buf 接收缓冲区
+ * @param out_buf 接收缓冲区 (异步 pending 期间必须持续存活)
  * @param buf_capacity 缓冲区容量
- * @param actual_read 传出实际读取到的字节数
+ * @param actual_read 传出实际读取到的字节数 (异步完成时写入，pending 期间必须持续存活)
  * @return ECAT_TRANSFER_COMPLETE: 数据已全部读完;
  *         ECAT_TRANSFER_CONTINUE: 成功读取一块，后续仍有数据;
- *         其他表示错误
+ *         ECAT_TRANSFER_PENDING: 异步读取已在后台发起，指针被引擎持有，需通过 poll 推进;
+ *         ECAT_TRANSFER_BUSY: 当前仍有未完成的异步操作，不可并发重入;
+ *         其他表示错误 (ECAT_TRANSFER_FAILED / ECAT_TRANSFER_STALE / ECAT_TRANSFER_INVALID)
  */
 ecat_transfer_result_t ecat_transfer_read(
     ecat_transfer_t *t,
@@ -180,12 +208,22 @@ ecat_transfer_result_t ecat_transfer_read(
 
 /**
  * @brief 数据导入分块写入 (IMPORT 模式)
+ *
+ * 【异步 I/O 与缓冲区契约】：
+ * - 若底层为异步驱动，当操作返回 PENDING 时本函数返回 ECAT_TRANSFER_PENDING；
+ * - 针对固件升级模式，引擎在进入下游前已将数据稳定捕获到暂存区 staging_buf，调用方 data 在函数返回后可复用；
+ * - 若当前操作仍在 PENDING 期间重复调用，返回 ECAT_TRANSFER_BUSY 拦截并发写入；
+ * - 同步完成返回 ECAT_TRANSFER_COMPLETE；其他为错误码。
+ *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
  * @param token 会话令牌
  * @param data 待写入数据
  * @param length 数据长度
- * @return ECAT_TRANSFER_COMPLETE / 错误码
+ * @return ECAT_TRANSFER_COMPLETE: 写入完成;
+ *         ECAT_TRANSFER_PENDING: 异步后台执行中，需通过 poll 推进;
+ *         ECAT_TRANSFER_BUSY: 引擎正忙，不可并发写入;
+ *         其他为错误码
  */
 ecat_transfer_result_t ecat_transfer_write(
     ecat_transfer_t *t,
@@ -196,10 +234,16 @@ ecat_transfer_result_t ecat_transfer_write(
 
 /**
  * @brief 正常完成传输会话并释放锁
+ *
+ * 【异步提交与生命周期契约】：
+ * - 若底层异步驱动 finalize/closing 耗时，返回 ECAT_TRANSFER_PENDING，需调用 poll 推进提交；
+ * - 真正完成时返回 ECAT_TRANSFER_COMPLETE 并彻底释放独占会话租约；
+ * - 若当前仍有分块 I/O 处于 PENDING，返回 ECAT_TRANSFER_BUSY。
+ *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
  * @param token 会话令牌
- * @return 传输结果码
+ * @return 传输结果码 (ECAT_TRANSFER_COMPLETE, ECAT_TRANSFER_PENDING, ECAT_TRANSFER_BUSY 等)
  */
 ecat_transfer_result_t ecat_transfer_finish(
     ecat_transfer_t *t,
@@ -208,10 +252,16 @@ ecat_transfer_result_t ecat_transfer_finish(
 
 /**
  * @brief 取消/异常中止传输会话
+ *
+ * 【硬件停止与资源回收契约】：
+ * - 保证在返回之前同步通知底层驱动 (通过 io.abort 或 async_ops->abort)，确保硬件 DMA/外设传输立即停止；
+ * - 释放对调用方 out_buf 和 actual_read 等外部指针的持有；
+ * - 重置 pending 标记与内部阶段，释放传输租约恢复 IDLE 态。
+ *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
  * @param token 会话令牌
- * @return 传输结果码
+ * @return ECAT_TRANSFER_COMPLETE 成功中止并释放，ECAT_TRANSFER_STALE 令牌失效
  */
 ecat_transfer_result_t ecat_transfer_cancel(
     ecat_transfer_t *t,

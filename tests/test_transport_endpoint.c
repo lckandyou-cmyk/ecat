@@ -118,7 +118,12 @@ static ecat_async_op_result_t ep_mock_async_poll(void *ctx, ecat_async_data_op_t
     }
     return s_ep_async_next_res;
 }
-static void ep_mock_async_abort(void *ctx) { (void)ctx; }
+static int s_ep_mock_abort_count = 0;
+static void ep_mock_async_abort(void *ctx)
+{
+    (void)ctx;
+    s_ep_mock_abort_count++;
+}
 
 int main(void)
 {
@@ -521,6 +526,54 @@ int main(void)
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+
+    /* ---------------------------------------------------------------------- */
+    /* 11. 异步 read 缓冲区与指针生命周期、延时赋值与 abort 硬件停止验证         */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试异步 read 指针持有、延时赋值与 abort 硬件停止契约 ---\n");
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    uint32_t exp_total_sz = 0;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &exp_total_sz) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    /* 11.1 发起异步 read，驱动返回 PENDING */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    uint8_t async_read_buf[128];
+    memset(async_read_buf, 0xEE, sizeof(async_read_buf));
+    size_t delayed_actual_read = 0x5A5A; /* 初始化为金丝雀哨兵值 */
+
+    assert(ecat_transport_endpoint_read_chunk(
+        &ep_uart, async_read_buf, sizeof(async_read_buf), &delayed_actual_read) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    /* 契约断言: 在 pending 期间，actual_read 被赋初值 0，绝不提早赋予最终读取长度 */
+    assert(delayed_actual_read == 0U);
+
+    /* 11.2 poll 推进直到完成: 此时 *actual_read 被正式赋值为实际读取长度 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_CONTINUE);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(delayed_actual_read == sizeof(async_read_buf));
+
+    /* 11.3 再次发起异步 read 进入 PENDING，随后调用 abort 验证硬件停止契约 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    delayed_actual_read = 0xA5A5;
+    assert(ecat_transport_endpoint_read_chunk(
+        &ep_uart, async_read_buf, sizeof(async_read_buf), &delayed_actual_read) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    assert(delayed_actual_read == 0U);
+
+    int before_abort_count = s_ep_mock_abort_count;
+    /* 调用端点 abort 中止会话 */
+    ecat_transport_endpoint_abort(&ep_uart);
+    /* 契约断言: 硬件驱动 abort 回调必须被同步调用，且会话与 pending 标记完全重置 */
+    assert(s_ep_mock_abort_count == before_abort_count + 1);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(mgr.active == false);
+    assert(s_cb_aborted == true);
+    /* *actual_read 保持中止时状态 (0)，不会在 abort 后被异步驱动残留改写 */
+    assert(delayed_actual_read == 0U);
 
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;

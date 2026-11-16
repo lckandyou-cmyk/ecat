@@ -95,11 +95,19 @@ void ecat_transport_endpoint_set_callbacks(
 
 /**
  * @brief 发起数据导入会话 (向设备目标区块写入/升级)
+ *
+ * 【并发与异步生命周期契约】：
+ * - 若底层驱动为同步或立即就绪，返回 ECAT_TRANSFER_COMPLETE，并触发 on_session_start 回调；
+ * - 若底层为异步耗时初始化，返回 ECAT_TRANSFER_PENDING，此时会话处于 pending 状态，必须通过
+ *   ecat_transport_endpoint_poll 推进，就绪时单次触发 on_session_start 并返回 ECAT_TRANSFER_COMPLETE；
+ * - 在 pending 期间调用 write_chunk / finish_import 将被返回 ECAT_TRANSFER_BUSY 拦截保护；
+ * - 若管理器已被其他通道占用返回 ECAT_TRANSFER_BUSY；权限不足返回 ECAT_TRANSFER_DENIED。
+ *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID
  * @param expected_size 预期写入总字节数 (0 表示按流式结束)
  * @param fw_version 固件版本号 (固件类目标有效)
- * @return ECAT_TRANSFER_COMPLETE 成功建立会话，其他为失败码
+ * @return 传输结果码 (ECAT_TRANSFER_COMPLETE, ECAT_TRANSFER_PENDING, ECAT_TRANSFER_BUSY 等)
  */
 ecat_transfer_result_t ecat_transport_endpoint_begin_import(
     ecat_transport_endpoint_t *ep,
@@ -109,10 +117,15 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_import(
 
 /**
  * @brief 分块推送导入数据流
+ *
+ * 【异步 I/O 与并发保护】：
+ * - 异步驱动下可能返回 ECAT_TRANSFER_PENDING，需通过 ecat_transport_endpoint_poll 轮询推进；
+ * - 前序操作未完成时重复调用返回 ECAT_TRANSFER_BUSY 拦截。
+ *
  * @param ep 端点句柄
  * @param data 接收到的数据块指针
  * @param length 数据块长度
- * @return ECAT_TRANSFER_COMPLETE 成功，其他为错误码
+ * @return ECAT_TRANSFER_COMPLETE 成功，ECAT_TRANSFER_PENDING 异步中，ECAT_TRANSFER_BUSY 正在忙，其他为错误码
  */
 ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
     ecat_transport_endpoint_t *ep,
@@ -121,18 +134,30 @@ ecat_transfer_result_t ecat_transport_endpoint_write_chunk(
 
 /**
  * @brief 完成并提交导入会话
+ *
+ * 【终结与异步完成契约】：
+ * - 提交成功且同步完成时返回 ECAT_TRANSFER_COMPLETE，触发 on_session_complete 并恢复 IDLE 态；
+ * - 异步 finalize 驱动下返回 ECAT_TRANSFER_PENDING，需通过 poll 推进，最终单次触发 on_session_complete。
+ *
  * @param ep 端点句柄
- * @return ECAT_TRANSFER_COMPLETE 提交成功
+ * @return ECAT_TRANSFER_COMPLETE 提交成功，ECAT_TRANSFER_PENDING 异步提交中，ECAT_TRANSFER_BUSY 忙
  */
 ecat_transfer_result_t ecat_transport_endpoint_finish_import(
     ecat_transport_endpoint_t *ep);
 
 /**
  * @brief 发起数据导出回读会话 (从设备目标区块导出数据)
+ *
+ * 【并发与异步生命周期契约】：
+ * - 同步就绪时返回 ECAT_TRANSFER_COMPLETE，填入 *out_total_size 并触发 on_session_start；
+ * - 异步打开模式下返回 ECAT_TRANSFER_PENDING，*out_total_size 暂时待定，需通过 poll 推进直到
+ *   ECAT_TRANSFER_COMPLETE 并单次派发 on_session_start 回调；
+ * - 在 pending 期间调用 read_chunk / finish_export 返回 ECAT_TRANSFER_BUSY 拦截。
+ *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID
  * @param out_total_size 传出实际可导出的总字节数
- * @return ECAT_TRANSFER_COMPLETE 成功建立导出通道
+ * @return ECAT_TRANSFER_COMPLETE 成功建立导出通道，ECAT_TRANSFER_PENDING 异步就绪中，其他为错误/占用
  */
 ecat_transfer_result_t ecat_transport_endpoint_begin_export(
     ecat_transport_endpoint_t *ep,
@@ -141,13 +166,32 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
 
 /**
  * @brief 分块拉取导出数据
+ *
+ * 【异步 I/O 与指针持有生命周期契约 (Strict Lifetime Contract)】：
+ * - 异步驱动模式下，若底层驱动返回 PENDING，本函数返回 ECAT_TRANSFER_PENDING；
+ * - **指针生命周期与有效性要求**：调用方传入的 out_buf 缓冲区和 actual_read 指针在返回
+ *   ECAT_TRANSFER_PENDING 后，会被底层传输引擎持续持有并记录于内部上下文。调用方必须保证：
+ *   1) out_buf 所指向的内存在整个 pending 期间保持有效、未被释放、未被并发修改或移动；
+ *   2) actual_read 所指向的指针变量在整个 pending 期间必须持续存活且不可重用；
+ *   3) 在 pending 期间，*actual_read 不会被赋值，调用方切勿读取未完成的残留值；
+ *   4) 直到后续 ecat_transport_endpoint_poll 返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE 时，
+ *      实际读取字节数才写入 *actual_read 并触发 on_progress 回调；
+ *   5) 若调用 ecat_transport_endpoint_abort 中止会话，引擎保证在返回前同步调用驱动底层 abort
+ *      停止硬件 DMA/外设传输，并安全解除对 out_buf 和 actual_read 指针的持有，调用方随后方可安全释放；
+ * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
+ *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入；
+ * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
+ * - 会话未激活返回 ECAT_TRANSFER_INVALID；驱动错误返回 ECAT_TRANSFER_FAILED (并派发 abort 通知)。
+ *
  * @param ep 端点句柄
- * @param out_buf 输出缓冲区
+ * @param out_buf 输出缓冲区 (异步 pending 期间必须持续存活)
  * @param buf_capacity 缓冲区容量
- * @param actual_read 传出本次实际读取的字节数
+ * @param actual_read 传出本次实际读取的字节数 (异步完成时写入，pending 期间必须持续存活)
  * @return ECAT_TRANSFER_COMPLETE 数据已全部读取完毕;
  *         ECAT_TRANSFER_CONTINUE 成功读取当前块，后续仍有数据;
- *         其他为错误码
+ *         ECAT_TRANSFER_PENDING 异步读取已在后台发起，指针被引擎持有，需通过 poll 推进;
+ *         ECAT_TRANSFER_BUSY 当前仍有未完成的异步操作，不可并发重入;
+ *         其他为错误码 (同时触发 abort 事件通知并清理会话)
  */
 ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
     ecat_transport_endpoint_t *ep,
@@ -158,13 +202,19 @@ ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
 /**
  * @brief 完成导出回读会话
  * @param ep 端点句柄
- * @return ECAT_TRANSFER_COMPLETE
+ * @return ECAT_TRANSFER_COMPLETE 导出完成，ECAT_TRANSFER_PENDING 异步关闭中
  */
 ecat_transfer_result_t ecat_transport_endpoint_finish_export(
     ecat_transport_endpoint_t *ep);
 
 /**
  * @brief 中止或取消当前端点的活动会话
+ *
+ * 【硬件停止与资源回收契约】：
+ * - 同步调用底层驱动 abort 接口，确保正在进行的硬件 DMA/外设 I/O 立即停止；
+ * - 安全解除对异步 read_chunk 的 out_buf 和 actual_read 外部指针的持有；
+ * - 重置端点所有挂起标记，触发 on_session_abort 回调，释放底层传输锁并恢复 IDLE 态。
+ *
  * @param ep 端点句柄
  */
 void ecat_transport_endpoint_abort(ecat_transport_endpoint_t *ep);
@@ -183,11 +233,22 @@ bool ecat_transport_endpoint_is_pending(const ecat_transport_endpoint_t *ep);
 
 /**
  * @brief 轮询并推进端点底层异步操作
+ *
+ * 【空闲与错误处理契约】：
+ * - 若端点未处于激活状态，返回 ECAT_TRANSFER_INVALID；
+ * - **空闲轮询契约**：若端点持有活动会话但当前无正在进行中的异步挂起操作 (!is_pending)，
+ *   本函数立即返回 ECAT_TRANSFER_INVALID，**严格保留**当前活动会话、令牌与状态，
+ *   **绝不触发** on_session_abort 回调，允许调用方在非阻塞主循环中安全持续轮询；
+ * - 若底层异步驱动仍在处理中，返回 ECAT_TRANSFER_PENDING；
+ * - 若异步操作完成，根据阶段分别触发 on_session_start、on_progress 或 on_session_complete；
+ * - 仅当底层驱动在 pending 推进过程中发生真正错误时，才调用 cancel 中止会话，
+ *   触发 on_session_abort 并将状态置为 ERROR。
+ *
  * @param ep 端点句柄
  * @return ECAT_TRANSFER_PENDING 驱动仍在处理;
  *         ECAT_TRANSFER_COMPLETE 异步阶段或终结操作完成;
  *         ECAT_TRANSFER_CONTINUE 异步读取阶段完成但后续仍有数据;
- *         ECAT_TRANSFER_INVALID 无活动会话或参数非法;
+ *         ECAT_TRANSFER_INVALID 无活动会话或当前处于空闲无挂起操作;
  *         其他为错误码 (同时触发 abort 事件通知并清理会话)
  */
 ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *ep);
