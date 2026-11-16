@@ -618,12 +618,37 @@ static void test_owned_sync_upgrade_stream(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "invalid argument does not abort session");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "owner cancels session");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "cancel cleans driver once");
+    uint64_t stale_token = other;
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&transfer, &registry, &core), 0, "idle manager reinitializes");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE,
+                       "new session starts after manager reinitialization");
+    TEST_ASSERT(other > stale_token, "reinitialization preserves lease generation");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, stale_token), ECAT_TRANSFER_STALE,
+                       "old token cannot cancel new session");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE,
+                       "new token cancels its own session");
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE, "session before core shutdown");
     TEST_ASSERT_EQ_INT(ecat_foe_core_deinit(&core), -1, "core shutdown rejects an owned transfer");
     TEST_ASSERT(core.is_configured && ecat_upgrade_session_owns_mgr(transfer.session_ptr, &transfer, &file, other),
                 "rejected shutdown preserves core and lease");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "owner releases before shutdown");
     TEST_ASSERT_EQ_INT(ecat_foe_core_deinit(&core), 0, "core shutdown succeeds after cancellation");
+    setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_INVALID,
+                       "stale manager cannot use a reinitialized core");
+    ecat_transfer_t replacement;
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&replacement, &registry, &core), 0, "new manager binds reconstructed core");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_INVALID,
+                       "old manager cannot use the new manager's core");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&replacement, &file, &request, &other), ECAT_TRANSFER_COMPLETE,
+                       "new manager can start");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&replacement, &file, other), ECAT_TRANSFER_COMPLETE,
+                       "new manager releases its session");
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&transfer, &registry, &core), 0, "manager explicitly rebinds");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE,
+                       "rebound manager can start");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "rebound session cancels");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_deinit(&core), 0, "reconstructed core shuts down cleanly");
 }
 
 static void test_begin_request_without_filename(void)
@@ -1550,9 +1575,11 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     mock_driver_reset(&mcu);
     mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 512), 0, "SOES rebinds reconstructed core");
+    ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     /* 重新组织正确固件 */
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
-    /* 在真实 SOES 中若未走 on_wrq，此处直接由核心启动 WRQ */
+    /* Start a new session through the bound adapter. */
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "新会话短包写入成功");

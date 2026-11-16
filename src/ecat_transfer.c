@@ -55,6 +55,7 @@ static uint32_t calc_firmware_container_limit(
 
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core)
 {
+    uint64_t generation = 0U;
     if (t == NULL || reg == NULL) {
         return -1;
     }
@@ -68,9 +69,14 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
             /* 严禁冲突绑定: 核心状态机已绑定不同的权威注册表，杜绝 last-writer-wins 劫持 */
             return -1;
         }
+        if (core->shared_session == &t->session) {
+            /* Reinitializing the primary manager must not revive old tokens. */
+            generation = t->session.generation;
+        }
     }
 
     memset(t, 0, sizeof(*t));
+    t->session.generation = generation;
     t->registry = reg;
     t->core = core;
     t->last_error = ECAT_TRANSFER_ERR_NONE;
@@ -221,6 +227,14 @@ ecat_transfer_result_t ecat_transfer_begin(
     uint64_t *token)
 {
     if (t == NULL || owner == NULL || request == NULL || token == NULL) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    /* A core can be deinitialized and reconstructed at the same address.
+     * Do not let a manager from the old binding create a separate lease. */
+    if (t->core != NULL &&
+        (!t->core->is_configured || t->core->registry != t->registry ||
+         t->core->shared_session != get_transfer_session(t))) {
         return ECAT_TRANSFER_INVALID;
     }
 
