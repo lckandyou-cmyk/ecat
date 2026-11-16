@@ -7,7 +7,7 @@ SRC_EFW = src/ecat_foe_efw.c
 TEST_EFW_SRC = tests/test_efw.c
 
 # 阶段 B: 核心升级状态机、目标驱动与 SOES 适配测试源码
-SRC_CORE = src/adapters/ecat_upgrade_file.c src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_foe_core_async.c src/ecat_foe_target_async.c
+SRC_CORE = src/adapters/ecat_transfer_file.c src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_transport.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_foe_core_async.c src/ecat_foe_target_async.c
 TEST_CORE_SRC = tests/mock_driver.c tests/test_core.c
 
 # 阶段 C: 真实 SOES 源码宿主独立 Harness 测试源码 (按需检测外部 SOES 源码)
@@ -26,7 +26,7 @@ EXAMPLES_BOOTLOADER_ALL_SRC = \
 	examples/bootloader_soes/test_bootloader_integration.c
 
 # 阶段 E: Beckhoff SSC 适配层抽象契约与 Mock 测试源码 (契约测试桩，非真实 SSC 验证)
-SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_transport.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_foe_core_async.c src/ecat_foe_target_async.c
+SRC_SSC_ADAPTER = src/ecat_foe_efw.c src/ecat_foe_core.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_transport.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_foe_core_async.c src/ecat_foe_target_async.c
 TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 
 # Product library source selection; no test stubs are used for this target.
@@ -34,9 +34,9 @@ ENABLE_FOE ?= 1
 ENABLE_FILE ?= 0
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c
+UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c
 ifeq ($(ENABLE_FILE),1)
-UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_upgrade_file.c
+UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_transfer_file.c
 endif
 ifeq ($(ENABLE_FOE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_foe_transport.c
@@ -194,7 +194,7 @@ test-core-async:
 	$(CC) $(CFLAGS) -o "$$TMP_ASYNC_DIR/test_core_async" \
 		src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c \
 		src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c \
-		src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c tests/mock_driver.c tests/test_core_async.c && \
+		src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_transfer_file.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c tests/mock_driver.c tests/test_core_async.c && \
 	"$$TMP_ASYNC_DIR/test_core_async"
 
 test-sentinels:
@@ -216,7 +216,7 @@ test-target-registry:
 test-transfer-bidirectional:
 	@TMP_XFER_DIR=$$(mktemp -d /tmp/ecat_transfer_XXXXXX) && \
 	trap 'rm -rf "$$TMP_XFER_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_XFER_DIR/test_transfer_bidirectional" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transfer_bidirectional.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_XFER_DIR/test_transfer_bidirectional" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_transport.c src/adapters/ecat_transfer_file.c src/ecat_transfer.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c tests/test_transfer_bidirectional.c && \
 	"$$TMP_XFER_DIR/test_transfer_bidirectional"
 
 test-transport-endpoint:
@@ -228,7 +228,7 @@ test-transport-endpoint:
 test-end-to-end:
 	@TMP_E2E_DIR=$$(mktemp -d /tmp/ecat_e2e_XXXXXX) && \
 	trap 'rm -rf "$$TMP_E2E_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ecat_upgrade.c src/adapters/ecat_foe_transport.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_upgrade_file.c tests/test_end_to_end_multitransport.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_E2E_DIR/test_end_to_end" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/adapters/ecat_foe_transport.c src/adapters/ecat_foe_soes.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_transfer_file.c tests/test_end_to_end_multitransport.c && \
 	"$$TMP_E2E_DIR/test_end_to_end"
 
 test-examples:
@@ -334,7 +334,7 @@ test-asan:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_gate" src/adapters/ecat_foe_ssc_async.c tests/test_ssc_async_gate.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_ssc_async_adapter" $(SRC_SSC_ADAPTER) tests/mock_driver.c tests/test_ssc_async_adapter.c && \
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_target_async" src/ecat_foe_target_async.c tests/test_target_async.c && \
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_upgrade_file.c src/ecat_upgrade.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c tests/mock_driver.c tests/test_core_async.c && \
+	$(CC) $(CFLAGS) -fsanitize=address,undefined -g -o "$$TMP_ASAN_DIR/test_core_async" src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/adapters/ecat_foe_ssc_async.c src/adapters/ecat_foe_ssc.c src/adapters/ecat_foe_transport.c src/adapters/ecat_transfer_file.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c tests/mock_driver.c tests/test_core_async.c && \
 	VECTORS_DIR="$$TMP_ASAN_DIR/vectors" "$$TMP_ASAN_DIR/test_runner_efw" && \
 	$(PYTHON) tests/test_efw_pack.py && \
 	"$$TMP_ASAN_DIR/test_runner_core" && \

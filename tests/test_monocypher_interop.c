@@ -394,7 +394,7 @@ static void test_one_cross_layer_alias_case(
         assert(verifier.last_finish_rc != 0); /* 证明真实产品 verifier_finish 执行并检出签名无效返回非 0 错误 */
         assert(verifier.real_verifier.active == false); /* 真实生产适配器验签上下文已安全 wipe */
         assert(flash.observed_abort_error == ECAT_FOE_CORE_ERR_SIGNATURE_INVALID);
-        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK); /* 生产 abort 契约保持：完成清理后重置为 OK */
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_SIGNATURE_INVALID);
         assert(flash.abort_calls >= 1U);
     } else if (inject_read_corruption) {
         /* 回读损坏用例: 在 finish 阶段回读比对时，由物理介质回读 CRC32 完整性校验优先拦截 */
@@ -407,7 +407,7 @@ static void test_one_cross_layer_alias_case(
         assert(verifier.abort_calls >= 1U);   /* 失败时安全中止并清理真实验签会话 */
         assert(verifier.real_verifier.active == false);
         assert(flash.observed_abort_error == ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH);
-        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK); /* 生产 abort 契约保持：完成清理后重置为 OK */
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH);
         assert(flash.abort_calls >= 1U);
     } else {
         assert(0 && "unhandled test branch");

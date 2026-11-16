@@ -9,11 +9,9 @@ FoE 协议栈 ── FoE 适配桥 ──┐
 文件流参考入口 ─────────────┤
 自定义总线 ── 传输端点 ───┼── ecat_transfer_t (权威统一核心) ──┬── 固件安全策略机 ── 固件驱动
                              │    (会话仲裁 / ACL / 同步&异步)    └── 数据驱动 (同步/真正异步)
-遗留固件升级 API (兼容) ────┘            │
-   └── ecat_upgrade_t ───────────────────┘ (共享会话租约仲裁器 ecat_upgrade_session_t)
 ```
 
-系统以 `ecat_transfer_t` 为唯一的权威调度核心；FoE 协议栈、文件流与自定义端点均可原生直连统一传输核心。旧升级管理器（`ecat_upgrade_t`）保留其既有固件业务流转状态机以保证现有集成 100% 行为兼容，与统一传输管理器通过全局唯一的 `ecat_upgrade_session_t` 会话仲裁器及底层 core 状态核验实现强绑定与排他互斥，避免双重租约与状态撕裂（详见架构设计文档 6.2 节关于保留范围与未来迁移边界说明）。
+文件流、通用端点与已绑定的 FoE 适配器使用 `ecat_transfer_t`。未绑定的 SOES/SSC 底层直连路径仍待迁移，不能与管理器混用。
 
 ---
 
@@ -115,7 +113,7 @@ ecat_transport_endpoint_finish_import(&uart_ep);
 ### 5.1 硬件适配器完成度说明 (Hardware Adapters)
 - **已实现/已接入适配器**：
   - `src/adapters/ecat_foe_transport.c`：面向 EtherCAT 从站协议栈（Beckhoff SSC / SOES）FoE 状态机的适配桥接层。
-  - `src/adapters/ecat_upgrade_file.c`：面向宿主机标准 I/O 流 (`FILE *`) 的测试与集成参考适配器。
+  - `src/adapters/ecat_transfer_file.c`：面向宿主机标准 I/O 流 (`FILE *`) 的测试与集成参考适配器。
 - **未在此仓库内实现的内容（标为未实现）**：
   - 具体的物理外设硬件驱动（如真实的 MCU 片上 UART 硬件中断/DMA 驱动、物理 CAN 现场总线控制器驱动、SPI 外设驱动等）**未内置在当前仓库中**。
   - 架构设计中的 UART、CAN 等通道 ID 属于通道编号规范，单元测试中的 `ep_uart`、`ep_can` 属于通用传输端点接口 (`ecat_transport_endpoint_t`) 的原型验证，实际硬件工程集成时须由集成方根据目标板级芯片 SDK 实现对应外设中断收发回调。
@@ -142,7 +140,7 @@ ecat_transport_endpoint_finish_import(&uart_ep);
 
 ## 6. 集成边界与检查
 
-- **入口与共享状态**：FoE 和文件流适配器使用 `ecat_upgrade_t`；自定义双向通道使用 `ecat_transport_endpoint_t` 和 `ecat_transfer_t`。共享同一个 `ecat_foe_core_t` 时，首个管理器的生命周期必须覆盖其余管理器；绑定同一核心的传输管理器必须使用同一个注册表。调用方须串行调用接口。
+- **入口与共享状态**：FoE、文件流和自定义通道应使用同一 `ecat_transfer_t` 与注册表。调用方须串行调用接口。
 - **传输长度**：数据导入的 `expected_size` 为非零时，写入不能超过该值，结束时必须恰好匹配；0 表示未知长度。固件导入的声明长度是整个 EFW 容器长度，不是仅 payload 的长度。
 - **失败与取消**：检查每次返回值；参数错误可能允许修正后重试，主动放弃时调用端点的 `abort`。传输结果不能替代设备启动成功的确认。
 - **配置一致性**：`ECAT_TARGET_REGISTRY_MAX_BLOCKS`（默认 16）和 `ECAT_TARGET_REGISTRY_MAX_ACL_RULES`（默认 32）改变公开结构体布局，所有编译单元须使用相同数值；错配应在链接时因 `ecat_target_registry_abi_...` 符号报错。相关头文件要求编译器支持 `used` 和 `retain` 属性。

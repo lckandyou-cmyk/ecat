@@ -22,9 +22,8 @@
 #include "ecat_foe_core.h"
 #include "ecat_foe_soes.h"
 #include "mock_driver.h"
-#include "ecat_upgrade.h"
 #include "ecat_foe_transport.h"
-#include "ecat_upgrade_file.h"
+#include "ecat_transfer_file.h"
 
 static int g_core_tests_run = 0;
 static int g_core_tests_passed = 0;
@@ -431,7 +430,7 @@ static void test_file_and_foe_signature_failure_equivalence(void)
     ecat_transfer_t transfer;
     ecat_target_registry_t registry;
     uint8_t payload[16] = {1}, efw[256], buffer[64];
-    ecat_upgrade_request_t request = {1U, 0x01000000U};
+    ecat_transfer_request_t request = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
     for (unsigned transport = 0; transport < 2U; transport++) {
         mock_signature_verifier_t verifier = {0};
         mock_driver_init(&mcu);
@@ -446,13 +445,13 @@ static void test_file_and_foe_signature_failure_equivalence(void)
             TEST_ASSERT(stream != NULL, "signature stream");
             TEST_ASSERT_EQ_INT(fwrite(efw, 1U, length, stream), length, "signed fixture");
             rewind(stream);
-            ecat_upgrade_file_t file;
-            TEST_ASSERT_EQ_INT(ecat_upgrade_file_init_transfer(&file, &transfer, buffer, sizeof(buffer)), 0, "file ready");
-            TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_COMPLETE, "signed file begins");
-            ecat_upgrade_result_t result = ECAT_UPGRADE_PENDING;
-            for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
-                result = ecat_upgrade_file_step(&file);
-            TEST_ASSERT_EQ_INT(result, ECAT_UPGRADE_FAILED, "signature failure rejects file");
+            ecat_transfer_file_t file;
+            TEST_ASSERT_EQ_INT(ecat_transfer_file_init(&file, &transfer, buffer, sizeof(buffer)), 0, "file ready");
+            TEST_ASSERT_EQ_INT(ecat_transfer_file_begin(&file, stream, &request), ECAT_TRANSFER_COMPLETE, "signed file begins");
+            ecat_transfer_result_t result = ECAT_TRANSFER_PENDING;
+            for (unsigned step = 0; result == ECAT_TRANSFER_PENDING && step < 32U; step++)
+                result = ecat_transfer_file_step(&file);
+            TEST_ASSERT_EQ_INT(result, ECAT_TRANSFER_FAILED, "signature failure rejects file");
             fclose(stream);
         } else {
             ecat_foe_transport_t foe;
@@ -475,14 +474,14 @@ static void test_optional_file_transport(void)
     ecat_foe_core_t core;
     ecat_transfer_t transfer;
     ecat_target_registry_t registry;
-    ecat_upgrade_file_t file;
+    ecat_transfer_file_t file;
     ecat_foe_transport_t foe;
     uint8_t buffer[32], payload[32] = {1, 3, 5}, efw[256];
-    ecat_upgrade_request_t request = {1U, 0x01020304U};
+    ecat_transfer_request_t request = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     mock_driver_init(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
     TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "shared manager ready");
-    TEST_ASSERT_EQ_INT(ecat_upgrade_file_init_transfer(&file, &transfer, buffer, sizeof(buffer)), 0, "file adapter ready");
+    TEST_ASSERT_EQ_INT(ecat_transfer_file_init(&file, &transfer, buffer, sizeof(buffer)), 0, "file adapter ready");
     TEST_ASSERT_EQ_INT(ecat_foe_transport_init_transfer(&foe, &transfer), 0, "FoE adapter ready");
     size_t length = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, 1U, 0U,
                                   request.fw_version, 0U, payload, sizeof(payload));
@@ -496,16 +495,16 @@ static void test_optional_file_transport(void)
         rewind(stream);
         const char *name = "SERVO_DRV_MCU_V1.2.3.4.efw";
         TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE first owns");
-        TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_BUSY, "file cannot steal FoE");
+        TEST_ASSERT_EQ_INT(ecat_transfer_file_begin(&file, stream, &request), ECAT_TRANSFER_BUSY, "file cannot steal FoE");
         TEST_ASSERT_EQ_INT(ftell(stream), 0, "busy file did not consume input");
         ecat_foe_transport_abort(&foe);
-        TEST_ASSERT_EQ_INT(ecat_upgrade_file_begin(&file, stream, &request), ECAT_UPGRADE_COMPLETE, "file begins");
+        TEST_ASSERT_EQ_INT(ecat_transfer_file_begin(&file, stream, &request), ECAT_TRANSFER_COMPLETE, "file begins");
         TEST_ASSERT(ecat_foe_transport_begin(&foe, name, strlen(name)) != 0, "FoE cannot steal file");
         ecat_foe_transport_abort(&foe);
-        ecat_upgrade_result_t result = ECAT_UPGRADE_PENDING;
-        for (unsigned step = 0; result == ECAT_UPGRADE_PENDING && step < 32U; step++)
-            result = ecat_upgrade_file_step(&file);
-        TEST_ASSERT_EQ_INT(result, scenario == 0U ? ECAT_UPGRADE_COMPLETE : ECAT_UPGRADE_FAILED, "file result follows integrity checks");
+        ecat_transfer_result_t result = ECAT_TRANSFER_PENDING;
+        for (unsigned step = 0; result == ECAT_TRANSFER_PENDING && step < 32U; step++)
+            result = ecat_transfer_file_step(&file);
+        TEST_ASSERT_EQ_INT(result, scenario == 0U ? ECAT_TRANSFER_COMPLETE : ECAT_TRANSFER_FAILED, "file result follows integrity checks");
         if (scenario == 0U) commits++; else aborts++;
         TEST_ASSERT_EQ_INT(mcu.count_finalize, commits, "only valid file commits");
         ecat_foe_core_err_t file_error = core.last_error;

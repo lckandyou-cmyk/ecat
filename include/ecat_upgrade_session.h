@@ -23,7 +23,7 @@ typedef enum {
 typedef struct {
     const void *owner;
     uint64_t generation;
-    const void *manager; /**< 绑定持有当前租约的具体管理器实例 (ecat_transfer_t / ecat_upgrade_t) */
+    const void *manager; /**< 绑定持有当前租约的具体管理器实例 (ecat_transfer_t) */
 } ecat_upgrade_session_t;
 
 /* Failure preserves both the manager and the caller's token output.

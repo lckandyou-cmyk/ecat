@@ -4,9 +4,8 @@
  */
 
 #include "ecat_transfer.h"
-#include "ecat_upgrade.h"
 #include "ecat_foe_transport.h"
-#include "ecat_upgrade_file.h"
+#include "ecat_transfer_file.h"
 #include "ecat_foe_efw.h"
 #include "ecat_foe_core_async.h"
 #include <stdio.h>
@@ -1297,10 +1296,7 @@ int main(void)
     ecat_foe_core_on_abort(&core);
     ecat_transfer_t peer_mgr;
     assert(ecat_transfer_init(&peer_mgr, &reg, &core) == 0);
-    ecat_upgrade_request_t old_req = {
-        .target_id = 1U,
-        .fw_version = 0x01020304U
-    };
+    ecat_transfer_request_t old_req = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     ecat_transfer_request_t peer_req = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     uint64_t old_token = 0;
     assert(ecat_transfer_begin(&peer_mgr, &channel_can, &peer_req, &old_token) == ECAT_TRANSFER_COMPLETE);
@@ -1350,10 +1346,10 @@ int main(void)
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
     ecat_foe_transport_abort(&foe_tr);
 
-    /* 4.4 真实文件传输适配器 (ecat_upgrade_file_t) 仲裁竞争测试 */
+    /* 4.4 真实文件传输适配器 (ecat_transfer_file_t) 仲裁竞争测试 */
     uint8_t file_buf[128];
-    ecat_upgrade_file_t file_tr;
-    assert(ecat_upgrade_file_init_transfer(&file_tr, &fw_manager, file_buf, sizeof(file_buf)) == 0);
+    ecat_transfer_file_t file_tr;
+    assert(ecat_transfer_file_init(&file_tr, &fw_manager, file_buf, sizeof(file_buf)) == 0);
     size_t file_acl_count = reg.acl_rule_count;
     assert(ecat_target_registry_add_acl(&reg, 2U, 1U, ECAT_PERM_WRITE) == 0);
     FILE *dummy_file = tmpfile();
@@ -1361,13 +1357,13 @@ int main(void)
 
     /* 本管理器占有时，File 适配器 begin 返回 BUSY */
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_BUSY);
+    assert(ecat_transfer_file_begin(&file_tr, dummy_file, &old_req) == ECAT_TRANSFER_BUSY);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
 
     /* File 适配器激活时，本管理器 begin 返回 BUSY */
-    assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_begin(&file_tr, dummy_file, &old_req) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
-    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_cancel(&file_tr) == ECAT_TRANSFER_COMPLETE);
     fclose(dummy_file);
     reg.acl_rule_count = file_acl_count;
 

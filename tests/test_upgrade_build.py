@@ -13,9 +13,9 @@ AR = shlex.split(os.environ.get('AR', 'ar'))
 with tempfile.TemporaryDirectory(prefix='upgrade-build-') as tmp:
     work = Path(tmp)
     app = work / 'app.c'
-    app.write_text('#include "ecat_upgrade.h"\n'
+    app.write_text('#include "ecat_transfer.h"\n'
                    'int port_get_version_floor(uint16_t t, uint32_t *v) { (void)t; (void)v; return 0; }\n'
-                   'int main(void) { return ecat_upgrade_init(0, 0) == -1 ? 0 : 1; }\n')
+                   'int main(void) { return ecat_transfer_init(0, 0, 0) == -1 ? 0 : 1; }\n')
     foe = work / 'foe.c'
     foe.write_text('#include "ecat_foe_ssc.h"\n'
                    'int port_get_version_floor(uint16_t t, uint32_t *v) { (void)t; (void)v; return 0; }\n'
@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='upgrade-build-') as tmp:
         assert ('ecat_foe_ssc.o' in members) == (mode in ('default', 'shared')), members
         assert ('ecat_foe_transport.o' in members) == (mode in ('default', 'shared')), members
         assert 'ecat_foe_soes.o' not in members
-        assert ('ecat_upgrade_file.o' in members) == (mode in ('file', 'shared')), members
+        assert ('ecat_transfer_file.o' in members) == (mode in ('file', 'shared')), members
         executable = work / ('app-' + mode)
         subprocess.run(CC + ['-std=c99', '-I' + str(ROOT / 'include'), str(app),
                              str(library), '-o', str(executable)], check=True)
@@ -48,9 +48,9 @@ with tempfile.TemporaryDirectory(prefix='upgrade-build-') as tmp:
         else:
             assert linked.returncode != 0 and 'ecat_foe_ssc_init' in linked.stderr, linked.stderr
     file_app = work / 'file_app.c'
-    file_app.write_text('#include "ecat_upgrade_file.h"\n'
+    file_app.write_text('#include "ecat_transfer_file.h"\n'
                         'int port_get_version_floor(uint16_t t, uint32_t *v) { (void)t; (void)v; return 0; }\n'
-                        'int main(void) { return ecat_upgrade_file_init(0, 0, 0, 0) == -1 ? 0 : 1; }\n')
+                        'int main(void) { return ecat_transfer_file_init(0, 0, 0, 0) == -1 ? 0 : 1; }\n')
     for mode in ('default', 'off', 'file', 'shared'):
         result = subprocess.run(CC + ['-std=c99', '-I' + str(ROOT / 'include'), str(file_app),
                                       str(work / mode / 'libecat_upgrade.a'), '-o', str(work / ('file-app-' + mode))],

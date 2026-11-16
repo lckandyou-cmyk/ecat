@@ -190,4 +190,4 @@ SOES 协议栈本身非多线程安全，接入必须遵循单执行流原子互
 
 ### 统一会话管理
 
-示例在 `bootloader_app_t.registry` 中注册固件目标，在 `bootloader_app_t.transfer` 中创建传输管理器，并将 SOES 适配器绑定到该管理器。其他可选入口必须使用同一个管理器，不能直接调用核心事件 API；FoE WRQ、错误及应用 abort 都不会取消其他入口的会话。加入工程时，除已有核心和 SOES 适配器外，还需包含 `src/ecat_target_registry.c`、`src/ecat_transfer.c`、`src/ecat_upgrade_session.c`、`src/ecat_foe_core_async.c`、`src/ecat_foe_target_async.c` 和 `src/adapters/ecat_foe_transport.c`。仓库的文件流适配器仍在迁移中；若同时编译其旧入口，暂时还需要 `src/ecat_upgrade.c`。
+示例在 `bootloader_app_t.registry` 中注册固件目标，在 `bootloader_app_t.transfer` 中创建传输管理器，并将 SOES 适配器绑定到该管理器。其他可选入口必须使用同一个管理器，不能直接调用核心事件 API；FoE WRQ、错误及应用 abort 都不会取消其他入口的会话。加入工程时，除已有核心和 SOES 适配器外，还需包含 `src/ecat_target_registry.c`、`src/ecat_transfer.c`、`src/ecat_upgrade_session.c`、`src/ecat_foe_core_async.c`、`src/ecat_foe_target_async.c` 和 `src/adapters/ecat_foe_transport.c`。

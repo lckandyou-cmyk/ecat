@@ -25,11 +25,10 @@
 #include "ecat_target_registry.h"
 #include "ecat_transfer.h"
 #include "ecat_foe_efw.h"
-#include "ecat_upgrade.h"
 #include "ecat_foe_soes.h"
 #include "ecat_foe_ssc.h"
 #include "ecat_foe_ssc_async.h"
-#include "ecat_upgrade_file.h"
+#include "ecat_transfer_file.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
@@ -696,23 +695,35 @@ int main(void)
     assert(ecat_transfer_is_active(&mgr) == false);
 
     /* ---------------------------------------------------------------------- */
-    /* D3: 文件流适配器直连统一传输核心 (ecat_upgrade_file_init_transfer)      */
+    /* D3: 文件流适配器直连统一传输核心 (ecat_transfer_file_init)      */
     /* ---------------------------------------------------------------------- */
-    ecat_upgrade_file_t file_tr;
+    ecat_transfer_file_t file_tr;
     uint8_t file_chunk_buf[64];
-    assert(ecat_upgrade_file_init_transfer(&file_tr, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == 0);
-    assert(ecat_upgrade_file_init_transfer(NULL, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == -1);
+    assert(ecat_transfer_file_init(&file_tr, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == 0);
+    assert(ecat_transfer_file_init(NULL, &mgr, file_chunk_buf, sizeof(file_chunk_buf)) == -1);
 
     /* D3.1: ACL 越权拦截 - FILE 通道 (通道 2) 初始未被授权写 MCU 固件 (目标 1) */
-    ecat_upgrade_request_t upg_mcu_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    ecat_transfer_request_t upg_mcu_req = { .transport_id = 2U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT, .fw_version = 0x01000000U };
     FILE *tmp_fp = tmpfile();
     assert(tmp_fp != NULL);
     assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
     rewind(tmp_fp);
 
-    /* 未授权写目标 1，begin 必须返回 FAILED 且租约未激活 */
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_FAILED);
+    /* Invalid direction is rejected without consuming the stream. */
+    ecat_transfer_request_t invalid_file_req = upg_mcu_req;
+    invalid_file_req.direction = ECAT_TRANSFER_DIR_EXPORT;
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &invalid_file_req) == ECAT_TRANSFER_INVALID);
+    assert(ftell(tmp_fp) == 0);
+
+    /* 未授权写目标 1，begin 必须返回 DENIED 且租约未激活 */
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_TRANSFER_DENIED);
     assert(ecat_transfer_is_active(&mgr) == false);
+    /* The adapter honors the caller's channel ID rather than hard-coding 2. */
+    ecat_transfer_request_t allowed_file_req = upg_mcu_req;
+    allowed_file_req.transport_id = 1U;
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &allowed_file_req) == ECAT_TRANSFER_COMPLETE);
+    assert(ftell(tmp_fp) == 0);
+    assert(ecat_transfer_file_cancel(&file_tr) == ECAT_TRANSFER_COMPLETE);
     fclose(tmp_fp);
 
     /* D3.2: 授权后流式写入与完成校验 */
@@ -727,17 +738,17 @@ int main(void)
     assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
     rewind(tmp_fp);
 
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_is_active(&mgr) == true);
     /* 此时 FoE 端点被互斥阻断 */
     assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
 
     /* 循环 step 流式写入直到 EOF */
-    ecat_upgrade_result_t f_step_res = ECAT_UPGRADE_PENDING;
-    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
-        f_step_res = ecat_upgrade_file_step(&file_tr);
+    ecat_transfer_result_t f_step_res = ECAT_TRANSFER_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_TRANSFER_PENDING && s < 32U; s++) {
+        f_step_res = ecat_transfer_file_step(&file_tr);
     }
-    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(f_step_res == ECAT_TRANSFER_COMPLETE);
     assert(memcmp(s_flash_mcu, fw_payload, sizeof(fw_payload)) == 0);
     assert(ecat_transfer_is_active(&mgr) == false);
     fclose(tmp_fp);
@@ -748,12 +759,12 @@ int main(void)
     assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
     rewind(tmp_fp);
 
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_is_active(&mgr) == true);
     /* 写入第 1 块 */
-    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
     /* 调用 cancel 取消传输 */
-    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_cancel(&file_tr) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_is_active(&mgr) == false);
     /* 释放后 UART 端点可立即发起新操作 */
     assert(ecat_transport_endpoint_begin_export(&ep_uart, 3U, &param_export_size) == ECAT_TRANSFER_COMPLETE);
@@ -776,12 +787,12 @@ int main(void)
     assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
     rewind(tmp_fp);
 
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
-    f_step_res = ECAT_UPGRADE_PENDING;
-    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
-        f_step_res = ecat_upgrade_file_step(&file_tr);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_TRANSFER_COMPLETE);
+    f_step_res = ECAT_TRANSFER_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_TRANSFER_PENDING && s < 32U; s++) {
+        f_step_res = ecat_transfer_file_step(&file_tr);
     }
-    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(f_step_res == ECAT_TRANSFER_COMPLETE);
     assert(sig_verifier.begin_calls == 1U);
     assert(sig_verifier.update_calls > 0U);
     assert(sig_verifier.finish_calls == 1U);
@@ -796,12 +807,12 @@ int main(void)
     assert(fwrite(fw_buf, 1U, fw_len, tmp_fp) == fw_len);
     rewind(tmp_fp);
 
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_UPGRADE_COMPLETE);
-    f_step_res = ECAT_UPGRADE_PENDING;
-    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
-        f_step_res = ecat_upgrade_file_step(&file_tr);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_mcu_req) == ECAT_TRANSFER_COMPLETE);
+    f_step_res = ECAT_TRANSFER_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_TRANSFER_PENDING && s < 32U; s++) {
+        f_step_res = ecat_transfer_file_step(&file_tr);
     }
-    assert(f_step_res == ECAT_UPGRADE_FAILED);
+    assert(f_step_res == ECAT_TRANSFER_FAILED);
     assert(sig_verifier.abort_calls > 0U);
     assert(ecat_transfer_is_active(&mgr) == false);
     fclose(tmp_fp);
@@ -812,7 +823,7 @@ int main(void)
     /* D3.5: 异步 begin PENDING 生命周期、step 推进与防租约泄漏验证            */
     /* ---------------------------------------------------------------------- */
     printf("--- 测试 D3.5: 文件流适配器异步 begin PENDING 生命周期与防租约泄漏 ---\n");
-    ecat_upgrade_request_t upg_async_data_req = { .target_id = 5U, .fw_version = 0U };
+    ecat_transfer_request_t upg_async_data_req = { .transport_id = 2U, .target_id = 5U, .direction = ECAT_TRANSFER_DIR_IMPORT };
     uint8_t async_file_data[128];
     memset(async_file_data, 0x33, sizeof(async_file_data));
     tmp_fp = tmpfile();
@@ -822,7 +833,7 @@ int main(void)
 
     /* D3.5.1: 异步驱动 INIT 返回 PENDING 时，begin 必须返回 PENDING 并正确激活 active/pending */
     s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_UPGRADE_PENDING);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_TRANSFER_PENDING);
     assert(file_tr.active == true);
     assert(file_tr.pending == true);
     assert(ecat_transfer_is_active(&mgr) == true);
@@ -831,7 +842,7 @@ int main(void)
     assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
 
     /* D3.5.2: 在 pending begin 期间调用 cancel，必须安全释放租约，杜绝租约泄漏 */
-    assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_file_cancel(&file_tr) == ECAT_TRANSFER_COMPLETE);
     assert(file_tr.active == false);
     assert(file_tr.pending == false);
     assert(ecat_transfer_is_active(&mgr) == false);
@@ -843,25 +854,25 @@ int main(void)
     /* D3.5.3: 重新发起 begin PENDING，并通过 step 推进就绪与数据写入 */
     rewind(tmp_fp);
     s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
-    assert(ecat_upgrade_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_UPGRADE_PENDING);
+    assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &upg_async_data_req) == ECAT_TRANSFER_PENDING);
     assert(file_tr.active == true);
     assert(file_tr.pending == true);
 
     /* step 推进: 驱动仍 pending 时 step 返回 PENDING */
-    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
     assert(file_tr.pending == true);
 
     /* 驱动完成 INIT/INVALIDATE */
     s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
-    assert(ecat_upgrade_file_step(&file_tr) == ECAT_UPGRADE_PENDING);
+    assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
     assert(file_tr.pending == false); /* begin 轮询完成，就绪态 */
 
     /* 继续 step 循环直到文件传输完成 */
-    f_step_res = ECAT_UPGRADE_PENDING;
-    for (unsigned s = 0; f_step_res == ECAT_UPGRADE_PENDING && s < 32U; s++) {
-        f_step_res = ecat_upgrade_file_step(&file_tr);
+    f_step_res = ECAT_TRANSFER_PENDING;
+    for (unsigned s = 0; f_step_res == ECAT_TRANSFER_PENDING && s < 32U; s++) {
+        f_step_res = ecat_transfer_file_step(&file_tr);
     }
-    assert(f_step_res == ECAT_UPGRADE_COMPLETE);
+    assert(f_step_res == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_is_active(&mgr) == false);
     fclose(tmp_fp);
 

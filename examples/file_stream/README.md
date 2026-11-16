@@ -15,13 +15,13 @@ make build-upgrade ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/shared-upgrade
 
 ## 接入次序
 
-1. 按本地设备身份和分区配置初始化核心、目标驱动及唯一的 ecat_upgrade_t。异步目标须先初始化异步引擎，再把其通用后端接到管理器。
-2. 用 ecat_upgrade_file_init 建立文件入口并提供固定接收缓冲。异步模式下该缓冲容量不得超过引擎 packet buffer 容量。FILE 流用二进制读取方式打开，并定位在 EFW 头部。
-3. 调用 ecat_upgrade_file_begin，传入目标与候选版本。返回 BUSY 时不会读取文件，也不会改变现有升级。元数据必须与 EFW 头一致；不能传入物理存储地址。
-4. 每次应用调度调用一次 ecat_upgrade_file_step。返回 PENDING 时继续调度；等待存储操作期间只轮询、不读取下一块。COMPLETE 表示回读、启用时的验签以及提交均已成功。FAILED 时检查管理器诊断；io_error 单独表示读取文件失败。
-5. 超时或用户取消时调用 ecat_upgrade_file_cancel。无论成功、失败还是取消，文件入口都不关闭或回绕 FILE，调用方负责 fclose。入口和缓冲必须活到操作终止，且不可移动或复制活跃入口对象。
+1. 初始化目标注册表与 `ecat_transfer_t`，固件目标还需配置固件核心；异步目标须配置对应异步后端和暂存区。
+2. 用 `ecat_transfer_file_init` 建立文件入口并提供接收缓冲。文件流以二进制读取方式打开；固件导入时流应定位到 EFW 头部。
+3. 构造 `ecat_transfer_request_t`，指定通道 ID、目标 ID 和 `ECAT_TRANSFER_DIR_IMPORT`，固件目标还需填写候选版本。`expected_size` 可为 0 表示长度未知；返回 BUSY 或 DENIED 时不会读取文件。
+4. 每次调度调用 `ecat_transfer_file_step`。PENDING 表示继续调度；等待存储操作期间只轮询、不读取下一块。COMPLETE 表示提交成功；FAILED 时检查管理器诊断，`io_error` 表示文件读取失败。
+5. 超时或用户取消时调用 `ecat_transfer_file_cancel`。文件入口不会关闭或回绕 FILE，调用方负责 `fclose`。入口、流和缓冲必须活到操作终止，活跃入口不可移动或复制。
 
-与 FoE 共用同一个管理器；SOES/SSC 必须 bind_upgrade 后才能参与统一所有权控制。不要混用未绑定的旧事件 API 操作同一核心。
+FoE 和文件流应绑定同一个传输管理器，共用目标注册表、访问控制和会话仲裁。本参考适配器只实现文件流导入；数据导出可通过通用传输端点实现。
 
 fread 可能阻塞，此入口仅作宿主参考；不能直接放进 ISR 或声称具有 MCU 实时时序保证。掉电安全与启动检查仍由目标驱动和 Bootloader 实现。
 

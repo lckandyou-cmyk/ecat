@@ -1,8 +1,7 @@
 #include "ecat_foe_core_async.h"
 #include "ecat_foe_ssc.h"
 #include "mock_driver.h"
-#include "ecat_upgrade.h"
-#include "ecat_upgrade_file.h"
+#include "ecat_transfer_file.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -535,7 +534,7 @@ int main(void)
     int source = 0, contender = 0;
     uint64_t token = 0, rejected = 0;
     ecat_transfer_request_t request = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
-    ecat_upgrade_request_t file_request = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+    ecat_transfer_request_t file_request = {2U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
     CHECK(setup_async_transfer(&transfer, &registry, &core, &session, transfer_staging, sizeof(transfer_staging)) == 0);
     CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     total = make_efw(efw, payload, sizeof(payload));
@@ -627,28 +626,28 @@ int main(void)
     CHECK(stream != NULL);
     CHECK(fwrite(efw, 1U, total, stream) == total);
     rewind(stream);
-    ecat_upgrade_file_t file;
+    ecat_transfer_file_t file;
     uint8_t file_buffer[64];
-    CHECK(ecat_upgrade_file_init_transfer(&file, &transfer, file_buffer, sizeof(file_buffer)) == 0);
-    CHECK(ecat_upgrade_file_begin(&file, stream, &file_request) == ECAT_UPGRADE_COMPLETE);
-    ecat_upgrade_result_t file_result = ECAT_UPGRADE_PENDING;
-    for (unsigned step = 0; file_result == ECAT_UPGRADE_PENDING && step < 256U; step++) {
+    CHECK(ecat_transfer_file_init(&file, &transfer, file_buffer, sizeof(file_buffer)) == 0);
+    CHECK(ecat_transfer_file_begin(&file, stream, &file_request) == ECAT_TRANSFER_COMPLETE);
+    ecat_transfer_result_t file_result = ECAT_TRANSFER_PENDING;
+    for (unsigned step = 0; file_result == ECAT_TRANSFER_PENDING && step < 256U; step++) {
         bool was_pending = file.pending;
         long position = ftell(stream);
-        file_result = ecat_upgrade_file_step(&file);
+        file_result = ecat_transfer_file_step(&file);
         if (was_pending) CHECK(ftell(stream) == position);
     }
-    CHECK(file_result == ECAT_UPGRADE_COMPLETE && flash.valid);
+    CHECK(file_result == ECAT_TRANSFER_COMPLETE && flash.valid);
     CHECK(memcmp(flash.flash, payload, sizeof(payload)) == 0);
     rewind(stream);
-    CHECK(ecat_upgrade_file_begin(&file, stream, &file_request) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_transfer_file_begin(&file, stream, &file_request) == ECAT_TRANSFER_COMPLETE);
     for (unsigned step = 0; !file.pending && step < 16U; step++)
-        CHECK(ecat_upgrade_file_step(&file) == ECAT_UPGRADE_PENDING);
+        CHECK(ecat_transfer_file_step(&file) == ECAT_TRANSFER_PENDING);
     CHECK(file.pending);
     unsigned aborts_before_cancel = flash.aborts;
-    CHECK(ecat_upgrade_file_cancel(&file) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_transfer_file_cancel(&file) == ECAT_TRANSFER_COMPLETE);
     CHECK(flash.aborts == aborts_before_cancel + 1U);
-    CHECK(ecat_upgrade_file_step(&file) == ECAT_UPGRADE_FAILED);
+    CHECK(ecat_transfer_file_step(&file) == ECAT_TRANSFER_FAILED);
     fclose(stream);
 
     /* ---------------------------------------------------------------------- */

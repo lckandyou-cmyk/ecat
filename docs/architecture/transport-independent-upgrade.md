@@ -52,18 +52,17 @@ FoE 默认启用；宿主文件流入口显式启用。后续硬件传输各自�
 
 - `include/ecat_upgrade_request.h`：只携带目标与候选版本，无物理地址。旧 WRQ 文件名解析复用同一元数据 begin 路径。
 - `include/ecat_upgrade_session.h`：独占所有者和单调会话代号，无协议和硬件依赖。
-- `include/ecat_upgrade.h`：统一 begin/write/finish/poll/cancel。普通 init 接受同步目标；init_async 接入已绑定同一核心的后端，也支持同步目标。等待期间新操作返回忙，输入在返回前已复制。异步 finish 完成必须确认核心提交成功。
+- `include/ecat_transfer.h`：统一传输会话、导入导出与同步/异步调度。
 - `include/ecat_upgrade_async.h`：独立异步后端契约；引擎公开头不包含 SSC gate。旧 SSC 类型及 getter 保留兼容别名。
 - `include/ecat_foe_transport.h`：FoE 文件名及结束包桥接。末包提交结果独立保存，防止延迟重试错误读取新所有者的核心状态。
-- `include/ecat_upgrade_file.h`：默认关闭的宿主 FILE 流参考入口，详见 [文件流接入](../../examples/file_stream/README.md)。
+- `include/ecat_transfer_file.h`：默认关闭的宿主 FILE 流参考入口，详见 [文件流接入](../../examples/file_stream/README.md)。
 
-两套管理器（固件升级管理器 `ecat_upgrade_t` 与通用双向传输管理器 `ecat_transfer_t`）通过绑定到底核统一会话仲裁器 `core->shared_session` 共享全局租约与 ACL 互斥，确保两套上层入口绝不同时并发操作同一底层核心。禁止绕开管理器直接调用底核旧事件 API。未绑定的旧适配器仍是独占核心兼容模式，不能与共享入口混用。
+固件和普通数据入口使用 `ecat_transfer_t` 与共享目标注册表。未绑定的 SOES/SSC 底层直连路径仍待迁移，不能与管理器混用。
+SOES：先 init，再通过 `bind_transfer` 接入传输管理器。核心配置中允许混合定义同步与异步目标，但因原生 SOES 协议机为纯同步模型，当外部 FoE 请求命中异步目标时，适配层将在前置钩子处严格拒绝并回复 `0x8001 (NOTFOUND)` 拦截，原生 SOES 不支持异步处理目标。邮箱前置、原生 SOES 处理、后置钩子必须严格串行调用（未在真实物理硬件上实测）。所有错误和状态迁移清理只取消 SOES 自己的会话。Bootloader SOES 示例已默认采用共享模式；应用 FoE abort 同样保护其他所有者。
 
-SOES：先 init，再通过 `bind_upgrade` 或 `bind_transfer` 接入对应管理器。核心配置中允许混合定义同步与异步目标，但因原生 SOES 协议机为纯同步模型，当外部 FoE 请求命中异步目标时，适配层将在前置钩子处严格拒绝并回复 `0x8001 (NOTFOUND)` 拦截，原生 SOES 不支持异步处理目标。邮箱前置、原生 SOES 处理、后置钩子必须严格串行调用（未在真实物理硬件上实测）。所有错误和状态迁移清理只取消 SOES 自己的会话。Bootloader SOES 示例已默认采用共享模式；应用 FoE abort 同样保护其他所有者。
+SSC 同步：先 init，再 bind_transfer。SSC 异步：先初始化核心异步引擎和通用管理器，初始化 SSC adapter（传入 gate 地址），再用 ecat_foe_transport_async_ops() 和 &adapter.transport 初始化 gate，最后 bind_transfer。gate 与引擎缓冲必须独立，每一步检查返回值。密码校验仍在建立会话前执行；超时后的错误重试不取消新所有者。
 
-SSC 同步：先 init，再 bind_upgrade。SSC 异步：先初始化核心异步引擎和通用管理器，初始化 SSC adapter（传入 gate 地址），再用 ecat_foe_transport_async_ops() 和 &adapter.transport 初始化 gate，最后 bind_upgrade。gate 与引擎缓冲必须独立，每一步检查返回值。密码校验仍在建立会话前执行；超时后的错误重试不取消新所有者。
-
-所有适配器都需链接通用引擎和管理器，FoE 还需链接桥接源文件。失败清理后核心保留 ERROR 与细分诊断供协议后置钩子读取。旧公开事件 API 保留，用户须重新编译应用及适配器对象。
+所有适配器都需链接通用引擎和管理器，FoE 还需链接桥接源文件。失败清理后核心保留 ERROR 与细分诊断供协议后置钩子读取。用户须迁移调用代码并重新编译应用及适配器对象。
 
 ## 可选静态库构建
 
