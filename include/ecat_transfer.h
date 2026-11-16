@@ -183,8 +183,12 @@ ecat_transfer_result_t ecat_transfer_begin(
  *   5) 若调用 ecat_transfer_cancel 中止会话，契约要求底层硬件驱动的 async_ops->abort 必须同步停止
  *      硬件 DMA/外设传输；transfer 引擎在 cancel 中清空内部 pending 状态并释放会话，保证后续绝不再访问
  *      user_read_out_buf 和 user_read_actual 指针，调用方随后方可安全回收或释放缓冲区；
- * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
- *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入实际读取长度；
+ * - **零进展死循环防御契约 (Zero-Progress Guard)**：
+ *   在 remaining > 0 (尚有待导出数据) 且请求长度 to_read > 0 时，若底层异步驱动在 start 或 poll
+ *   阶段报告 COMPLETE 但实际读取字节数 actual_length == 0，引擎严格判定为驱动读失败 (ECAT_TRANSFER_ERR_DRIVER_READ)，
+ *   同步调用驱动 abort 并彻底释放会话返回 ECAT_TRANSFER_FAILED，坚决杜绝因 offset 无进展导致的无限忙重试与死循环；
+ *   若驱动返回正数短读 (actual_length < to_read)，引擎正常推进并返回 CONTINUE；
+ *   若会话当前已达文件尾 (EOF，remaining == 0)，则立即安全返回 COMPLETE 并赋 *actual_read = 0；
  * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
  * - 令牌失效返回 ECAT_TRANSFER_STALE；驱动错误返回 ECAT_TRANSFER_FAILED。
  *

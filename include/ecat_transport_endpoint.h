@@ -185,8 +185,10 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
  *   5) 若调用 ecat_transport_endpoint_abort 中止会话，契约要求底层设备驱动的 abort 接口必须同步停止
  *      硬件 DMA/外设传输；传输引擎在 abort 流程中重置 pending 标记与内部阶段，保证后续绝不再使用
  *      这两个外部指针，调用方随后方可安全释放或复用缓冲区；
- * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
- *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入；
+ * - **零进展死循环防御契约 (Zero-Progress Guard)**：
+ *   在 remaining > 0 (尚有待导出数据) 且请求长度 > 0 时，若底层异步驱动在 start 或 poll
+ *   阶段完成但读取字节数 actual_read == 0，端点严格判定为驱动读失败并清理会话，返回 ECAT_TRANSFER_FAILED
+ *   并触发 on_session_abort，杜绝因 offset 停滞引发的无限忙循环；允许正数短读；达到 EOF 时正常返回 COMPLETE；
  * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
  * - 会话未激活返回 ECAT_TRANSFER_INVALID；驱动错误返回 ECAT_TRANSFER_FAILED (并派发 abort 通知)。
  *

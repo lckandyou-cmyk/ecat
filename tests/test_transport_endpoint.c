@@ -45,7 +45,8 @@ static int mock_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 }
 static int mock_finalize(void *ctx) { (void)ctx; return 0; }
 static void mock_abort(void *ctx) { (void)ctx; }
-static uint32_t mock_get_size(void *ctx) { (void)ctx; return TEST_FLASH_SIZE; }
+static uint32_t s_mock_size_override = TEST_FLASH_SIZE;
+static uint32_t mock_get_size(void *ctx) { (void)ctx; return s_mock_size_override; }
 
 /* 回调跟踪 */
 static bool s_cb_started = false;
@@ -96,11 +97,18 @@ static void reset_cb_flags(void)
 
 /* Mock 异步端点数据驱动 */
 static ecat_async_op_result_t s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+static size_t s_ep_mock_override_actual = 0;
+static bool s_ep_mock_use_override_actual = false;
+
 static ecat_async_op_result_t ep_mock_async_start(void *ctx, ecat_async_data_op_t *op)
 {
     (void)ctx;
     if (op != NULL) {
-        op->actual_length = op->length;
+        if (s_ep_mock_use_override_actual) {
+            op->actual_length = s_ep_mock_override_actual;
+        } else {
+            op->actual_length = op->length;
+        }
         if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
             op->erased_end = op->need_end;
         }
@@ -111,7 +119,11 @@ static ecat_async_op_result_t ep_mock_async_poll(void *ctx, ecat_async_data_op_t
 {
     (void)ctx;
     if (op != NULL) {
-        op->actual_length = op->length;
+        if (s_ep_mock_use_override_actual) {
+            op->actual_length = s_ep_mock_override_actual;
+        } else {
+            op->actual_length = op->length;
+        }
         if (op->kind == ECAT_ASYNC_DATA_OP_ERASE_TO) {
             op->erased_end = op->need_end;
         }
@@ -576,6 +588,125 @@ int main(void)
     assert(s_cb_aborted == true);
     /* *actual_read 保持中止时状态 (0)，不会在 abort 后被异步驱动残留改写 */
     assert(delayed_actual_read == 0U);
+
+    /* ---------------------------------------------------------------------- */
+    /* 12. 异步导出零进展 (actual_length == 0) 死循环拦截与安全失败验证        */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试异步导出零进展 (actual_length == 0) 死循环拦截与安全失败 ---\n");
+    /* 12.1 路径 A: start 立即 COMPLETE 但 actual_length == 0 (死循环拦截) */
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    s_ep_mock_use_override_actual = false;
+    uint32_t zero_prog_total = 0;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &zero_prog_total) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(zero_prog_total == 1024U);
+
+    s_ep_mock_use_override_actual = true;
+    s_ep_mock_override_actual = 0;
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    uint8_t zero_prog_buf[64];
+    size_t zero_actual = 0x1234;
+
+    int abort_before_a = s_ep_mock_abort_count;
+    ecat_transfer_result_t zres_a = ecat_transport_endpoint_read_chunk(
+        &ep_uart, zero_prog_buf, sizeof(zero_prog_buf), &zero_actual);
+    /* 契约断言: 立即完成且 0 字节时必须返回 FAILED，杜绝死循环并触发 abort */
+    assert(zres_a == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr) == ECAT_TRANSFER_ERR_DRIVER_READ);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(ep_uart.current_token == 0U);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_ERROR);
+    assert(mgr.active == false);
+    assert(s_cb_aborted == true);
+    assert(s_ep_mock_abort_count == abort_before_a + 1);
+
+    /* 验证错误后会话锁完全释放，允许开启新会话 */
+    reset_cb_flags();
+    s_ep_mock_use_override_actual = false;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &zero_prog_total) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    /* 12.2 路径 B: start 返回 PENDING，后续 poll COMPLETE 但 actual_length == 0 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    s_ep_mock_use_override_actual = false;
+    size_t poll_zero_actual = 0x5678;
+    assert(ecat_transport_endpoint_read_chunk(
+        &ep_uart, zero_prog_buf, sizeof(zero_prog_buf), &poll_zero_actual) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+    assert(poll_zero_actual == 0U);
+
+    /* 模拟 poll 返回 COMPLETE 但驱动报告 0 字节 */
+    s_ep_mock_use_override_actual = true;
+    s_ep_mock_override_actual = 0;
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    int abort_before_b = s_ep_mock_abort_count;
+
+    ecat_transfer_result_t zres_b = ecat_transport_endpoint_poll(&ep_uart);
+    /* 契约断言: poll 阶段推进返回 0 字节必须返回 FAILED 并清理会话 */
+    assert(zres_b == ECAT_TRANSFER_FAILED);
+    assert(ecat_transfer_get_last_error(&mgr) == ECAT_TRANSFER_ERR_DRIVER_READ);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(ep_uart.current_token == 0U);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_ERROR);
+    assert(mgr.active == false);
+    assert(s_cb_aborted == true);
+    assert(s_ep_mock_abort_count == abort_before_b + 1);
+
+    /* 12.3 允许正数短读 (Short Read) 正常推进 */
+    reset_cb_flags();
+    s_ep_mock_use_override_actual = false;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &zero_prog_total) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    s_ep_mock_use_override_actual = true;
+    s_ep_mock_override_actual = 16; /* 请求 64 字节，实际返回 16 字节短读 */
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    size_t short_actual = 0;
+    assert(ecat_transport_endpoint_read_chunk(
+        &ep_uart, zero_prog_buf, sizeof(zero_prog_buf), &short_actual) == ECAT_TRANSFER_CONTINUE);
+    assert(short_actual == 16U);
+    assert(ecat_transfer_get_bytes_transferred(&mgr) == 16U);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    /* 正常中止当前会话清理 */
+    ecat_transport_endpoint_abort(&ep_uart);
+    s_ep_mock_use_override_actual = false;
+
+    /* 12.4 合法空数据回读 (get_data_size == 0) 或已达 EOF 时的立即完成与安全边界 */
+    /* 注册 Target 20: 包含 get_data_size 回调返回 0 的空数据区 */
+    ecat_target_desc_t empty_desc;
+    memset(&empty_desc, 0, sizeof(empty_desc));
+    empty_desc.target_id = 20U;
+    strncpy(empty_desc.name, "empty_target", sizeof(empty_desc.name));
+    empty_desc.type = ECAT_TARGET_TYPE_DATA;
+    empty_desc.permissions = ECAT_PERM_READ;
+    empty_desc.max_size = 512U;
+    empty_desc.enabled = true;
+    empty_desc.asynchronous = true;
+    empty_desc.driver.async_ops = &ep_async_ops;
+    empty_desc.driver.get_data_size = mock_get_size; /* 之后通过静态变量控制返回值 */
+    assert(ecat_target_registry_add(&reg, &empty_desc) == 0);
+
+    reset_cb_flags();
+    s_mock_size_override = 0U; /* 动态指定空目标数据量为 0 */
+    uint32_t empty_total = 0x1234;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 20U, &empty_total) == ECAT_TRANSFER_COMPLETE);
+    assert(empty_total == 0U);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    size_t eof_actual = 0x9999;
+    /* 已到 EOF (remaining == 0) 时，调用 read_chunk 必须立即安全返回 COMPLETE，actual = 0，不误判为驱动错误 */
+    assert(ecat_transport_endpoint_read_chunk(
+        &ep_uart, zero_prog_buf, sizeof(zero_prog_buf), &eof_actual) == ECAT_TRANSFER_COMPLETE);
+    assert(eof_actual == 0U);
+    assert(ecat_transfer_get_bytes_transferred(&mgr) == 0U);
+    assert(s_cb_aborted_count == 0);
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+    s_mock_size_override = TEST_FLASH_SIZE; /* 恢复默认 */
 
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;

@@ -638,6 +638,15 @@ ecat_transfer_result_t ecat_transfer_read(
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
+            if (actual == 0U && to_read > 0U) {
+                /* 契约防护: 尚有未导出数据但驱动未读取任何字节即宣告完成，判定为读失败防范死循环 */
+                t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
+                transfer_abort_data(t);
+                t->driver_initialized = false;
+                t->active = false;
+                release_session(t, owner, token);
+                return ECAT_TRANSFER_FAILED;
+            }
             t->current_offset += (uint32_t)actual;
             *actual_read = actual;
             if (actual > 0U) {
@@ -1340,6 +1349,16 @@ ecat_transfer_result_t ecat_transfer_poll(
                 if (actual > (size_t)t->pending_length) {
                     t->stage = ECAT_TRANSFER_STAGE_NONE;
                     t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+                    transfer_abort_data(t);
+                    t->driver_initialized = false;
+                    t->active = false;
+                    release_session(t, owner, token);
+                    return ECAT_TRANSFER_FAILED;
+                }
+                if (actual == 0U && t->pending_length > 0U) {
+                    /* 契约防护: 异步 poll 推进完成但读取字节为 0，判定为读失败防范死循环 */
+                    t->stage = ECAT_TRANSFER_STAGE_NONE;
+                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_READ;
                     transfer_abort_data(t);
                     t->driver_initialized = false;
                     t->active = false;
