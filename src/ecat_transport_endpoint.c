@@ -425,6 +425,9 @@ ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *e
     if (!ecat_transport_endpoint_is_active(ep)) {
         return ECAT_TRANSFER_INVALID;
     }
+    if (!ecat_transfer_is_pending(ep->transfer_mgr)) {
+        return ECAT_TRANSFER_INVALID;
+    }
 
     ecat_transfer_result_t res = ecat_transfer_poll(
         ep->transfer_mgr, ep, ep->current_token);

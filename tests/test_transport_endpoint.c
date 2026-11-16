@@ -182,14 +182,26 @@ int main(void)
     assert(ecat_transport_endpoint_is_active(&ep_uart));
     assert(s_cb_started);
 
+    /* 同步目标导入: 在 begin 之后、首次 write 之前空闲轮询，必须返回 INVALID 且保留会话 */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+
     /* CAN 端点并发争抢拦截 */
     assert(ecat_transport_endpoint_begin_export(&ep_can, 1U, NULL) == ECAT_TRANSFER_BUSY);
 
-    /* 分两包写入 */
+    /* 分两包写入，并在每包写完后空闲轮询，验证不触发 abort */
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, payload, 200) == ECAT_TRANSFER_COMPLETE);
     assert(s_cb_progress_last == 200);
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, payload + 200, 312) == ECAT_TRANSFER_COMPLETE);
     assert(s_cb_progress_last == 512);
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
 
     /* 提交会话 */
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
@@ -209,6 +221,11 @@ int main(void)
     assert(ecat_transport_endpoint_is_active(&ep_can));
     assert(s_cb_started);
 
+    /* 同步目标导出: 在 begin 之后、首次 read 之前空闲轮询，必须返回 INVALID 且保留会话 */
+    assert(ecat_transport_endpoint_poll(&ep_can) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_can) == true);
+    assert(s_cb_aborted_count == 0);
+
     uint8_t rx_buf[TEST_FLASH_SIZE];
     size_t total_rx = 0;
     while (total_rx < export_size) {
@@ -224,6 +241,9 @@ int main(void)
         } else {
             assert(r == ECAT_TRANSFER_CONTINUE);
         }
+        /* 同步 read 刚完成后空闲轮询，确保不会被错误 abort */
+        assert(ecat_transport_endpoint_poll(&ep_can) == ECAT_TRANSFER_INVALID);
+        assert(s_cb_aborted_count == 0);
     }
 
     assert(ecat_transport_endpoint_finish_export(&ep_can) == ECAT_TRANSFER_COMPLETE);
@@ -341,6 +361,11 @@ int main(void)
     assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
     assert(s_cb_progress_last == 64U);
 
+    /* 异步 write 刚完成后空闲轮询，必须返回 INVALID 且保留会话与令牌，绝不触发 abort */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+
     /* 异步 finish_import: 返回 PENDING */
     s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_PENDING);
@@ -397,6 +422,11 @@ int main(void)
     assert(s_cb_started == true);
     assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
 
+    /* [复现 Codex 报告的问题 1]: 在 begin_import 成功后、首次 write 之前，
+     * 活动会话存在但当前无 pending 操作，调用 poll 得到 INVALID，断言 is_active 必须依然为 true */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
     /* 写入并正常结束 */
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
@@ -448,8 +478,49 @@ int main(void)
     /* 正常读取并完成 */
     assert(ecat_transport_endpoint_read_chunk(&ep_uart, exp_buf, sizeof(exp_buf), &actual_exp) == ECAT_TRANSFER_CONTINUE);
     assert(actual_exp == sizeof(exp_buf));
+
+    /* 异步 read 刚完成后空闲轮询，必须返回 INVALID 且保留会话与令牌，绝不触发 abort */
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(s_cb_aborted_count == 0);
+
     assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     assert(!ecat_transport_endpoint_is_active(&ep_uart));
+
+    /* ---------------------------------------------------------------------- */
+    /* 10. 真正底层驱动故障时的错误清理与 abort 回调验证                      */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试端点底层驱动真实故障时的状态清理与 abort 派发 ---\n");
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 128U, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+
+    /* 启动一个分块写入，底层返回 PENDING */
+    s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_PENDING);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
+
+    /* 模拟底层驱动在 poll 推进期间发生真实致命错误 (FAILED) */
+    s_ep_async_next_res = ECAT_ASYNC_OP_FAILED;
+    assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_FAILED);
+    /* 关键断言: 真正驱动错误下必须完全清理会话、触发 abort 回调并释放令牌与 transfer 管理器 */
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
+    assert(ecat_transport_endpoint_is_pending(&ep_uart) == false);
+    assert(ep_uart.current_token == 0U);
+    assert(ep_uart.state == ECAT_TRANSPORT_STATE_ERROR);
+    assert(s_cb_aborted == true);
+    assert(s_cb_aborted_count == 1);
+    assert(mgr.active == false);
+
+    /* 验证错误后端点可重新开启新会话 */
+    reset_cb_flags();
+    s_ep_async_next_res = ECAT_ASYNC_OP_COMPLETE;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 10U, 64U, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, ep_chunk, 64U) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_is_active(&ep_uart) == false);
 
     printf(">>> 传输端点接口与自定义通道单元测试全部通过！<<<\n");
     return 0;
