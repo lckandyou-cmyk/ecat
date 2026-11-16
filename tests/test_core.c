@@ -423,6 +423,16 @@ static int setup_test_transfer(ecat_transfer_t *transfer, ecat_target_registry_t
     return ecat_transfer_init(transfer, registry, core);
 }
 
+static int setup_test_soes(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
+                           mock_driver_t *mcu, uint32_t buffer_size)
+{
+    static ecat_transfer_t transfer;
+    static ecat_target_registry_t registry;
+    if (setup_test_transfer(&transfer, &registry, core, mcu) != 0) return -1;
+    ecat_foe_soes_init(adapter, core, buffer_size);
+    return ecat_foe_soes_bind_transfer(adapter, &transfer);
+}
+
 static void test_file_and_foe_signature_failure_equivalence(void)
 {
     static mock_driver_t mcu;
@@ -1478,12 +1488,12 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     setup_default_core(&core, &mcu, NULL, NULL);
 
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, 512);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 512), 0, "SOES manager ready");
 
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "", 0), ECAT_FOE_ERRCODE_ILLEGAL, "SOES preserves invalid WRQ error");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26), 0, "SOES starts WRQ");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "", 0), ECAT_FOE_ERRCODE_ILLEGAL, "SOES rejects invalid replacement");
-    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_ERROR, "invalid replacement closes prior legacy session");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_IDLE, "invalid replacement closes prior session");
 
     foe_file_cfg_t file_cfg;
     memset(&file_cfg, 0, sizeof(file_cfg));
@@ -1500,8 +1510,9 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* 失败写入与 post_state_hook 拦截 */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
-    ecat_foe_soes_init(&adapter, &core, 512);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 512), 0, "SOES manager ready");
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
@@ -1530,11 +1541,12 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* 验证失败后重新成功升级的自愈解除拦截能力 (短包结束路径) */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
     /* 重新组织正确固件 */
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
     /* 在真实 SOES 中若未走 on_wrq，此处直接由核心启动 WRQ */
-    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw, efw_len);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "新会话短包写入成功");
     TEST_ASSERT(core.driver_finalized, "成功提交后驱动已 finalize");
@@ -1549,9 +1561,10 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* 验证 0 长度包结束路径的失败与成功自愈 */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
     /* 将 buffer_size 设为 64，构造 64 字节负载 (总长 128 字节，正好为 2 个 64 字节整包，不触发短包结束，必须由 0 长度包结束) */
-    ecat_foe_soes_init(&adapter, &core, 0U);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 0U), 0, "SOES manager ready");
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     uint8_t payload64[64];
     for (int i = 0; i < 64; i++) payload64[i] = (uint8_t)(i + 1);
@@ -1560,7 +1573,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
     TEST_ASSERT_EQ_INT(efw128_len, 212, "总固件长度为 128 字节");
 
     /* A. 故意诱发 0 长度包结束时失败 (CRC 错误) */
-    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     /* 发送完整容器头部整包，保留会话以便单独验证负载 CRC 失败。 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "发送容器头部成功");
@@ -1577,7 +1590,8 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* B. 重新发起正确流程并通过 0 长度包成功自愈 (同一个 core 实例，不重建 core) */
     mock_driver_reset(&mcu);
-    ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     /* 发送正确的第 1 块 64 字节 */
     ret_cb = ecat_foe_soes_write_cb(&file_cfg, efw128, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ret_cb, 0, "自愈重试容器头部成功");
@@ -1606,9 +1620,10 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* 验证场景: 主站超时/断线等协议栈中止未触发写回调，但驱动已被 invalidate */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
     /* 设置 buffer_size 为 64，发送 64 字节整包不触发短包结束，仅完成头部装配与驱动 invalidate */
-    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "SOES manager ready");
     s_mock_al_error_val = 0;
     s_mock_al_error_calls = 0;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
@@ -1631,6 +1646,7 @@ static void test_soes_adapter_short_packet_and_post_hook(void)
 
     /* 模拟主站重试成功闭环：同一个 core 实例，不重建 core，新升级完成后恢复允许切入 INIT */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     adapter.buffer_size = 512;
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
@@ -2363,8 +2379,9 @@ static void test_mid_session_drop_same_core_recovery(void)
 
     /* 初始化核心与驱动 */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     setup_default_core(&core, &mcu, NULL, NULL);
-    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "SOES manager ready");
     ecat_foe_soes_set_al_error_fn(&adapter, mock_al_error_cb);
     s_mock_al_error_calls = 0;
     s_mock_al_error_val = 0;
@@ -2391,6 +2408,7 @@ static void test_mid_session_drop_same_core_recovery(void)
     /* 严禁调用 setup_default_core / ecat_foe_core_init / memset(&core) !
      * 同一个 core 实例必须能够自愈残留驱动与状态 */
     mock_driver_reset(&mcu);
+    mcu.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
     s_mock_al_error_calls = 0;
     s_mock_al_error_val = 0;
     adapter.buffer_size = 512;
