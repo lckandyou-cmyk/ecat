@@ -282,6 +282,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
  *   读取包含未初始化垃圾数据的布尔字段（如 !core->is_configured）属于未定义行为 (UB)。
  *
  * 【资源释放与状态机重置】：
+ * - 若已绑定的传输管理器仍有活跃会话（包括普通数据会话），返回 -1 且不改变核心或会话；须先由会话持有者取消或完成传输。
  * - 若 core 当前处于活跃会话中 (core->session_active 为 true)：
  *   若底层驱动已初始化且尚未调用 abort 或 finalize，显式调用目标驱动的 abort 回调释放底层硬件/闪存资源；
  *   标记 driver_abort_called 为 true。
@@ -290,7 +291,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg);
  *   重新初始化一个处于活跃会话的 core 实例，调用方必须先显式调用 ecat_foe_core_deinit(core)，然后再执行 ecat_foe_core_init()。
  *
  * @param core 核心状态机实例指针 (必须为 NULL、有效已初始化或经显式零初始化的实例)
- * @return 0 成功
+ * @return 0 成功，-1 传输会话仍活跃
  */
 int ecat_foe_core_deinit(ecat_foe_core_t *core);
 

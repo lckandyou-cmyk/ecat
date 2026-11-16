@@ -468,6 +468,7 @@ int main(void)
     CHECK(!gate.pending && core.payload_rx_bytes == 80U && core.written_offset == 80U);
 
     /* A valid header with an undersized operation buffer cannot invalidate. */
+    ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_PACKETNO);
     CHECK(ecat_foe_core_deinit(&core) == 0);
     cfg.targets[0].write_unit = 256U;
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);

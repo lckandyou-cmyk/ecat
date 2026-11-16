@@ -618,6 +618,12 @@ static void test_owned_sync_upgrade_stream(void)
     TEST_ASSERT_EQ_INT(mcu.count_abort, 0, "invalid argument does not abort session");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "owner cancels session");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "cancel cleans driver once");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE, "session before core shutdown");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_deinit(&core), -1, "core shutdown rejects an owned transfer");
+    TEST_ASSERT(core.is_configured && ecat_upgrade_session_owns_mgr(transfer.session_ptr, &transfer, &file, other),
+                "rejected shutdown preserves core and lease");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "owner releases before shutdown");
+    TEST_ASSERT_EQ_INT(ecat_foe_core_deinit(&core), 0, "core shutdown succeeds after cancellation");
 }
 
 static void test_begin_request_without_filename(void)

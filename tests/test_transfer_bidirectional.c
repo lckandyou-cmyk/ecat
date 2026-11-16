@@ -1675,6 +1675,9 @@ int main(void)
     assert(lease_tok1 != 0);
     assert(mgr_first.active == true);
     assert(g_init_called == true);
+    assert(ecat_foe_core_deinit(&core) == -1);
+    assert(core.is_configured && ecat_transfer_is_active(&mgr_first));
+    assert(ecat_upgrade_session_owns_mgr(mgr_first.session_ptr, &mgr_first, &client_owner1, lease_tok1));
     reset_mock_flags();
 
     /* 在非发起的 mgr_second 上用同 owner 同 token 尝试 write/read/finish/cancel 均必须返回 STALE */

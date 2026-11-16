@@ -1,4 +1,5 @@
 #include "ecat_foe_core_internal.h"
+#include "ecat_upgrade_session.h"
 /**
  * @file ecat_foe_core.c
  * @brief EtherCAT FoE 核心升级状态机实现 (依据 SAD-v0.1 第 1、3、4 节)
@@ -220,6 +221,13 @@ int ecat_foe_core_deinit(ecat_foe_core_t *core)
 {
     if (core == NULL || !core->is_configured) {
         return 0;
+    }
+
+    /* The transfer manager owns driver and lease cleanup, including data-only
+     * sessions that do not set the firmware core's session_active flag. */
+    if (core->shared_session != NULL &&
+        ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL) {
+        return -1;
     }
 
     if (core->async_abort_hook != NULL) {
