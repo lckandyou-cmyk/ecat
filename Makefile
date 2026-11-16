@@ -15,7 +15,7 @@ TEST_SOES_HARNESS_SRC = tests/test_soes_real_harness.c
 SOES_CFLAGS = $(filter-out -Itests/stubs,$(CFLAGS)) -Wno-zero-length-array -Wno-c11-extensions -Wno-strict-prototypes -Itests/soes_bsp $(if $(SOES_DIR),-I"$(SOES_DIR)",)
 
 # 阶段 D: 宿主机参考示例与驱动模板源码
-EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
+EXAMPLES_HOST_DEMO_SRC = examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_core_async.c src/ecat_foe_target_async.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_transfer.c src/adapters/ecat_foe_transport.c
 EXAMPLES_DRIVER_TEMPLATE_SRC = examples/driver_template/ecat_foe_driver_template.c
 EXAMPLES_BOOTLOADER_SRCS = \
 	examples/bootloader_soes/bootloader_flash_driver.c \
