@@ -69,6 +69,29 @@ static void setup_core_and_adapter(ecat_foe_core_t *core, ecat_foe_ssc_adapter_t
     ecat_foe_ssc_init(adapter, core, packet_size);
 }
 
+/* The protocol adapter is exercised through the same manager as other
+ * transports. The fixture is reset for each serialized test. */
+static void setup_managed_core_and_adapter(ecat_foe_core_t *core,
+    ecat_foe_ssc_adapter_t *adapter, uint32_t packet_size)
+{
+    static ecat_target_registry_t registry;
+    static ecat_transfer_t transfer;
+    ecat_target_desc_t target = {0};
+    setup_core_and_adapter(core, adapter, packet_size);
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.max_size = TEST_MAX_SIZE;
+    target.enabled = true;
+    target.driver.io = s_mock_drv.driver;
+    target.user_ctx = &s_mock_drv;
+    assert(ecat_target_registry_init(&registry) == 0);
+    assert(ecat_target_registry_add(&registry, &target) == 0);
+    assert(ecat_transfer_init(&transfer, &registry, core) == 0);
+    assert(ecat_foe_ssc_bind_transfer(adapter, &transfer) == 0);
+}
+
 /* 构造合法的 v2 固件数据包 (148 字节头部 + 负载) */
 static size_t build_valid_firmware(uint8_t *out_buf, size_t buf_size, const uint8_t *payload, uint32_t payload_len)
 {
@@ -139,7 +162,7 @@ int main(void)
     /* [TEST 1] 标准全流程验证: WRQ -> DATA -> 短包 EOF */
     {
         printf("\n[TEST 1] 验证 SSC 适配层标准升级全流程 (短包定界 EOF)...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
@@ -165,7 +188,7 @@ int main(void)
     /* [TEST 2] WRQ 阶段项目名不匹配拦截 */
     {
         printf("[TEST 2] 验证 SSC WRQ 阶段项目名称不匹配拦截 (返回 0x8001)...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
 
         const char *invalid_fn = "OTHER_DRV_MCU_V1.0.0.0.efw";
         uint16_t err = ecat_foe_ssc_on_write(&adapter, invalid_fn, (uint16_t)strlen(invalid_fn), 0);
@@ -177,7 +200,7 @@ int main(void)
     /* [TEST 3] 未建立会话直接写入数据拦截 */
     {
         printf("[TEST 3] 验证未建立会话直接写数据被安全拦截 (返回 0x8004)...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
 
         uint16_t err = ecat_foe_ssc_on_data(&adapter, fw_buf, 64U);
         assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
@@ -187,7 +210,7 @@ int main(void)
     /* [TEST 4] 独立 0 长度包定界验证 */
     {
         printf("[TEST 4] 验证独立 0 长度数据包显式触发 EOF 定界...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
         uint8_t exact_payload[108];
         memset(exact_payload, 0x5A, sizeof(exact_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), exact_payload, (uint32_t)sizeof(exact_payload));
@@ -209,7 +232,7 @@ int main(void)
     /* [TEST 5] 底层 Flash 驱动校验失败时错误码映射 */
     {
         printf("[TEST 5] 验证底层驱动写入失败时映射为 0x800B 并中止...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
         build_valid_firmware(fw_buf, sizeof(fw_buf), payload, (uint32_t)sizeof(payload));
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -228,7 +251,7 @@ int main(void)
     /* [TEST 6] 异常中止与新 WRQ 会话自愈恢复 */
     {
         printf("[TEST 6] 验证中途 abort 后在同一 adapter 上平滑重启新会话...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
@@ -247,7 +270,7 @@ int main(void)
     /* [TEST 7] 单包超出 max_packet_size 上限防御拦截 */
     {
         printf("[TEST 7] 验证单包超出 max_packet_size 上限拦截 (返回 0x8004 并中止)...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_managed_core_and_adapter(&core, &adapter, 64U);
         build_valid_firmware(fw_buf, sizeof(fw_buf), payload, (uint32_t)sizeof(payload));
 
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
@@ -263,7 +286,7 @@ int main(void)
     /* [TEST 8] 短包定界成功落盘后，主站补发 0 长度包幂等确认 */
     {
         printf("[TEST 8] 验证短包定界落盘后补发 0 长度包幂等成功 (返回 0)...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
@@ -286,7 +309,7 @@ int main(void)
     /* [TEST 9] 升级成功后调用 on_abort 保护终态不被重置为 IDLE */
     {
         printf("[TEST 9] 验证升级成功终态在调用 on_abort 时保持 SUCCESS 标记...");
-        setup_core_and_adapter(&core, &adapter, 128U);
+        setup_managed_core_and_adapter(&core, &adapter, 128U);
         uint8_t short_payload[32];
         memset(short_payload, 0x5A, sizeof(short_payload));
         build_valid_firmware(fw_buf, sizeof(fw_buf), short_payload, (uint32_t)sizeof(short_payload));
@@ -306,7 +329,7 @@ int main(void)
     /* [TEST 10] 空指针且非零长度包前置防御拦截 */
     {
         printf("[TEST 10] 验证 pData 为空指针且非零长度包被安全拦截 (返回 0x8004)...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_managed_core_and_adapter(&core, &adapter, 64U);
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, valid_fn, (uint16_t)strlen(valid_fn), 0) == 0);
 
@@ -319,7 +342,7 @@ int main(void)
     /* [TEST 11] WRQ 非法文件名错误码细分返回 0x8004 */
     {
         printf("[TEST 11] 验证 WRQ 非法文件名错误码细分映射为 0x8004 (ILLEGAL)...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_managed_core_and_adapter(&core, &adapter, 64U);
         const char *bad_fn = "";
         uint16_t err = ecat_foe_ssc_on_write(&adapter, bad_fn, 0U, 0);
         assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
@@ -330,7 +353,7 @@ int main(void)
     /* [TEST 12] FoE 密码校验必须在建立会话和触碰存储驱动之前完成 */
     {
         printf("[TEST 12] 验证 FoE 密码匹配与拒绝路径...");
-        setup_core_and_adapter(&core, &adapter, 64U);
+        setup_managed_core_and_adapter(&core, &adapter, 64U);
         const char *valid_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
         const uint32_t expected_password = 0x13572468U;
         assert(ecat_foe_ssc_set_expected_password(&adapter, expected_password) == 0);
