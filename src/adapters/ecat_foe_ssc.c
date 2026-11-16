@@ -131,9 +131,13 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
         uint32_t ver = 0;
         int vrc = ecat_foe_core_validate_wrq(adapter->core, pName, (size_t)nameSize, &tid, &ver);
         if (vrc != 0) {
+            ssc_abort_core(adapter);
+            adapter->session_active = false;
             return (uint16_t)vrc;
         }
         if (ssc_target_is_async(adapter, tid)) {
+            ssc_abort_core(adapter);
+            adapter->session_active = false;
             return ECAT_FOE_SSC_ERR_ILLEGAL;
         }
     }

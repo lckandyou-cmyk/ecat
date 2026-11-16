@@ -454,8 +454,14 @@ int main(void)
         const char *name_sync = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
         assert(adapter.session_active == true);
-        ecat_foe_ssc_on_abort(&adapter, 0U);
+        uint8_t payload_repro[16] = {1}, image_repro[256];
+        (void)build_valid_firmware(image_repro, sizeof(image_repro), payload_repro, sizeof(payload_repro));
+        assert(ecat_foe_ssc_on_data(&adapter, image_repro, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0U);
+        const char *invalid_name = "invalid.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, invalid_name, (uint16_t)strlen(invalid_name), 0U) != 0U);
         assert(adapter.session_active == false);
+        assert(transfer.session.owner == NULL && !core.session_active);
+        assert(s_mock_drv.count_abort == 1U);
 
         /* 3. 请求异步目标 2: on_write 精准识别该实际目标为异步，直接返回 0x8004 拦截且绝不发 ACK！ */
         core.cfg.targets[1].target_id = 2U;
@@ -470,8 +476,11 @@ int main(void)
         /* 4. 重复下发同步目标 1，会话自愈无状态残留 */
         assert(ecat_foe_ssc_on_write(&adapter, name_sync, (uint16_t)strlen(name_sync), 0U) == 0U);
         assert(adapter.session_active == true);
-        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(ecat_foe_ssc_on_data(&adapter, image_repro, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0U);
+        assert(ecat_foe_ssc_on_write(&adapter, name_async, (uint16_t)strlen(name_async), 0U) == ECAT_FOE_SSC_ERR_ILLEGAL);
         assert(adapter.session_active == false);
+        assert(transfer.session.owner == NULL && !core.session_active);
+        assert(s_mock_drv.count_abort == 2U);
         printf(" [PASS]\n");
     }
 
