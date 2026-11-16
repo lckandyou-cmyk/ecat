@@ -184,6 +184,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 
 ### 5.1 Simple Open EtherCAT Slave (SOES) 接入规范
 - **适配层源码**：`src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h`；
+- **统一会话**：先初始化目标注册表和 `ecat_transfer_t`，再将 SOES 适配器通过 `ecat_foe_soes_bind_transfer` 绑定；未绑定时请求会被拒绝。
 - **接入架构**：**前后置邮箱嗅探与中和钩子架构**：
   1. `ecat_foe_soes_pre_process_hook`：在 SOES 协议栈处理前嗅探接收邮箱中的 WRQ，并对核心状态与驱动无副作用地预检文件名和元数据；钩子会暂存 WRQ，并临时调整 SOES 文件表条目/计数以路由请求，随后由后置流程恢复文件计数；
   2. `ESC_foeprocess()`：SOES 原生进程处理，校验密码与 BOOT 态并排队响应；
@@ -195,8 +196,8 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 - **适配层源码**：`src/adapters/ecat_foe_ssc.c` 与 `include/ecat_foe_ssc.h`；
 - **FoE 密码**：SSC 适配器检查本地预期密码，默认值为 0；如需非零密码，须在接收 WRQ 前配置并在目标 SSC 与 TwinCAT 上联调。FoE 密码不是密码学固件认证。
 - **运行模式**：
-  1. **同步模式**：当前已接入核心的路径由 `ecat_foe_ssc_init` 与 `ecat_foe_ssc_on_data` 调用同步核心和目标驱动。是否能满足响应时限，应测量目标驱动最坏耗时及主站/协议栈限制；不能仅按“片内 Flash”假定耗时足够短；
-  2. **异步核心路径**：对异步 target 设置 `asynchronous=true` 并提供 `async_ops`；用 `ecat_foe_core_async_init` 建立静态缓冲会话，再用 `ecat_foe_core_async_ssc_ops()` 作为 SSC gate 回调。SSC DATA handler 必须传入真实 `bDataFollowing`，主循环周期调用 `ecat_foe_ssc_on_main_loop`。pending 包只在相同包重试时确认；结束包须等回读 CRC 与 finalize 成功。该路径有宿主契约测试，真实 SSC 与板侧行为仍需实测。
+  1. **同步模式**：初始化目标注册表和 `ecat_transfer_t`，调用 `ecat_foe_ssc_init` 后通过 `ecat_foe_ssc_bind_transfer` 绑定同一个管理器；`ecat_foe_ssc_on_data` 经管理器调用同步目标驱动。须测量目标驱动最坏耗时及主站/协议栈限制；
+  2. **异步路径**：配置异步固件目标后，用 `ecat_foe_core_async_init` 建立静态缓冲会话，并用 `ecat_transfer_init_async_firmware(&transfer, &session)` 绑定。先初始化 SSC adapter，再用 `ecat_foe_transport_async_ops()` 和 `&adapter.transport` 初始化 gate，最后通过 `ecat_foe_ssc_bind_transfer` 绑定管理器。SSC DATA handler 传入真实 `bDataFollowing`，主循环周期调用 `ecat_foe_ssc_on_main_loop`。pending 包只在相同包重试时确认；结束包须等回读 CRC 与 finalize 成功。该路径有宿主契约测试，真实 SSC 与板侧行为仍需实测。
 
 ### 5.3 ESC 芯片与 Mailbox SyncManager 配置生命周期管理
 1. **按状态核实 Mailbox/SyncManager 配置**：

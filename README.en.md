@@ -1,6 +1,6 @@
 # ECAT
 
-<p align="center"><strong>EtherCAT FoE firmware upgrade component · C99 · Standalone bootloaders for 32-bit MCUs</strong></p>
+<p align="center"><strong>Embedded transfer and firmware upgrade framework · C99 · 32-bit MCUs</strong></p>
 
 <p align="center">
   <a href="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
@@ -17,7 +17,7 @@
 
 > **Under development.** The core and SOES integration example pass host tests. Integration with a physical MCU board, protocol stack, and EtherCAT master has not been completed. This README distinguishes host-test evidence from work that still requires hardware validation.
 
-ECAT provides a portable C99 upgrade core, an `.efw` firmware package parser, and target-storage driver interfaces for EtherCAT FoE upgrades. Integrators connect it to their own slave stack, board-level storage driver, and local partition configuration.
+ECAT provides a unified transfer manager, target registry and access control, bidirectional data transfer, and `.efw` firmware upgrades. FoE is the default built-in transport; integrators can disable built-in transports and add their own. Integrators provide the protocol stack, board-level storage drivers, and local partition configuration.
 
 ## Upgrade flow
 
@@ -25,11 +25,15 @@ ECAT provides a portable C99 upgrade core, an `.efw` firmware package parser, an
 flowchart TD
     BIN["Application image .bin"] --> CLI["ecat-efw pack"]
     CLI --> EFW[".efw firmware package"]
-    EFW --> MASTER["EtherCAT master / FoE"]
-    MASTER --> STACK["Slave-stack adapter"]
-    STACK --> CORE["ECAT upgrade core"]
-    CORE --> DRIVER["Board storage driver"]
-    PARTITION["Device-local partition config"] --> DRIVER
+    EFW --> FOE["FoE / file stream / custom transport"]
+    DATA["Data import / export"] --> CHANNEL["Custom transport"]
+    FOE --> MANAGER["Unified transfer manager"]
+    CHANNEL --> MANAGER
+    REGISTRY["Local target registry and access control"] --> MANAGER
+    MANAGER --> CORE["Firmware validation and upgrade core"]
+    MANAGER --> DATA_DRIVER["Data target driver"]
+    CORE --> FW_DRIVER["Firmware target driver"]
+    PARTITION["Device-local partition config"] --> FW_DRIVER
 ```
 
 The package carries project, hardware, target, and version metadata. **Write addresses and capacity limits come only from the device's local configuration.** ECAT does not include an EtherCAT stack or replace the MCU vendor's Flash driver and boot logic.
@@ -87,14 +91,17 @@ Start with the [SOES bootloader example](examples/bootloader_soes/README.md) for
 
 ## Optional upgrade transports
 
-A shared session manager now exposes begin/write/finish/poll/cancel for synchronous and asynchronous targets. FoE is enabled by default; SOES/SSC can bind to the same manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; EFW validation, signature verification and storage drivers are shared.
+`ecat_transfer_t` manages sessions, import, export and asynchronous polling. FoE is enabled by default; SOES/SSC must bind to the manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; firmware imports share EFW validation, signature verification and storage drivers.
 
 ```sh
 make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
+make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
-The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a reference integration; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md) and [file stream integration](examples/file_stream/README.md). The [multichannel and target registry guide](docs/multichannel-bidirectional-framework.md) describes synchronous import/export and custom endpoints. Registry capacity is configurable; firmware imports still map to the core’s enabled targets 1–4. ACL enforcement and signature verification require explicit local configuration. Physical adapters and bidirectional asynchronous scheduling are not provided.
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md), [file stream integration](examples/file_stream/README.md), and [multichannel guide](docs/multichannel-bidirectional-framework.md) for synchronous and asynchronous import/export and custom endpoints. Registry capacity is configurable; firmware imports still map to the core's enabled targets 1–4. ACL enforcement and signature verification require explicit local configuration.
+
+The old upgrade manager and compatibility entry points have been removed. Existing integrations must migrate to `ecat_transfer_t` and rebuild; firmware-core event functions are internal implementation details.
 
 ## Verification status
 

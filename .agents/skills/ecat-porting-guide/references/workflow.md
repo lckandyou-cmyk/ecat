@@ -50,15 +50,15 @@ make test-target-async CC=clang
 make test-core-async CC=clang
 ```
 
-在应用中为异步 target 配置 `asynchronous=true`、`async_ops` 和 `async_user_ctx`，创建静态 `ecat_foe_core_async_t`、packet buffer 与 operation buffer；operation buffer 容量至少为 `max(64, 所有启用异步目标的 write_unit)`。gate packet buffer、核心 packet buffer 与 operation buffer 各自独立且不得重叠；两个 packet buffer 均须容纳 SSC DATA 的最大载荷。将 `ecat_foe_core_async_ssc_ops()` 传给 SSC gate，并在 `pAPPL_FoeWriteData(..., bDataFollowing)` 中转发该标志。每次 `pAPPL_MainLoop()` 调用 `ecat_foe_ssc_on_main_loop()`。同步目标仍使用既有 `driver` 和同步核心 API。
+在固件核心中为异步 target 配置 `asynchronous=true`、`async_ops` 和 `async_user_ctx`，创建静态 `ecat_foe_core_async_t`、packet buffer 与 operation buffer；operation buffer 容量至少为 `max(64, 所有启用异步目标的 write_unit)`。初始化目标注册表和 `ecat_transfer_t`，用 `ecat_transfer_init_async_firmware(&transfer, &session)` 绑定异步会话并设置传输暂存区。gate packet buffer、核心 packet buffer、operation buffer 与传输暂存区应按各接口契约规划；packet buffer 须容纳 SSC DATA 的最大载荷。先初始化 SSC adapter，再用 `ecat_foe_transport_async_ops()` 与 `&adapter.transport` 初始化 gate，最后用 `ecat_foe_ssc_bind_transfer` 绑定管理器。在 `pAPPL_FoeWriteData(..., bDataFollowing)` 中转发该标志，每次 `pAPPL_MainLoop()` 调用 `ecat_foe_ssc_on_main_loop()`。同步目标同样经过传输管理器。
 
 该宿主测试覆盖分包头、BUSY/同包重试、异步擦除/写入/回读与 finalize。接入真实项目时还必须核实实际 SSC BUSY 值、回调串行关系和主站重试行为；宿主测试不能替代 Beckhoff SSC、TwinCAT 或 MCU 实板验收。
 
 ## SSC 现有工程接线
 
-输入是可恢复的原 Boot/App 工程、实际 SSC 生成文件及本地分区表。将 `src/ecat_foe_efw.c`、`src/ecat_foe_core.c`、`src/ecat_foe_target_async.c`、`src/ecat_foe_core_async.c`、`src/adapters/ecat_foe_ssc_async.c`、`src/adapters/ecat_foe_ssc.c` 和目标驱动加入 Boot 构建，并把本库 `include/` 加入 include path；确认工程中只存在一个 main。同步路径使用 `ecat_foe_efw.c`、`ecat_foe_core.c` 和 `ecat_foe_ssc.c`，同时链接 SSC adapter 所需的 `ecat_foe_ssc_async.c`。新旧 SSC 适配器均还需链接 `src/ecat_upgrade.c`、`src/ecat_upgrade_session.c` 和 `src/adapters/ecat_foe_transport.c`。共享入口按 [统一架构](../../../../docs/architecture/transport-independent-upgrade.md) 完成 bind_upgrade，不能混用未绑定旧 API 操作同一核心。工程文件或 IDE group 的具体位置由现有构建系统决定。
+输入是可恢复的原 Boot/App 工程、实际 SSC 生成文件及本地分区表。将 `src/ecat_foe_efw.c`、`src/ecat_foe_core.c`、`src/ecat_foe_target_async.c`、`src/ecat_foe_core_async.c`、`src/ecat_target_registry.c`、`src/ecat_upgrade_session.c`、`src/ecat_transfer.c`、`src/adapters/ecat_foe_transport.c`、`src/adapters/ecat_foe_ssc_async.c`、`src/adapters/ecat_foe_ssc.c` 和目标驱动加入 Boot 构建，并把本库 `include/` 加入 include path；确认工程中只存在一个 main。同步和异步入口都必须绑定统一管理器；未绑定适配器会拒绝请求。工程文件或 IDE group 的具体位置由现有构建系统决定。
 
-目标 descriptor 的 project ID、project name、hardware ID、硬件版本、目标 ID、容量及写入单位来自板级配置；异步 target 的 `async_ops` 实现 `start/poll/abort/abort_session`。操作可即时完成或 pending；仅在完成时输出擦除水位或读回数据，启用防回滚时 FINALIZE 必须原子提交镜像与版本下限。依次调用 `ecat_foe_core_init`、`ecat_foe_core_async_init`、`ecat_foe_ssc_async_init`（传 `ecat_foe_core_async_ssc_ops()` 与会话指针），再调用 `ecat_foe_ssc_init_async`。检查每个初始化返回值；BUSY 和错误值从实际 SSC 头文件核对，tick 必须单调且与 timeout 单位一致。
+目标 descriptor 的 project ID、project name、hardware ID、硬件版本、目标 ID、容量及写入单位来自板级配置；异步 target 的 `async_ops` 实现 `start/poll/abort/abort_session`。操作可即时完成或 pending；仅在完成时输出擦除水位或读回数据，启用防回滚时 FINALIZE 必须原子提交镜像与版本下限。依次初始化固件核心、目标注册表、传输管理器和异步核心会话，调用 `ecat_transfer_init_async_firmware` 并配置暂存区；初始化 SSC adapter 和使用 `ecat_foe_transport_async_ops()` 的 gate 后，调用 `ecat_foe_ssc_bind_transfer`。检查每个初始化返回值；BUSY 和错误值从实际 SSC 头文件核对，tick 必须单调且与 timeout 单位一致。
 
 在 SSC 生成的实际声明处注册 WRQ、DATA、错误回调：WRQ 转发至 `ecat_foe_ssc_on_write`，DATA 转发至 `ecat_foe_ssc_on_data_following`，错误/中止转发至 `ecat_foe_ssc_on_abort`；`pAPPL_MainLoop` 调用 `ecat_foe_ssc_on_main_loop`。函数参数类型、内存限定符、字节长度及运行上下文以目标 SSC 头文件核对；回调与 poll 须串行。不要在异步模式调用同步 `ecat_foe_ssc_on_data`。可运行的初始化与模拟驱动参考 `tests/test_core_async.c`，它不包含可烧录的 SSC 或板级 Flash 驱动。
 
