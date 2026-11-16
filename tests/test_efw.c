@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "ecat_foe_efw.h"
+#include "../src/ecat_foe_efw_internal.h"
 
 static int g_tests_run = 0;
 static int g_tests_passed = 0;
@@ -211,6 +212,34 @@ static void test_spec_section8_positive_example(void)
     get_default_valid_config(&cfg);
     err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 3 元数据安全核验应当成功");
+}
+
+static void test_selected_target_identity(void)
+{
+    ecat_foe_efw_header_t hdr;
+    ecat_foe_efw_config_t cfg;
+    ecat_foe_efw_target_cfg_t target = {true, 16U, 0U};
+    get_default_valid_config(&cfg);
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(s_spec_valid_efw,
+        ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr), ECAT_FOE_EFW_OK, "解析有效头");
+    hdr.target_id = 65535U;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, &target),
+        ECAT_FOE_EFW_OK, "允许已解析的高编号目标");
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝包与本地目标不匹配");
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, NULL),
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝不存在的目标");
+    hdr.target_id = 0U;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 0U, &target),
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝零编号");
+    hdr.target_id = 42U;
+    target.enabled = false;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED, "拒绝禁用目标");
+    target.enabled = true;
+    target.max_payload_size = 15U;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "执行本地容量限制");
 }
 
 static void test_legacy_v1_rejected(void)
@@ -750,6 +779,7 @@ int main(void)
 
     RUN_TEST(test_crc32_standard_vector);
     RUN_TEST(test_spec_section8_positive_example);
+    RUN_TEST(test_selected_target_identity);
     RUN_TEST(test_legacy_v1_rejected);
     RUN_TEST(test_negative_case1_bad_header_crc);
     RUN_TEST(test_negative_case2_short_stream);

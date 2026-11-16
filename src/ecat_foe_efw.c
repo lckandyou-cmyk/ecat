@@ -3,7 +3,7 @@
  * @brief EtherCAT .efw 固件容器格式解析与核验实现
  */
 
-#include "ecat_foe_efw.h"
+#include "ecat_foe_efw_internal.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -256,9 +256,11 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
     return ECAT_FOE_EFW_OK;
 }
 
-ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
+ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
     const ecat_foe_efw_header_t *hdr,
-    const ecat_foe_efw_config_t *cfg)
+    const ecat_foe_efw_config_t *cfg,
+    uint16_t selected_id,
+    const ecat_foe_efw_target_cfg_t *tcfg)
 {
     if (hdr == NULL || cfg == NULL) {
         return ECAT_FOE_EFW_ERR_INVALID_ARG;
@@ -316,11 +318,10 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
         return ECAT_FOE_EFW_ERR_HW_VER_NOT_SUPPORTED;
     }
 
-    /* 9. target_id 为已知合法目标 (1..4) 且在本地使能宏中已开启 */
-    if (hdr->target_id < 1U || hdr->target_id > ECAT_FOE_TARGET_COUNT) {
+    /* The locally resolved ID must match the signed package identity. */
+    if (hdr->target_id == 0U || hdr->target_id != selected_id || tcfg == NULL) {
         return ECAT_FOE_EFW_ERR_TARGET_UNKNOWN;
     }
-    const ecat_foe_efw_target_cfg_t *tcfg = &cfg->targets[hdr->target_id - 1U];
     if (!tcfg->enabled) {
         return ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED;
     }
@@ -348,6 +349,17 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
     }
 
     return ECAT_FOE_EFW_OK;
+}
+
+ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
+    const ecat_foe_efw_header_t *hdr, const ecat_foe_efw_config_t *cfg)
+{
+    const ecat_foe_efw_target_cfg_t *target = NULL;
+    uint16_t id = hdr != NULL ? hdr->target_id : 0U;
+    if (cfg != NULL && id >= 1U && id <= ECAT_FOE_TARGET_COUNT) {
+        target = &cfg->targets[id - 1U];
+    }
+    return ecat_foe_efw_validate_selected(hdr, cfg, id, target);
 }
 
 const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)
