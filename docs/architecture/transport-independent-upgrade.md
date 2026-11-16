@@ -57,7 +57,7 @@ FoE 默认启用；宿主文件流入口显式启用。后续硬件传输各自�
 - `include/ecat_foe_transport.h`：FoE 文件名及结束包桥接。末包提交结果独立保存，防止延迟重试错误读取新所有者的核心状态。
 - `include/ecat_transfer_file.h`：默认关闭的宿主 FILE 流参考入口，详见 [文件流接入](../../examples/file_stream/README.md)。
 
-固件和普通数据入口使用 `ecat_transfer_t` 与共享目标注册表。未绑定的 SOES/SSC 底层直连路径仍待迁移，不能与管理器混用。
+固件和普通数据入口使用 `ecat_transfer_t` 与共享目标注册表。未绑定的 SSC 底层直连路径仍待迁移，不能与管理器混用。
 SOES：先 init，再通过 `bind_transfer` 接入传输管理器。核心配置中允许混合定义同步与异步目标，但因原生 SOES 协议机为纯同步模型，当外部 FoE 请求命中异步目标时，适配层将在前置钩子处严格拒绝并回复 `0x8001 (NOTFOUND)` 拦截，原生 SOES 不支持异步处理目标。邮箱前置、原生 SOES 处理、后置钩子必须严格串行调用（未在真实物理硬件上实测）。所有错误和状态迁移清理只取消 SOES 自己的会话。Bootloader SOES 示例已默认采用共享模式；应用 FoE abort 同样保护其他所有者。
 
 SSC 同步：先 init，再 bind_transfer。SSC 异步：先初始化核心异步引擎和通用管理器，初始化 SSC adapter（传入 gate 地址），再用 ecat_foe_transport_async_ops() 和 &adapter.transport 初始化 gate，最后 bind_transfer。gate 与引擎缓冲必须独立，每一步检查返回值。密码校验仍在建立会话前执行；超时后的错误重试不取消新所有者。

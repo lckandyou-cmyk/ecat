@@ -114,6 +114,7 @@ typedef struct {
 
 /**
  * @brief 初始化 SOES 适配层
+ * @note 接收请求前必须调用 ecat_foe_soes_bind_transfer；未绑定时拒绝 WRQ 和 DATA。
  * @param adapter 适配层上下文
  * @param core    核心升级状态机实例
  * @param buffer_size SOES 配置的 fbuffer 尺寸

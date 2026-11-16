@@ -2621,6 +2621,39 @@ static void test_null_project_name_rejection(void)
 
 /* 需求对应 C3: 复现测试：不调 on_wrq，直接按 SOES 回调顺序灌入（首块、满块、余量块），
  * 断言结果并贴输出，说明首块数据进来时核心返回什么。只写测试和文档，不改适配层逻辑 */
+static void test_soes_requires_transfer_manager(void)
+{
+    static mock_driver_t mcu;
+    ecat_foe_core_t core;
+    ecat_foe_soes_adapter_t adapter;
+    const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+    uint8_t data[8] = {0};
+    mock_driver_init(&mcu);
+    setup_default_core(&core, &mcu, NULL, NULL);
+    ecat_foe_soes_init(&adapter, &core, 64U);
+    TEST_ASSERT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)) != 0,
+                "unbound adapter rejects WRQ");
+    TEST_ASSERT(ecat_foe_soes_write_cb(NULL, data, sizeof(data)) != 0,
+                "unbound adapter rejects DATA");
+    TEST_ASSERT_EQ_INT(core.state, ECAT_FOE_STATE_IDLE, "core untouched");
+    TEST_ASSERT_EQ_INT(mcu.count_init, 0, "driver untouched");
+
+    ecat_target_registry_t registry;
+    ecat_transfer_t transfer;
+    ecat_transfer_request_t request = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
+    uint64_t token = 0;
+    int other = 0;
+    TEST_ASSERT_EQ_INT(setup_test_transfer(&transfer, &registry, &core, &mcu), 0, "manager ready");
+    TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &other, &request, &token), ECAT_TRANSFER_COMPLETE,
+                       "other transport owns session");
+    uint8_t transition = ECAT_TRANSITION_BOOT_TO_INIT, next = ECAT_STATE_INIT;
+    ecat_foe_soes_post_state_hook(&adapter, &transition, &next);
+    TEST_ASSERT(ecat_upgrade_session_owns_mgr(transfer.session_ptr, &transfer, &other, token),
+                "unbound adapter does not cancel another transport");
+    TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, token), ECAT_TRANSFER_COMPLETE,
+                       "owner cancels normally");
+}
+
 static void test_reproduce_soes_data_callback_without_wrq_stream_rejection(void)
 {
     static mock_driver_t mcu;
@@ -3398,6 +3431,7 @@ int main(void)
     RUN_TEST(test_100_failed_self_healing_cycles);
     RUN_TEST(test_dirty_memory_initialization_a5_and_02);
     RUN_TEST(test_null_project_name_rejection);
+    RUN_TEST(test_soes_requires_transfer_manager);
     RUN_TEST(test_reproduce_soes_data_callback_without_wrq_stream_rejection);
     RUN_TEST(test_hook_filename_rejected_not_blocked);
     RUN_TEST(test_hook_header_invalid_not_blocked);
