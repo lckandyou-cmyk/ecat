@@ -467,6 +467,8 @@ int main(void)
     assert(ep_uart.begin_pending == true);
     assert(ep_uart.state == ECAT_TRANSPORT_STATE_EXPORTING);
     assert(s_cb_started == false);
+    /* 契约断言: begin_export 返回 PENDING 时，*out_total_size 已被预先计算并正确赋值，无需等待后续 poll 回填 */
+    assert(exp_total == 1024U);
 
     /* 在 begin_pending 期间调用 read_chunk / finish_export: 必须返回 BUSY */
     uint8_t exp_buf[64];

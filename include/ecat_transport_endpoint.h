@@ -148,15 +148,20 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
 /**
  * @brief 发起数据导出回读会话 (从设备目标区块导出数据)
  *
- * 【并发与异步生命周期契约】：
- * - 同步就绪时返回 ECAT_TRANSFER_COMPLETE，填入 *out_total_size 并触发 on_session_start；
- * - 异步打开模式下返回 ECAT_TRANSFER_PENDING，*out_total_size 暂时待定，需通过 poll 推进直到
- *   ECAT_TRANSFER_COMPLETE 并单次派发 on_session_start 回调；
+ * 【并发与导出总大小确定性契约】：
+ * - 可导出总大小（*out_total_size）的确定：
+ *   - 无论是同步还是异步模式，传输引擎在底层启动前已根据目标驱动的 get_data_size()、
+ *     请求参数的 expected_size 或注册表 target->max_size 完成计算；
+ *   - 只要 out_total_size 指针非空，本函数在同步就绪（ECAT_TRANSFER_COMPLETE）或
+ *     异步打开挂起（ECAT_TRANSFER_PENDING）时均已将该总大小写入 *out_total_size；
+ *   - 后续调用 poll 时不会保存也不会回填该指针；调用方在 begin_export 返回时即可立即获取并使用该数值；
+ * - 异步只读打开（READ_OPEN）挂起时返回 ECAT_TRANSFER_PENDING，需通过 poll 推进直到
+ *   ECAT_TRANSFER_COMPLETE 后单次派发 on_session_start 回调；
  * - 在 pending 期间调用 read_chunk / finish_export 返回 ECAT_TRANSFER_BUSY 拦截。
  *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID
- * @param out_total_size 传出实际可导出的总字节数
+ * @param out_total_size 传出实际可导出的总字节数 (本函数返回 COMPLETE 或 PENDING 时均已写入)
  * @return ECAT_TRANSFER_COMPLETE 成功建立导出通道，ECAT_TRANSFER_PENDING 异步就绪中，其他为错误/占用
  */
 ecat_transfer_result_t ecat_transport_endpoint_begin_export(
@@ -173,11 +178,13 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
  *   ECAT_TRANSFER_PENDING 后，会被底层传输引擎持续持有并记录于内部上下文。调用方必须保证：
  *   1) out_buf 所指向的内存在整个 pending 期间保持有效、未被释放、未被并发修改或移动；
  *   2) actual_read 所指向的指针变量在整个 pending 期间必须持续存活且不可重用；
- *   3) 在 pending 期间，*actual_read 不会被赋值，调用方切勿读取未完成的残留值；
- *   4) 直到后续 ecat_transport_endpoint_poll 返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE 时，
- *      实际读取字节数才写入 *actual_read 并触发 on_progress 回调；
- *   5) 若调用 ecat_transport_endpoint_abort 中止会话，引擎保证在返回前同步调用驱动底层 abort
- *      停止硬件 DMA/外设传输，并安全解除对 out_buf 和 actual_read 指针的持有，调用方随后方可安全释放；
+ *   3) 本函数在调用底层异步驱动前，会明确将 *actual_read 预先清零 (*actual_read = 0U)。
+ *      在异步挂起 (PENDING) 期间，实际读取数据尚未就绪，调用方绝不得依赖 *actual_read 的临时数值；
+ *   4) 直到后续由调用方通过 ecat_transport_endpoint_poll 轮询推进并返回 ECAT_TRANSFER_COMPLETE
+ *      或 CONTINUE 时，底层引擎才将实际读取字节数正式写入 *actual_read 并触发 on_progress 回调；
+ *   5) 若调用 ecat_transport_endpoint_abort 中止会话，契约要求底层设备驱动的 abort 接口必须同步停止
+ *      硬件 DMA/外设传输；传输引擎在 abort 流程中重置 pending 标记与内部阶段，保证后续绝不再使用
+ *      这两个外部指针，调用方随后方可安全释放或复用缓冲区；
  * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
  *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入；
  * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
@@ -186,7 +193,7 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
  * @param ep 端点句柄
  * @param out_buf 输出缓冲区 (异步 pending 期间必须持续存活)
  * @param buf_capacity 缓冲区容量
- * @param actual_read 传出本次实际读取的字节数 (异步完成时写入，pending 期间必须持续存活)
+ * @param actual_read 传出本次实际读取的字节数 (发起时置 0，异步完成时由 poll 写入，pending 期间必须持续存活)
  * @return ECAT_TRANSFER_COMPLETE 数据已全部读取完毕;
  *         ECAT_TRANSFER_CONTINUE 成功读取当前块，后续仍有数据;
  *         ECAT_TRANSFER_PENDING 异步读取已在后台发起，指针被引擎持有，需通过 poll 推进;
@@ -211,9 +218,10 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_export(
  * @brief 中止或取消当前端点的活动会话
  *
  * 【硬件停止与资源回收契约】：
- * - 同步调用底层驱动 abort 接口，确保正在进行的硬件 DMA/外设 I/O 立即停止；
- * - 安全解除对异步 read_chunk 的 out_buf 和 actual_read 外部指针的持有；
- * - 重置端点所有挂起标记，触发 on_session_abort 回调，释放底层传输锁并恢复 IDLE 态。
+ * - 依赖前提：底层设备驱动的 abort 实现必须在回调中同步停止底层硬件 DMA/外设传输；
+ * - 端点中止流程将安全重置 pending 状态与 stage，释放底层传输会话锁并恢复 IDLE 态，
+ *   保证后续绝不再解引用或写入异步 read_chunk 时传入的 out_buf 和 actual_read 指针；
+ * - 触发 on_session_abort 回调通知上层应用。
  *
  * @param ep 端点句柄
  */

@@ -176,13 +176,15 @@ ecat_transfer_result_t ecat_transfer_begin(
  *   ECAT_TRANSFER_PENDING 后，会被传输引擎持续持有并记录于内部上下文。调用方必须保证：
  *   1) out_buf 所指向的内存在整个 pending 期间保持有效、未被释放、未被并发修改或移动；
  *   2) actual_read 所指向的指针变量在整个 pending 期间必须持续存活且不可重用；
- *   3) 在 pending 期间，*actual_read 不会被赋值，调用方切勿读取未完成的残留值；
- *   4) 直到后续 ecat_transfer_poll 返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE 时，
- *      引擎才将实际读取字节数写入 *actual_read 并就地累加 CRC；
- *   5) 若调用 ecat_transfer_cancel 中止会话，引擎保证在返回前同步调用驱动底层 abort 停止硬件
- *      DMA/外设传输，并安全解除对 out_buf 和 actual_read 指针的持有，调用方随后方可释放该内存；
+ *   3) 本函数在调用底层异步驱动前，会明确将 *actual_read 预先清零 (*actual_read = 0U)。
+ *      在异步挂起 (PENDING) 期间，实际读取数据尚未就绪，调用方绝不得依赖 *actual_read 的临时数值；
+ *   4) 直到后续由会话拥有者调用 ecat_transfer_poll 推进并返回 ECAT_TRANSFER_COMPLETE 或 CONTINUE 时，
+ *      引擎才将实际读取字节数正式写入 *actual_read 并就地累加运行 CRC32；
+ *   5) 若调用 ecat_transfer_cancel 中止会话，契约要求底层硬件驱动的 async_ops->abort 必须同步停止
+ *      硬件 DMA/外设传输；transfer 引擎在 cancel 中清空内部 pending 状态并释放会话，保证后续绝不再访问
+ *      user_read_out_buf 和 user_read_actual 指针，调用方随后方可安全回收或释放缓冲区；
  * - 同步模式或当次立即完成时：若数据已读完返回 ECAT_TRANSFER_COMPLETE，若仍有后续数据返回
- *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入；
+ *   ECAT_TRANSFER_CONTINUE，*actual_read 被立即写入实际读取长度；
  * - 若会话处于前序 PENDING 状态时重复调用，返回 ECAT_TRANSFER_BUSY；
  * - 令牌失效返回 ECAT_TRANSFER_STALE；驱动错误返回 ECAT_TRANSFER_FAILED。
  *
@@ -191,7 +193,7 @@ ecat_transfer_result_t ecat_transfer_begin(
  * @param token 会话令牌
  * @param out_buf 接收缓冲区 (异步 pending 期间必须持续存活)
  * @param buf_capacity 缓冲区容量
- * @param actual_read 传出实际读取到的字节数 (异步完成时写入，pending 期间必须持续存活)
+ * @param actual_read 传出实际读取到的字节数 (发起时置 0，异步完成时由 poll 写入，pending 期间必须持续存活)
  * @return ECAT_TRANSFER_COMPLETE: 数据已全部读完;
  *         ECAT_TRANSFER_CONTINUE: 成功读取一块，后续仍有数据;
  *         ECAT_TRANSFER_PENDING: 异步读取已在后台发起，指针被引擎持有，需通过 poll 推进;
@@ -254,9 +256,10 @@ ecat_transfer_result_t ecat_transfer_finish(
  * @brief 取消/异常中止传输会话
  *
  * 【硬件停止与资源回收契约】：
- * - 保证在返回之前同步通知底层驱动 (通过 io.abort 或 async_ops->abort)，确保硬件 DMA/外设传输立即停止；
- * - 释放对调用方 out_buf 和 actual_read 等外部指针的持有；
- * - 重置 pending 标记与内部阶段，释放传输租约恢复 IDLE 态。
+ * - 依赖前提：底层设备驱动 (通过 io.abort 或 async_ops->abort) 必须在回调中同步停止底层硬件 DMA/外设传输；
+ * - transfer 引擎保证在 cancel 时重置内部 pending 标记与 stage 阶段，释放会话锁恢复 IDLE 态，
+ *   并保证后续绝不再解引用或写入之前持有的调用方 user_read_out_buf 和 user_read_actual 指针；
+ * - 调用方可在 cancel 返回后安全释放或复用相关缓冲区。
  *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
