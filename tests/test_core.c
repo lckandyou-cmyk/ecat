@@ -552,7 +552,7 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     const char *name = "SERVO_DRV_MCU_V1.2.3.4.efw";
     TEST_ASSERT(ecat_foe_transport_begin(&foe, name, strlen(name)) != 0, "FoE cannot steal other entry");
     ecat_foe_transport_abort(&foe);
-    TEST_ASSERT(ecat_upgrade_session_owns(&transfer.session, &other, other_token), "FoE abort preserves other owner");
+    TEST_ASSERT(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &other, other_token), "FoE abort preserves other owner");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, other_token), ECAT_TRANSFER_COMPLETE, "other owner cancels");
     TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&foe, name, strlen(name)), 0, "FoE begins");
     uint8_t payload[32] = {7, 8}, efw[256];
@@ -576,7 +576,7 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     TEST_ASSERT(ecat_foe_soes_write_cb(NULL, efw, len) != 0, "unsolicited SOES DATA rejected");
     uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
-    TEST_ASSERT(ecat_upgrade_session_owns(&transfer.session, &other, other_token), "SOES state hook preserves other owner");
+    TEST_ASSERT(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &other, other_token), "SOES state hook preserves other owner");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, other_token), ECAT_TRANSFER_COMPLETE, "other releases");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)), 0, "SOES acquires shared core");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw, len), 0, "SOES short callback explicitly commits");

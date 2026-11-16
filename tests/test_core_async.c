@@ -594,7 +594,7 @@ int main(void)
     CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) != 0U);
     ecat_foe_ssc_on_abort(&adapter, 0U);
-    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &source, token));
     CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
     uint32_t tick = 1000U;
@@ -617,9 +617,9 @@ int main(void)
         CHECK(r == 0U);
         pos += length;
     }
-    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &source, token));
     ecat_foe_ssc_on_abort(&adapter, 0U);
-    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &source, token));
     CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
 
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
@@ -629,7 +629,7 @@ int main(void)
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, tick++) == gate.operation_error_foe_code);
     CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, tick++) == gate.operation_error_foe_code);
-    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &source, token));
     CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
 
     /* Optional FILE reference also drives the same asynchronous backend. */

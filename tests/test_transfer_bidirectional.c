@@ -1315,8 +1315,8 @@ int main(void)
     /* 本管理器无法取消另一入口会话 */
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, old_token) == ECAT_TRANSFER_STALE);
     assert(ecat_upgrade_session_owns_mgr(peer_mgr.session_ptr, &peer_mgr, &channel_can, old_token));
-    /* 验证旧接口 release 无法绕过管理器身份检查 */
-    assert(ecat_upgrade_session_release(peer_mgr.session_ptr, &channel_can, old_token) == ECAT_UPGRADE_SESSION_STALE);
+    /* Different manager cannot release the active lease. */
+    assert(ecat_upgrade_session_release_mgr(peer_mgr.session_ptr, &fw_manager, &channel_can, old_token) == ECAT_UPGRADE_SESSION_STALE);
 
     /* 释放另一入口会话 */
     assert(ecat_transfer_cancel(&peer_mgr, &channel_can, old_token) == ECAT_TRANSFER_COMPLETE);

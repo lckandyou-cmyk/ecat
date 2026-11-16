@@ -393,7 +393,7 @@ int main(void)
         assert(ecat_transfer_begin(&transfer, &other, &request, &token) == ECAT_TRANSFER_COMPLETE);
         assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0);
         ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_ILLEGAL);
-        assert(ecat_upgrade_session_owns(&transfer.session, &other, token));
+        assert(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &other, token));
         assert(ecat_foe_ssc_on_data(&adapter, NULL, 0U) != 0);
         assert(ecat_transfer_cancel(&transfer, &other, token) == ECAT_TRANSFER_COMPLETE);
         assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) == 0);

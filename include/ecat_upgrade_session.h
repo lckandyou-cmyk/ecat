@@ -26,27 +26,7 @@ typedef struct {
     const void *manager; /**< 绑定持有当前租约的具体管理器实例 (ecat_transfer_t) */
 } ecat_upgrade_session_t;
 
-/* Failure preserves both the manager and the caller's token output.
- * Note on legacy session APIs:
- * - ecat_upgrade_session_acquire operates on unmanaged leases (sets session->manager = NULL).
- * - ecat_upgrade_session_owns provides backward-compatible read-only observation of caller
- *   (owner, token) pairing, regardless of whether the lease is manager-bound; it does NOT
- *   verify manager identity.
- * - ecat_upgrade_session_release is restricted to unmanaged leases and strictly refuses to release
- *   manager-bound leases (returning ECAT_UPGRADE_SESSION_STALE). */
-ecat_upgrade_session_result_t ecat_upgrade_session_acquire(
-    ecat_upgrade_session_t *session, const void *owner, uint64_t *token);
-bool ecat_upgrade_session_owns(
-    const ecat_upgrade_session_t *session, const void *owner, uint64_t token);
-ecat_upgrade_session_result_t ecat_upgrade_session_release(
-    ecat_upgrade_session_t *session, const void *owner, uint64_t token);
-
-/* Manager-bound session APIs: bind lease to both caller owner and specific manager instance.
- * - ecat_upgrade_session_acquire_mgr requires manager != NULL (returns INVALID on NULL).
- * - ecat_upgrade_session_owns_mgr and release_mgr strictly require manager matching session->manager.
- * - Legacy ecat_upgrade_session_release cannot release manager-bound leases (returns STALE).
- * - Legacy ecat_upgrade_session_owns may still be used for read-only observation of (owner, token),
- *   but manager-bound authorization requires ecat_upgrade_session_owns_mgr. */
+/* Every lease binds manager, owner and token. Failed operations preserve state. */
 ecat_upgrade_session_result_t ecat_upgrade_session_acquire_mgr(
     ecat_upgrade_session_t *session, const void *manager, const void *owner, uint64_t *token);
 bool ecat_upgrade_session_owns_mgr(
