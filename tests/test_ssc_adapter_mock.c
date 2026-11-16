@@ -352,19 +352,27 @@ int main(void)
     {
         printf("[TEST 13] SSC shared upgrade ownership...");
         setup_core_and_adapter(&core, &adapter, 0U);
-        ecat_upgrade_t upgrade;
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        ecat_target_desc_t target = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
+        };
         int other = 0;
         uint64_t token = 0;
-        ecat_upgrade_request_t request = {1U, TEST_FW_VER};
+        ecat_transfer_request_t request = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, TEST_FW_VER};
         const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
-        assert(ecat_upgrade_init(&upgrade, &core) == 0);
-        assert(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
-        assert(ecat_upgrade_begin(&upgrade, &other, &request, &token) == ECAT_UPGRADE_COMPLETE);
+        assert(ecat_target_registry_init(&registry) == 0);
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
+        assert(ecat_transfer_begin(&transfer, &other, &request, &token) == ECAT_TRANSFER_COMPLETE);
         assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0);
         ecat_foe_ssc_on_abort(&adapter, ECAT_FOE_SSC_ERR_ILLEGAL);
-        assert(ecat_upgrade_session_owns(&upgrade.session, &other, token));
+        assert(ecat_upgrade_session_owns(&transfer.session, &other, token));
         assert(ecat_foe_ssc_on_data(&adapter, NULL, 0U) != 0);
-        assert(ecat_upgrade_cancel(&upgrade, &other, token) == ECAT_UPGRADE_COMPLETE);
+        assert(ecat_transfer_cancel(&transfer, &other, token) == ECAT_TRANSFER_COMPLETE);
         assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) == 0);
         uint8_t payload[16] = {1}, fw[256];
         size_t length = build_valid_firmware(fw, sizeof(fw), payload, sizeof(payload));
@@ -444,9 +452,9 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    /* [TEST 15] 验证旧接口 ecat_foe_ssc_bind_upgrade 亦支持混合目标共存绑定与逐目标按需拒绝 */
+    /* [TEST 15] 验证统一管理器支持混合同步与异步固件目标 */
     {
-        printf("[TEST 15] 验证旧接口 bind_upgrade 支持混合目标共存并按需拒绝异步目标...");
+        printf("[TEST 15] 验证统一管理器支持混合固件目标并按需拒绝异步目标...");
         setup_core_and_adapter(&core, &adapter, 0U);
         assert(adapter.async_gate == NULL);
 
@@ -459,11 +467,22 @@ int main(void)
         core.cfg.targets[1].max_payload_size = 1024U;
         core.cfg.targets[1].driver = &s_mock_drv.driver;
 
-        ecat_upgrade_t upgrade;
-        assert(ecat_upgrade_init(&upgrade, &core) == 0);
-
-        /* 关键断言: 纯同步 SSC 适配器通过旧接口 bind_upgrade 绑定混合配置，必须允许绑定成功 (返回 0) */
-        assert(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        ecat_target_desc_t target = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
+        };
+        assert(ecat_target_registry_init(&registry) == 0);
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+        target.target_id = 2U;
+        memcpy(target.name, "fpga", sizeof("fpga"));
+        target.max_size = 1024U;
+        target.asynchronous = true;
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
 
         /* 请求同步目标 1: on_write 成功返回 0 */
         const char *name_sync = "SERVO_DRV_MCU_V1.0.0.0.efw";
