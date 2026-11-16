@@ -479,9 +479,9 @@ int main(void)
     assert(ecat_transport_endpoint_finish_export(&ep_can) == ECAT_TRANSFER_COMPLETE);
 
     /* ---------------------------------------------------------------------- */
-    /* 测试阶段 C: 跨通道会话互斥仲裁、异步挂起阻断与旧升级入口对齐验证     */
+    /* 测试阶段 C: 跨通道会话互斥仲裁与异步挂起阻断验证     */
     /* ---------------------------------------------------------------------- */
-    printf("--- 测试阶段 C: 跨通道会话互斥仲裁、异步挂起阻断与旧升级入口对齐验证 ---\n");
+    printf("--- 测试阶段 C: 跨通道会话互斥仲裁与异步挂起阻断验证 ---\n");
 
     /* C1: 多通道同步互斥仲裁 */
     assert(ecat_transport_endpoint_begin_import(&ep_uart, 3U, sizeof(new_params), 0) == ECAT_TRANSFER_COMPLETE);
@@ -490,13 +490,13 @@ int main(void)
     /* FoE 端点发起导入也必须返回 BUSY */
     assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
 
-    /* 初始化旧升级管理器实例并共享 core 会话 */
-    ecat_upgrade_t legacy_upgrade;
-    assert(ecat_upgrade_init(&legacy_upgrade, &core) == 0);
-    ecat_upgrade_request_t upg_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    /* Direct callers and transport endpoints share the same manager. */
+    int direct_owner = 0;
+    ecat_transfer_request_t upg_req = { .transport_id = 1U, .target_id = 1U,
+        .direction = ECAT_TRANSFER_DIR_IMPORT, .fw_version = 0x01000000U };
     uint64_t upg_token = 0;
-    /* UART 端点占有会话时，旧升级 begin 必须返回 BUSY */
-    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_BUSY);
+    /* UART 端点占有会话时，直接请求 必须返回 BUSY */
+    assert(ecat_transfer_begin(&mgr, &direct_owner, &upg_req, &upg_token) == ECAT_TRANSFER_BUSY);
 
     /* UART 端点取消并释放会话 */
     ecat_transport_endpoint_abort(&ep_uart);
@@ -534,10 +534,10 @@ int main(void)
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, async_chunk, sizeof(async_chunk)) == ECAT_TRANSFER_PENDING);
     assert(ecat_transport_endpoint_is_pending(&ep_uart) == true);
 
-    /* 异步 PENDING 期间，所有其它通道与旧升级接口必须被严格阻断 (BUSY) */
+    /* 异步 PENDING 期间，所有其它通道与直接请求必须被严格阻断 (BUSY) */
     assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
     assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
-    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_BUSY);
+    assert(ecat_transfer_begin(&mgr, &direct_owner, &upg_req, &upg_token) == ECAT_TRANSFER_BUSY);
 
     /* 推进 poll 完成数据写入 */
     s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
@@ -548,16 +548,16 @@ int main(void)
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     assert(ep_uart.current_token == 0U);
 
-    /* C3: 会话释放后，旧升级接口可正常发起并反向互斥 */
-    assert(ecat_upgrade_begin(&legacy_upgrade, &legacy_upgrade, &upg_req, &upg_token) == ECAT_UPGRADE_COMPLETE);
+    /* C3: 会话释放后，直接请求可正常发起并反向互斥 */
+    assert(ecat_transfer_begin(&mgr, &direct_owner, &upg_req, &upg_token) == ECAT_TRANSFER_COMPLETE);
     assert(upg_token != 0);
 
-    /* 旧升级活跃期间，所有新端点发起操作必须被拦截返回 BUSY */
+    /* 直接请求活跃期间，所有新端点发起操作必须被拦截返回 BUSY */
     assert(ecat_transport_endpoint_begin_import(&ep_uart, 3U, 16, 0) == ECAT_TRANSFER_BUSY);
     assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, NULL) == ECAT_TRANSFER_BUSY);
 
-    /* 旧升级 cancel 释放 */
-    assert(ecat_upgrade_cancel(&legacy_upgrade, &legacy_upgrade, upg_token) == ECAT_UPGRADE_COMPLETE);
+    /* 直接请求取消 释放 */
+    assert(ecat_transfer_cancel(&mgr, &direct_owner, upg_token) == ECAT_TRANSFER_COMPLETE);
 
     /* 释放后新端点可再次正常发起 */
     assert(ecat_transport_endpoint_begin_export(&ep_can, 4U, &log_size) == ECAT_TRANSFER_COMPLETE);
@@ -598,7 +598,6 @@ int main(void)
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == 0);
     /* 重复绑定防御拦截 */
     assert(ecat_foe_soes_bind_transfer(&soes_adapter, &mgr) == -1);
-    assert(ecat_foe_soes_bind_upgrade(&soes_adapter, &legacy_upgrade) == -1);
 
     /* D0.2: 纯同步 SOES 请求异步目标 2，在发 ACK 前必须被拦截 (返回 -1)，不激活会话 */
     const char *soes_fpga_fn = "DRIVE_SERVO_FPGA_V1.0.0.0.efw";
