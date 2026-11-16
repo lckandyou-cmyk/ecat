@@ -4,6 +4,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import shutil
 
 root = pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
@@ -46,6 +47,17 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
                             '-o', str(tmp_path / 'custom_caller.o')], check=True)
     subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw')),
                     '-o', str(tmp_path / 'matching')], check=True)
+    # A caller compiled against the prior public-layout ABI must not link.
+    old_include = tmp_path / 'old_include'
+    shutil.copytree(root / 'include', old_include)
+    old_abi = old_include / 'ecat_foe_config_abi.h'
+    old_abi.write_text(old_abi.read_text().replace('ecat_foe_config_abi_v2_h', 'ecat_foe_config_abi_h'))
+    subprocess.run([cc, '-std=c99', '-I' + str(old_include), '-I' + str(tmp_path),
+                    '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(caller),
+                    '-o', str(tmp_path / 'old_caller.o')], check=True)
+    old_link = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('old_caller', 'core', 'efw')),
+                               '-o', str(tmp_path / 'old_link')], capture_output=True, text=True)
+    assert old_link.returncode != 0 and 'ecat_foe_config_abi_' in old_link.stderr, old_link.stderr
     # A TU need not call init: accessing the public layout must still carry the ABI reference.
     observer = tmp_path / 'observer.c'
     observer.write_text('#include "ecat_foe_core.h"\n'

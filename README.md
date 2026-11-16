@@ -93,6 +93,8 @@ cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c s
 
 同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 支持预处理整数常量表达式（例如 `(144U + 4U)`、`(1U << 8)`），各编译单元求值后的数值必须一致；括号、进制和算术写法不同不会造成假错配。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
 
+本版本更新了核心配置结构的 ABI 标识。升级时必须重新编译使用核心公开头的所有对象和库；旧对象与新版核心混用时会在链接阶段报未定义的配置 ABI 符号。
+
 ## 可选升级入口
 
 升级引擎现在提供统一的 begin/write/finish/poll/cancel 会话接口。FoE 默认启用，SOES/SSC 可绑定同一个管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，EFW 校验、验签与存储驱动共用。
