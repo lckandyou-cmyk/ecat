@@ -325,7 +325,9 @@ ecat_transfer_result_t ecat_transfer_begin(
     /* 异步驱动能力核验: 严禁假异步，缺少异步后端或 ops 时必须在任何驱动副作用前明确拒绝 */
     if (t->is_async) {
         if (request->direction == ECAT_TRANSFER_DIR_IMPORT && target->type == ECAT_TARGET_TYPE_FIRMWARE) {
-            if (t->fw_async_ops == NULL) {
+            if (t->core == NULL || t->fw_async_ops != ecat_foe_core_async_ops() ||
+                t->fw_async_ctx == NULL || t->core->async_abort_hook != t->fw_async_ops->abort ||
+                t->core->async_abort_ctx != t->fw_async_ctx) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 release_session(t, owner, acquired_token);

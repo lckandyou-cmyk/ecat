@@ -290,6 +290,19 @@ static int test_async_firmware_without_sync_driver(void)
     CHECK(result == ECAT_TRANSFER_COMPLETE);
     CHECK(flash.valid && memcmp(flash.flash, payload, sizeof(payload)) == 0);
     CHECK(ecat_transfer_cancel(&transfer, &owner, token) == ECAT_TRANSFER_STALE);
+    /* Replacing the idle core session invalidates managers bound to the old
+     * session. They must fail before touching hardware, then may rebind. */
+    CHECK(ecat_foe_core_async_init(&replacement, &core, other_packet, sizeof(other_packet),
+                                  other_operation, sizeof(other_operation)) == 0);
+    CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_FAILED);
+    CHECK(!transfer.active && transfer.session.owner == NULL && !flash.pending);
+    CHECK(ecat_transfer_init_async_firmware(&transfer, &replacement) == 0);
+    CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
+    CHECK(ecat_transfer_write(&transfer, &owner, token, image, 128U) == ECAT_TRANSFER_COMPLETE);
+    CHECK(ecat_transfer_write(&transfer, &owner, token, image + 128U, image_len - 128U) == ECAT_TRANSFER_PENDING);
+    CHECK(flash.pending && flash.resource_acquired);
+    CHECK(ecat_transfer_cancel(&transfer, &owner, token) == ECAT_TRANSFER_COMPLETE);
+    CHECK(!flash.pending && !flash.resource_acquired && !replacement.runner.pending);
     registry.targets[0].asynchronous = false;
     CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_FAILED);
     CHECK(!transfer.active && transfer.session.owner == NULL);
