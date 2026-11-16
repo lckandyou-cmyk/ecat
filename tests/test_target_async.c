@@ -15,6 +15,7 @@ typedef struct {
     uint32_t observed_version;
     uint32_t observed_floor;
     bool observed_anti_rollback;
+    bool fail_poll;
 } mock_t;
 
 static ecat_foe_target_async_result_t mock_start(void *ctx,
@@ -47,6 +48,7 @@ static ecat_foe_target_async_result_t mock_poll(void *ctx,
 {
     mock_t *m = (mock_t *)ctx;
     m->polls++;
+    if (m->fail_poll) return ECAT_FOE_TARGET_ASYNC_FAILED;
     if (m->polls < m->pending_polls) return ECAT_FOE_TARGET_ASYNC_PENDING;
     if (op->kind == ECAT_FOE_TARGET_OP_ERASE_TO) op->erased_end = op->need_end + 64U;
     if (op->kind == ECAT_FOE_TARGET_OP_READ) memset(op->data, 0x5A, op->length);
@@ -106,6 +108,14 @@ int main(void)
     CHECK(ecat_foe_target_async_start(&runner, ECAT_FOE_TARGET_OP_INIT,
           0U, 0U, NULL, 0U, NULL, NULL) == ECAT_FOE_TARGET_ASYNC_FAILED);
     CHECK(ecat_foe_target_async_reset(&runner) == 0);
+    mock.pending_polls = 2U;
+    mock.fail_poll = true;
+    CHECK(ecat_foe_target_async_start(&runner, ECAT_FOE_TARGET_OP_INIT,
+          0U, 0U, NULL, 0U, NULL, NULL) == ECAT_FOE_TARGET_ASYNC_PENDING);
+    CHECK(ecat_foe_target_async_poll(&runner) == ECAT_FOE_TARGET_ASYNC_FAILED);
+    CHECK(mock.aborts == 2U);
+    CHECK(ecat_foe_target_async_reset(&runner) == 0);
+    mock.fail_poll = false;
     mock.pending_polls = 0U;
     CHECK(ecat_foe_target_async_start(&runner, ECAT_FOE_TARGET_OP_INIT,
           0U, 0U, NULL, 0U, NULL, NULL) == ECAT_FOE_TARGET_ASYNC_COMPLETE);

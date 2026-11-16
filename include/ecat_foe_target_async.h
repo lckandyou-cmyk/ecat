@@ -50,6 +50,8 @@ typedef struct {
 typedef struct ecat_foe_target_async_ops {
     ecat_foe_target_async_result_t (*start)(void *ctx,
                                             ecat_foe_target_async_op_t *op);
+    /* When a pending operation fails, the runner invokes abort before
+     * releasing its descriptor; abort must synchronously stop hardware access. */
     ecat_foe_target_async_result_t (*poll)(void *ctx,
                                            ecat_foe_target_async_op_t *op);
     /**

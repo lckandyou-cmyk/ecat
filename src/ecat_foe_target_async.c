@@ -126,6 +126,10 @@ ecat_foe_target_async_result_t ecat_foe_target_async_poll(
     }
     ecat_foe_target_async_result_t result = runner->ops->poll(runner->ctx, &runner->op);
     if (result != ECAT_FOE_TARGET_ASYNC_PENDING) {
+        if (result != ECAT_FOE_TARGET_ASYNC_COMPLETE) {
+            /* A failed pending operation may still own DMA or peripheral state. */
+            runner->ops->abort(runner->ctx);
+        }
         runner->pending = false;
         finish_operation(runner, result);
     }
