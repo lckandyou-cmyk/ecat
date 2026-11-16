@@ -1,6 +1,6 @@
 # ECAT
 
-<p align="center"><strong>EtherCAT FoE 固件升级组件 · C99 · 面向 32 位 MCU 独立 Bootloader</strong></p>
+<p align="center"><strong>嵌入式传输与固件升级框架 · C99 · 面向 32 位 MCU</strong></p>
 
 <p align="center">
   <a href="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
@@ -17,7 +17,7 @@
 
 > **研发阶段。** 核心和 SOES 接入示例已通过宿主测试；尚未在真实 MCU 板卡、协议栈和 EtherCAT 主站上完成联调。本文档区分已验证内容与待实机验证内容。
 
-ECAT 提供 EtherCAT FoE 固件升级所需的通用 C99 核心、`.efw` 固件包解析器和存储驱动接口。集成者负责接入自己的从站协议栈、板级存储驱动与本地分区配置。
+ECAT 提供统一的传输管理器、目标注册与访问控制、双向数据传输，以及基于 `.efw` 的固件升级能力。FoE 是默认内置入口；集成者也可以关闭内置入口并接入自己的通信方式。设备协议栈、板级存储驱动与本地分区配置由集成者提供。
 
 ## 升级流程
 
@@ -25,11 +25,15 @@ ECAT 提供 EtherCAT FoE 固件升级所需的通用 C99 核心、`.efw` 固件�
 flowchart TD
     BIN["应用固件映像 .bin"] --> CLI["ecat-efw 打包"]
     CLI --> EFW[".efw 固件包"]
-    EFW --> MASTER["EtherCAT 主站 / FoE"]
-    MASTER --> STACK["从站协议栈适配层"]
-    STACK --> CORE["ECAT 升级核心"]
-    CORE --> DRIVER["板级存储驱动"]
-    PARTITION["设备本地分区配置"] --> DRIVER
+    EFW --> FOE["FoE / 文件流 / 自定义通道"]
+    DATA["普通数据导入 / 导出"] --> CHANNEL["自定义通道"]
+    FOE --> MANAGER["统一传输管理器"]
+    CHANNEL --> MANAGER
+    REGISTRY["本地目标注册与访问控制"] --> MANAGER
+    MANAGER --> CORE["固件校验与升级核心"]
+    MANAGER --> DATA_DRIVER["普通数据目标驱动"]
+    CORE --> FW_DRIVER["固件目标驱动"]
+    PARTITION["设备本地分区配置"] --> FW_DRIVER
 ```
 
 固件包携带项目、硬件、目标和版本信息；**实际写入地址与容量只由设备本地配置决定**。ECAT 不包含 EtherCAT 协议栈，也不替代 MCU 厂商的 Flash 驱动或 Bootloader 启动逻辑。
@@ -97,14 +101,17 @@ cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c s
 
 ## 可选升级入口
 
-升级引擎现在提供统一的 begin/write/finish/poll/cancel 会话接口。FoE 默认启用，SOES/SSC 可绑定同一个管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，EFW 校验、验签与存储驱动共用。
+`ecat_transfer_t` 提供统一的会话、导入、导出和异步轮询接口。FoE 默认启用，SOES/SSC 必须绑定该管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，固件导入共用 EFW 校验、验签与存储驱动。
 
 ```sh
 make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
+make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
 默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。 新增的目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)。数据区块数量受注册表容量限制，固件导入目前仍映射核心的 1～4 号目标；ACL 和签名验证须按设备配置启用。
+
+此次架构调整移除了旧升级管理器及其兼容入口，使用旧接口的工程需要迁移到 `ecat_transfer_t` 并重新编译。固件核心的内部事件不再作为应用传输入口。
 
 ## 验证状态
 
