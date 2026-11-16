@@ -691,16 +691,16 @@ static void test_soes_state_transition_aborts_active_session(void)
     memset(&verifier, 0, sizeof(verifier));
     ecat_foe_core_t core;
     setup_signature_core(&core, &mcu, &verifier);
+    ecat_foe_soes_adapter_t adapter;
+    TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 64U), 0, "SOES manager ready");
     uint8_t payload[16] = {1, 2, 3};
     uint8_t efw[256];
     size_t n = build_signed_test_efw(efw, payload, sizeof(payload));
     TEST_ASSERT(n > ECAT_FOE_EFW_HEADER_MIN_LEN, "签名固件含有效载荷");
-    TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "WRQ 接受");
-    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "头部有效");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26U), 0, "WRQ 接受");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, efw, ECAT_FOE_EFW_HEADER_MIN_LEN, true), 0, "头部有效");
     TEST_ASSERT(core.session_active && core.signature_active, "驱动和验签会话已启动");
     TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "目标记录未完成");
-    ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, 64U);
     uint8_t as = ECAT_TRANSITION_BOOT_TO_INIT, an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, ECAT_AL_STATUS_BOOT_ERROR, "未完成时阻止迁移");
@@ -716,9 +716,9 @@ static void test_soes_state_transition_aborts_active_session(void)
     memset(&verifier, 0, sizeof(verifier));
     memcpy(verifier.expected, efw, n);
     verifier.expected_len = n;
-    TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "新 WRQ 恢复");
-    TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, n), 0, "恢复传输");
-    TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "恢复提交");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26U), 0, "新 WRQ 恢复");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, efw, n, true), 0, "恢复传输");
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, NULL, 0U, false), 0, "恢复提交");
     TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "成功后清除未完成标记");
     an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
@@ -737,14 +737,14 @@ static void test_soes_invalid_boot_exit_aborts_active_session(void)
         memset(&verifier, 0, sizeof(verifier));
         ecat_foe_core_t core;
         setup_signature_core(&core, &mcu, &verifier);
+        ecat_foe_soes_adapter_t adapter;
+        TEST_ASSERT_EQ_INT(setup_test_soes(&adapter, &core, &mcu, 64U), 0, "SOES manager ready");
         uint8_t payload[16] = {1, 2, 3};
         uint8_t efw[256];
         size_t n = build_signed_test_efw(efw, payload, sizeof(payload));
-        TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "WRQ 接受");
-        TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "头部有效");
+        TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26U), 0, "WRQ 接受");
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, efw, ECAT_FOE_EFW_HEADER_MIN_LEN, true), 0, "头部有效");
         TEST_ASSERT(core.session_active && core.signature_active, "驱动及验签器活跃");
-        ecat_foe_soes_adapter_t adapter;
-        ecat_foe_soes_init(&adapter, &core, 64U);
         uint8_t as = transitions[i], an = ECAT_STATE_PREOP | ECAT_STATE_FLAG_ERROR;
         ecat_foe_soes_post_state_hook(&adapter, &as, &an);
         TEST_ASSERT_EQ_INT(an, ECAT_STATE_PREOP | ECAT_STATE_FLAG_ERROR, "保留协议栈原始错误状态");
@@ -758,9 +758,9 @@ static void test_soes_invalid_boot_exit_aborts_active_session(void)
         memset(&verifier, 0, sizeof(verifier));
         memcpy(verifier.expected, efw, n);
         verifier.expected_len = n;
-        TEST_ASSERT_EQ_INT(test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw"), 0, "新 WRQ 接受");
-        TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, n), 0, "重新传输成功");
-        TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "重新提交成功");
+        TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, "SERVO_DRV_MCU_V1.0.0.0.efw", 26U), 0, "新 WRQ 接受");
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, efw, n, true), 0, "重新传输成功");
+        TEST_ASSERT_EQ_INT(ecat_foe_transport_start(&adapter.transport, NULL, 0U, false), 0, "重新提交成功");
         TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "完成后清除未完成标记");
     }
 }
