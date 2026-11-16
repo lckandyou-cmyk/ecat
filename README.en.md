@@ -128,7 +128,7 @@ Passing host tests does not establish hardware or full protocol-stack validation
 - [ECAT Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/lckandyou-cmyk/ecat/wiki)
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
 - [Historical EFW v1 specification](docs/spec/efw-format-v0.1.md)
-- [System architecture](docs/architecture/SAD-v0.1.md)
+- [Unified transfer architecture](docs/architecture/unified-transfer-architecture.md)
 - [SOES integration analysis](docs/architecture/soes-integration-options.md)
 - [SSC asynchronous stage note](docs/architecture/ssc-async-stage1.md)
 

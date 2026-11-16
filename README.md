@@ -139,7 +139,7 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-onl
 - [EFW 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
 - [旧 EFW v1 格式说明（历史）](docs/spec/efw-format-v0.1.md)
 - [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)
-- [系统架构说明](docs/architecture/SAD-v0.1.md)
+- [统一传输架构说明](docs/architecture/unified-transfer-architecture.md)
 - [SOES 接入分析](docs/architecture/soes-integration-options.md)
 - [SSC 异步阶段说明](docs/architecture/ssc-async-stage1.md)
 
