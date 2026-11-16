@@ -167,6 +167,9 @@ static ecat_upgrade_async_result_t fail_session(ecat_foe_core_async_t *s,
     } else if (s->runner.pending) {
         ecat_foe_target_async_abort(&s->runner);
     }
+    if (c != NULL && s->target_session_started && c->active_drv == NULL) {
+        c->driver_abort_called = true;
+    }
     if (c->signature_active && c->cfg.signature_verifier.abort != NULL) {
         c->cfg.signature_verifier.abort(c->cfg.signature_verifier.user_ctx);
         c->signature_active = false;
@@ -199,17 +202,18 @@ static int begin_operation(ecat_foe_core_async_t *s,
     default: phase = ECAT_FOE_CORE_ASYNC_PHASE_FINALIZE; break;
     }
     s->phase = phase;
+    if (kind == ECAT_FOE_TARGET_OP_INIT) {
+        s->target_session_started = true;
+    }
     ecat_foe_target_async_result_t r = ecat_foe_target_async_start(
         &s->runner, kind, offset, need_end, data, length, read_destination, erased_end);
     if (r == ECAT_FOE_TARGET_ASYNC_PENDING) {
-        if (kind == ECAT_FOE_TARGET_OP_INIT) s->target_session_started = true;
         return 1;
     }
     if (r == ECAT_FOE_TARGET_ASYNC_FAILED) {
         s->core->last_error = phase_error(phase);
         return -1;
     }
-    if (kind == ECAT_FOE_TARGET_OP_INIT) s->target_session_started = true;
     return complete_operation(s);
 }
 
@@ -561,7 +565,7 @@ static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s)
         }
         int r = begin_operation(s, ECAT_FOE_TARGET_OP_INIT, 0U, 0U,
                                 NULL, 0U, NULL, NULL);
-        if (r < 0) return fail_session(s, ECAT_FOE_CORE_ERR_DRV_INIT);
+        if (r < 0) return fail_session(s, s->core->last_error != ECAT_FOE_CORE_OK ? s->core->last_error : ECAT_FOE_CORE_ERR_DRV_INIT);
         if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
         /* init completion started invalidate; if it is still pending, return. */
         if (s->runner.pending) return ECAT_UPGRADE_ASYNC_PENDING;
@@ -607,6 +611,7 @@ static void async_abort(void *ctx)
         s->core->driver_abort_called = true;
     }
     s->target_session_started = false;
+    s->target_session_aborted = false;
     s->state = ECAT_FOE_CORE_ASYNC_IDLE;
     s->phase = ECAT_FOE_CORE_ASYNC_PHASE_NONE;
     s->packet_length = 0U;

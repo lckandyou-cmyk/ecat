@@ -52,8 +52,23 @@ typedef struct ecat_foe_target_async_ops {
                                             ecat_foe_target_async_op_t *op);
     ecat_foe_target_async_result_t (*poll)(void *ctx,
                                            ecat_foe_target_async_op_t *op);
+    /**
+     * @brief 取消当前正在 pending 执行中的单步驱动操作 (非阻塞同步停止硬件)
+     */
     void (*abort)(void *ctx);
-    /* Release the active target session after an operation or protocol error. */
+    /**
+     * @brief 释放活动目标驱动会话的所有会话级资源
+     *
+     * 触发契约 (框架严格保证):
+     * 1. 触发时机: 一旦向驱动发起 ECAT_FOE_TARGET_OP_INIT 操作 (无论 start 立即返回 COMPLETE、
+     *    PENDING 还是 FAILED，或是 poll 返回 FAILED，亦或是传输过程中的协议错误/外部 abort 取消)，
+     *    框架在终止该会话时严格保证调用且仅调用一次 abort_session()。
+     * 2. 资源回收责任: 驱动负责在此回调中释放会话持有的所有硬件外设锁、动态/静态句柄与内部状态。
+     * 3. 旧有效镜像保护约束: 若会话在尚未执行 ECAT_FOE_TARGET_OP_INVALIDATE 之前发生错误或被取消
+     *    (例如 INIT 自身失败)，abort_session() 严禁破坏或清除物理存储中原有的旧有效镜像标记；
+     *    介质失效标记清除严格由 ECAT_FOE_TARGET_OP_INVALIDATE 独立负责。
+     * 4. 成功闭环: 若 ECAT_FOE_TARGET_OP_FINALIZE 成功完成，会话正常提交结束，后续不再调用 abort_session()。
+     */
     void (*abort_session)(void *ctx);
 } ecat_foe_target_async_ops_t;
 
@@ -101,7 +116,9 @@ ecat_foe_target_async_result_t ecat_foe_target_async_poll(
 /* Cancel a pending operation at most once; completed operations are untouched. */
 void ecat_foe_target_async_abort(ecat_foe_target_async_t *runner);
 
-/* Abort the current operation if pending and release its target session. */
+/* Abort the current operation if pending and release its target session.
+ * Guaranteed to call ops->abort (if pending) and ops->abort_session exactly once.
+ */
 void ecat_foe_target_async_abort_session(ecat_foe_target_async_t *runner);
 
 /* Prepare a failed/aborted runner for a new session. Pending work must first
