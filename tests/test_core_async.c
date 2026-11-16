@@ -294,6 +294,26 @@ static int test_async_firmware_without_sync_driver(void)
     return 0;
 }
 
+static int setup_async_transfer(ecat_transfer_t *transfer, ecat_target_registry_t *registry,
+                                ecat_foe_core_t *core, ecat_foe_core_async_t *async,
+                                uint8_t *staging, size_t capacity)
+{
+    ecat_target_desc_t target = {0};
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.max_size = core->cfg.targets[0].max_payload_size;
+    target.enabled = true;
+    target.asynchronous = true;
+    if (ecat_target_registry_init(registry) != 0 ||
+        ecat_target_registry_add(registry, &target) != 0 ||
+        ecat_transfer_init(transfer, registry, core) != 0 ||
+        ecat_transfer_init_async_firmware(transfer, ecat_foe_core_async_ops(), async) != 0 ||
+        ecat_transfer_set_staging_buffer(transfer, staging, capacity) != 0) return -1;
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_async_firmware_without_sync_driver() == 0);
@@ -509,47 +529,50 @@ int main(void)
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
           sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-    ecat_upgrade_t upgrade;
+    ecat_transfer_t transfer;
+    ecat_target_registry_t registry;
+    uint8_t transfer_staging[128];
     int source = 0, contender = 0;
     uint64_t token = 0, rejected = 0;
-    ecat_upgrade_request_t request = {ECAT_FOE_TARGET_MCU, 0x01000000U};
-    CHECK(ecat_upgrade_init_async(&upgrade, &core, ecat_foe_core_async_ops(), &session) == 0);
-    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    ecat_transfer_request_t request = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
+    ecat_upgrade_request_t file_request = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+    CHECK(setup_async_transfer(&transfer, &registry, &core, &session, transfer_staging, sizeof(transfer_staging)) == 0);
+    CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     total = make_efw(efw, payload, sizeof(payload));
     for (size_t pos = 0; pos < total;) {
         size_t length = total - pos > 128U ? 128U : total - pos;
         memcpy(packet_storage, efw + pos, length);
-        ecat_upgrade_result_t r = ecat_upgrade_write(&upgrade, &source, token, packet_storage, length);
+        ecat_transfer_result_t r = ecat_transfer_write(&transfer, &source, token, packet_storage, length);
         memset(packet_storage, 0xEE, sizeof(packet_storage));
-        if (r == ECAT_UPGRADE_PENDING) {
+        if (r == ECAT_TRANSFER_PENDING) {
             unsigned previous_starts = flash.starts;
-            CHECK(ecat_upgrade_write(&upgrade, &source, token, efw, 1U) == ECAT_UPGRADE_BUSY);
-            CHECK(ecat_upgrade_finish(&upgrade, &source, token) == ECAT_UPGRADE_BUSY);
-            CHECK(ecat_upgrade_poll(&upgrade, &contender, token) == ECAT_UPGRADE_STALE);
+            CHECK(ecat_transfer_write(&transfer, &source, token, efw, 1U) == ECAT_TRANSFER_BUSY);
+            CHECK(ecat_transfer_finish(&transfer, &source, token) == ECAT_TRANSFER_BUSY);
+            CHECK(ecat_transfer_poll(&transfer, &contender, token) == ECAT_TRANSFER_STALE);
             CHECK(flash.starts == previous_starts);
         }
-        for (unsigned poll = 0; r == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
-            r = ecat_upgrade_poll(&upgrade, &source, token);
-        CHECK(r == ECAT_UPGRADE_COMPLETE);
+        for (unsigned poll = 0; r == ECAT_TRANSFER_PENDING && poll < 64U; poll++)
+            r = ecat_transfer_poll(&transfer, &source, token);
+        CHECK(r == ECAT_TRANSFER_COMPLETE);
         pos += length;
     }
     CHECK(!flash.valid);
     CHECK(memcmp(flash.flash, payload, core.written_offset) == 0);
-    CHECK(ecat_upgrade_begin(&upgrade, &contender, &request, &rejected) == ECAT_UPGRADE_BUSY);
-    ecat_upgrade_result_t end = ecat_upgrade_finish(&upgrade, &source, token);
-    CHECK(end == ECAT_UPGRADE_PENDING);
-    for (unsigned poll = 0; end == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
-        end = ecat_upgrade_poll(&upgrade, &source, token);
-    CHECK(end == ECAT_UPGRADE_COMPLETE && flash.valid);
+    CHECK(ecat_transfer_begin(&transfer, &contender, &request, &rejected) == ECAT_TRANSFER_BUSY);
+    ecat_transfer_result_t end = ecat_transfer_finish(&transfer, &source, token);
+    CHECK(end == ECAT_TRANSFER_PENDING);
+    for (unsigned poll = 0; end == ECAT_TRANSFER_PENDING && poll < 64U; poll++)
+        end = ecat_transfer_poll(&transfer, &source, token);
+    CHECK(end == ECAT_TRANSFER_COMPLETE && flash.valid);
     CHECK(memcmp(flash.flash, payload, sizeof(payload)) == 0);
-    CHECK(ecat_upgrade_poll(&upgrade, &source, token) == ECAT_UPGRADE_STALE);
-    CHECK(ecat_upgrade_begin(&upgrade, &contender, &request, &rejected) == ECAT_UPGRADE_COMPLETE);
-    CHECK(ecat_upgrade_write(&upgrade, &contender, rejected, efw, 128U) == ECAT_UPGRADE_COMPLETE);
-    CHECK(ecat_upgrade_write(&upgrade, &contender, rejected, efw + 128U, 20U) == ECAT_UPGRADE_PENDING);
-    CHECK(ecat_upgrade_cancel(&upgrade, &source, rejected) == ECAT_UPGRADE_STALE);
-    CHECK(ecat_upgrade_cancel(&upgrade, &contender, rejected) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_transfer_poll(&transfer, &source, token) == ECAT_TRANSFER_STALE);
+    CHECK(ecat_transfer_begin(&transfer, &contender, &request, &rejected) == ECAT_TRANSFER_COMPLETE);
+    CHECK(ecat_transfer_write(&transfer, &contender, rejected, efw, 128U) == ECAT_TRANSFER_COMPLETE);
+    CHECK(ecat_transfer_write(&transfer, &contender, rejected, efw + 128U, 20U) == ECAT_TRANSFER_PENDING);
+    CHECK(ecat_transfer_cancel(&transfer, &source, rejected) == ECAT_TRANSFER_STALE);
+    CHECK(ecat_transfer_cancel(&transfer, &contender, rejected) == ECAT_TRANSFER_COMPLETE);
     CHECK(flash.aborts == 1U && !flash.pending);
-    CHECK(ecat_upgrade_cancel(&upgrade, &contender, rejected) == ECAT_UPGRADE_STALE);
+    CHECK(ecat_transfer_cancel(&transfer, &contender, rejected) == ECAT_TRANSFER_STALE);
 
     /* SSC gate uses the shared manager, including final retry after ownership
      * has passed to another transport following a successful commit. */
@@ -557,12 +580,12 @@ int main(void)
     CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_transport_async_ops(), &adapter.transport,
           packet_storage, sizeof(packet_storage), 100U, 0x800AU,
           ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-    CHECK(ecat_foe_ssc_bind_upgrade(&adapter, &upgrade) == 0);
-    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
+    CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) != 0U);
     ecat_foe_ssc_on_abort(&adapter, 0U);
-    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
-    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
     uint32_t tick = 1000U;
     for (size_t pos = 0; pos < total;) {
@@ -577,27 +600,27 @@ int main(void)
                 (void)ecat_foe_ssc_on_main_loop(&adapter, tick++);
             CHECK(gate.completed && !gate.operation_failed);
             if (!more) {
-                CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+                CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
             }
             r = ecat_foe_ssc_on_data_following(&adapter, efw + pos, (uint16_t)length, more, tick++);
         }
         CHECK(r == 0U);
         pos += length;
     }
-    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
+    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
     ecat_foe_ssc_on_abort(&adapter, 0U);
-    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
-    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
 
     CHECK(ecat_foe_ssc_on_write(&adapter, name, sizeof(name) - 1U, 0U) == 0U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, efw, 128U, true, tick++) == 0U);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, tick++) == gate.busy_foe_code);
     tick += 100U;
     CHECK(ecat_foe_ssc_on_main_loop(&adapter, tick++) == gate.operation_error_foe_code);
-    CHECK(ecat_upgrade_begin(&upgrade, &source, &request, &token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_transfer_begin(&transfer, &source, &request, &token) == ECAT_TRANSFER_COMPLETE);
     CHECK(ecat_foe_ssc_on_data_following(&adapter, efw + 128U, 20U, true, tick++) == gate.operation_error_foe_code);
-    CHECK(ecat_upgrade_session_owns(&upgrade.session, &source, token));
-    CHECK(ecat_upgrade_cancel(&upgrade, &source, token) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_session_owns(&transfer.session, &source, token));
+    CHECK(ecat_transfer_cancel(&transfer, &source, token) == ECAT_TRANSFER_COMPLETE);
 
     /* Optional FILE reference also drives the same asynchronous backend. */
     FILE *stream = tmpfile();
@@ -606,8 +629,8 @@ int main(void)
     rewind(stream);
     ecat_upgrade_file_t file;
     uint8_t file_buffer[64];
-    CHECK(ecat_upgrade_file_init(&file, &upgrade, file_buffer, sizeof(file_buffer)) == 0);
-    CHECK(ecat_upgrade_file_begin(&file, stream, &request) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_file_init_transfer(&file, &transfer, file_buffer, sizeof(file_buffer)) == 0);
+    CHECK(ecat_upgrade_file_begin(&file, stream, &file_request) == ECAT_UPGRADE_COMPLETE);
     ecat_upgrade_result_t file_result = ECAT_UPGRADE_PENDING;
     for (unsigned step = 0; file_result == ECAT_UPGRADE_PENDING && step < 256U; step++) {
         bool was_pending = file.pending;
@@ -618,7 +641,7 @@ int main(void)
     CHECK(file_result == ECAT_UPGRADE_COMPLETE && flash.valid);
     CHECK(memcmp(flash.flash, payload, sizeof(payload)) == 0);
     rewind(stream);
-    CHECK(ecat_upgrade_file_begin(&file, stream, &request) == ECAT_UPGRADE_COMPLETE);
+    CHECK(ecat_upgrade_file_begin(&file, stream, &file_request) == ECAT_UPGRADE_COMPLETE);
     for (unsigned step = 0; !file.pending && step < 16U; step++)
         CHECK(ecat_upgrade_file_step(&file) == ECAT_UPGRADE_PENDING);
     CHECK(file.pending);
@@ -661,7 +684,9 @@ int main(void)
 
         uint8_t shared_arr[512];
         ecat_foe_core_async_t test_session;
-        ecat_upgrade_t test_upg;
+        ecat_transfer_t test_upg;
+        ecat_target_registry_t test_registry;
+        uint8_t test_staging[256];
 
         /* Case 1: 后向部分重叠拒绝 (packet = &shared_arr[0..255], op = &shared_arr[64..127]) */
         CHECK(ecat_foe_core_async_init(&test_session, &test_core,
@@ -697,24 +722,24 @@ int main(void)
                                        &shared_arr[0], 256U,
                                        &shared_arr[256], 64U) == 0);
         {
-            CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
+            CHECK(setup_async_transfer(&test_upg, &test_registry, &test_core, &test_session, test_staging, sizeof(test_staging)) == 0);
             int src = 1;
-            ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+            ecat_transfer_request_t req = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
             uint64_t tok = 0;
-            CHECK(ecat_upgrade_begin(&test_upg, &src, &req, &tok) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_transfer_begin(&test_upg, &src, &req, &tok) == ECAT_TRANSFER_COMPLETE);
 
             /* 分块写入完整 EFW 文件 (含大于 op_cap 的 128 字节分块) */
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_UPGRADE_COMPLETE);
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_UPGRADE_COMPLETE);
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_UPGRADE_COMPLETE);
-            ecat_upgrade_result_t fin = ecat_upgrade_finish(&test_upg, &src, tok);
-            for (unsigned poll = 0; fin == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
-                fin = ecat_upgrade_poll(&test_upg, &src, tok);
-            CHECK(fin == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_TRANSFER_COMPLETE);
+            ecat_transfer_result_t fin = ecat_transfer_finish(&test_upg, &src, tok);
+            for (unsigned poll = 0; fin == ECAT_TRANSFER_PENDING && poll < 64U; poll++)
+                fin = ecat_transfer_poll(&test_upg, &src, tok);
+            CHECK(fin == ECAT_TRANSFER_COMPLETE);
 
             CHECK(big_flash.valid);
             CHECK(memcmp(big_flash.flash, big_payload, sizeof(big_payload)) == 0);
-            CHECK(ecat_upgrade_cancel(&test_upg, &src, tok) == ECAT_UPGRADE_STALE);
+            CHECK(ecat_transfer_cancel(&test_upg, &src, tok) == ECAT_TRANSFER_STALE);
         }
 
         /* Case 7: 反向边界相接合法放行 (op = &shared_arr[0..63], packet = &shared_arr[64..319]) */
@@ -726,19 +751,19 @@ int main(void)
                                        &shared_arr[64], 256U,
                                        &shared_arr[0], 64U) == 0);
         {
-            CHECK(ecat_upgrade_init_async(&test_upg, &test_core, ecat_foe_core_async_ops(), &test_session) == 0);
+            CHECK(setup_async_transfer(&test_upg, &test_registry, &test_core, &test_session, test_staging, sizeof(test_staging)) == 0);
             int src = 1;
-            ecat_upgrade_request_t req = {ECAT_FOE_TARGET_MCU, 0x01000000U};
+            ecat_transfer_request_t req = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
             uint64_t tok = 0;
-            CHECK(ecat_upgrade_begin(&test_upg, &src, &req, &tok) == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_transfer_begin(&test_upg, &src, &req, &tok) == ECAT_TRANSFER_COMPLETE);
 
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_UPGRADE_COMPLETE);
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_UPGRADE_COMPLETE);
-            CHECK(ecat_upgrade_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_UPGRADE_COMPLETE);
-            ecat_upgrade_result_t fin = ecat_upgrade_finish(&test_upg, &src, tok);
-            for (unsigned poll = 0; fin == ECAT_UPGRADE_PENDING && poll < 64U; poll++)
-                fin = ecat_upgrade_poll(&test_upg, &src, tok);
-            CHECK(fin == ECAT_UPGRADE_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN, 128U) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&test_upg, &src, tok, big_efw + ECAT_FOE_EFW_HEADER_MIN_LEN + 128U, 128U) == ECAT_TRANSFER_COMPLETE);
+            ecat_transfer_result_t fin = ecat_transfer_finish(&test_upg, &src, tok);
+            for (unsigned poll = 0; fin == ECAT_TRANSFER_PENDING && poll < 64U; poll++)
+                fin = ecat_transfer_poll(&test_upg, &src, tok);
+            CHECK(fin == ECAT_TRANSFER_COMPLETE);
 
             CHECK(big_flash.valid);
             CHECK(memcmp(big_flash.flash, big_payload, sizeof(big_payload)) == 0);
@@ -819,20 +844,22 @@ int main(void)
         CHECK(flash.aborts == 0U);
 
         /* 在统一 upgrade 引擎直接写入时验证旧驱动 INIT 立即失败 */
-        ecat_upgrade_t upg_test;
-        CHECK(ecat_upgrade_init_async(&upg_test, &core, ecat_foe_core_async_ops(), &session) == 0);
+        ecat_transfer_t upg_test;
+        ecat_target_registry_t upg_registry;
+        uint8_t upg_staging[128];
+        CHECK(setup_async_transfer(&upg_test, &upg_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
         int src_id = 99;
         uint64_t tok_val = 0;
-        ecat_upgrade_request_t req_val = {ECAT_FOE_TARGET_MCU, 0x01000000U};
-        CHECK(ecat_upgrade_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_UPGRADE_COMPLETE);
+        ecat_transfer_request_t req_val = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
+        CHECK(ecat_transfer_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_TRANSFER_COMPLETE);
         flash.fail_init_immediate = true;
         flash.safe_session_abort = false;
         flash.resource_acquired = false;
         flash.aborts = 0U;
         memset(&sig_v, 0, sizeof(sig_v));
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_UPGRADE_COMPLETE);
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_UPGRADE_COMPLETE);
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_UPGRADE_FAILED);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_TRANSFER_COMPLETE);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_TRANSFER_COMPLETE);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_TRANSFER_FAILED);
         CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
         CHECK(core.state == ECAT_FOE_STATE_ERROR);
         CHECK(!core.session_active);
@@ -841,7 +868,7 @@ int main(void)
         CHECK(!flash.resource_acquired);
         CHECK(flash.valid); /* 旧镜像依然受保护 */
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
-        CHECK(ecat_upgrade_cancel(&upg_test, &src_id, tok_val) == ECAT_UPGRADE_STALE);
+        CHECK(ecat_transfer_cancel(&upg_test, &src_id, tok_val) == ECAT_TRANSFER_STALE);
         ecat_foe_core_on_abort(&core);
         CHECK(core.state == ECAT_FOE_STATE_IDLE);
 
@@ -885,17 +912,17 @@ int main(void)
         CHECK(flash.aborts == 1U);
 
         /* 在统一 upgrade 引擎直接写入时验证新版安全驱动 INIT 立即失败 */
-        CHECK(ecat_upgrade_init_async(&upg_test, &core, ecat_foe_core_async_ops(), &session) == 0);
+        CHECK(setup_async_transfer(&upg_test, &upg_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
         tok_val = 0;
-        CHECK(ecat_upgrade_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_UPGRADE_COMPLETE);
+        CHECK(ecat_transfer_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_TRANSFER_COMPLETE);
         flash.fail_init_immediate = true;
         flash.safe_session_abort = true;
         flash.resource_acquired = false;
         flash.aborts = 0U;
         memset(&sig_v, 0, sizeof(sig_v));
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_UPGRADE_COMPLETE);
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_UPGRADE_COMPLETE);
-        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_UPGRADE_FAILED);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_TRANSFER_COMPLETE);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_TRANSFER_COMPLETE);
+        CHECK(ecat_transfer_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_TRANSFER_FAILED);
         CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
         CHECK(core.state == ECAT_FOE_STATE_ERROR);
         CHECK(!core.session_active);
@@ -904,7 +931,7 @@ int main(void)
         CHECK(!flash.resource_acquired);
         CHECK(flash.valid);
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
-        CHECK(ecat_upgrade_cancel(&upg_test, &src_id, tok_val) == ECAT_UPGRADE_STALE);
+        CHECK(ecat_transfer_cancel(&upg_test, &src_id, tok_val) == ECAT_TRANSFER_STALE);
         ecat_foe_core_on_abort(&core);
         CHECK(core.state == ECAT_FOE_STATE_IDLE);
 

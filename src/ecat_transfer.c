@@ -195,6 +195,17 @@ static void transfer_abort_firmware(ecat_transfer_t *t)
     }
 }
 
+/* Preserve firmware diagnostics after cleanup, as required by protocol hooks. */
+static void transfer_fail_firmware_core(ecat_transfer_t *t)
+{
+    ecat_foe_core_err_t error = t->core->last_error;
+    if (error == ECAT_FOE_CORE_OK) error = ECAT_FOE_CORE_ERR_INVALID_ARG;
+    ecat_foe_core_on_abort(t->core);
+    t->core->state = ECAT_FOE_STATE_ERROR;
+    t->core->last_error = error;
+    t->core_started = false;
+}
+
 static bool is_owned(const ecat_transfer_t *t, const void *owner, uint64_t token)
 {
     return (t != NULL && ecat_upgrade_session_owns_mgr(get_transfer_session_const(t), t, owner, token));
@@ -779,7 +790,7 @@ ecat_transfer_result_t ecat_transfer_write(
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                transfer_abort_firmware(t);
+                transfer_fail_firmware_core(t);
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -793,8 +804,7 @@ ecat_transfer_result_t ecat_transfer_write(
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
             }
-            ecat_foe_core_on_abort(t->core);
-            t->core_started = false;
+            transfer_fail_firmware_core(t);
             t->active = false;
             release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
@@ -805,8 +815,8 @@ ecat_transfer_result_t ecat_transfer_write(
             if (t->core->hdr.payload_length > t->target->max_size ||
                 t->core->written_offset > t->target->max_size) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                ecat_foe_core_on_abort(t->core);
-                t->core_started = false;
+                t->core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+                transfer_fail_firmware_core(t);
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1045,7 +1055,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     return ECAT_TRANSFER_COMPLETE;
                 } else {
                     t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                    transfer_abort_firmware(t);
+                    transfer_fail_firmware_core(t);
                     t->driver_initialized = false;
                     t->active = false;
                     release_session(t, owner, token);
@@ -1108,8 +1118,7 @@ ecat_transfer_result_t ecat_transfer_finish(
             }
             if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                ecat_foe_core_on_abort(t->core);
-                t->core_started = false;
+                transfer_fail_firmware_core(t);
                 t->driver_initialized = false;
                 t->active = false;
                 release_session(t, owner, token);
@@ -1216,7 +1225,7 @@ ecat_transfer_result_t ecat_transfer_poll(
             t->pending = false;
             t->stage = ECAT_TRANSFER_STAGE_NONE;
             t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            transfer_abort_firmware(t);
+            transfer_fail_firmware_core(t);
             t->driver_initialized = false;
             t->active = false;
             release_session(t, owner, token);
