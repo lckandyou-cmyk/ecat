@@ -102,6 +102,8 @@ typedef struct {
     unsigned int abort_calls;
     unsigned int finalize_calls;
     bool inject_read_corruption;
+    const ecat_foe_core_t *core;               /* 用于在清理前捕获核心机中止错误 */
+    ecat_foe_core_err_t observed_abort_error;  /* 记录驱动中止时核心上报告的细分错误 */
 } async_monocypher_flash_t;
 
 static ecat_foe_target_async_result_t async_mono_flash_poll(void *ctx, ecat_foe_target_async_op_t *op);
@@ -169,6 +171,9 @@ static void async_mono_flash_abort(void *ctx)
 {
     async_monocypher_flash_t *f = (async_monocypher_flash_t *)ctx;
     f->abort_calls++;
+    if (f->core != NULL && f->core->last_error != ECAT_FOE_CORE_OK && f->observed_abort_error == ECAT_FOE_CORE_OK) {
+        f->observed_abort_error = f->core->last_error;
+    }
 }
 
 static void async_mono_flash_abort_session(void *ctx)
@@ -176,6 +181,9 @@ static void async_mono_flash_abort_session(void *ctx)
     async_monocypher_flash_t *f = (async_monocypher_flash_t *)ctx;
     f->valid = false;
     f->abort_calls++;
+    if (f->core != NULL && f->core->last_error != ECAT_FOE_CORE_OK && f->observed_abort_error == ECAT_FOE_CORE_OK) {
+        f->observed_abort_error = f->core->last_error;
+    }
 }
 
 static const ecat_foe_target_async_ops_t s_async_mono_flash_ops = {
@@ -187,84 +195,64 @@ static const ecat_foe_target_async_ops_t s_async_mono_flash_ops = {
 
 /* -------------------------------------------------------------------------- */
 /* 可观察验签包装器 (Counted Verifier Wrapper)                                 */
-/* 在真实 Monocypher 验签器之上叠加调用计数，用于断言 Ed25519ph finish 确实被调用 */
+/* 严格包装生产 examples/crypto/ecat_foe_monocypher_verifier.c，叠加调用计数，   */
+/* 绝不复制加密算法逻辑，100% 委托给产品适配器与外部真实 Monocypher 库          */
 /* -------------------------------------------------------------------------- */
 typedef struct {
-    ecat_foe_monocypher_verifier_t real; /* 必须作为首字段，user_ctx 强转兼容 */
+    ecat_foe_monocypher_verifier_t real_verifier; /* 真实生产验签器实例 */
+    ecat_foe_signature_verifier_t real_callbacks; /* 真实生产回调函数表 */
     unsigned begin_calls;
     unsigned update_calls;
     unsigned finish_calls;
     unsigned abort_calls;
-} counted_verifier_t;
+    int last_finish_rc;
+} counted_verifier_wrapper_t;
 
 static int counted_begin(const uint8_t *key_id, const uint8_t *signature, void *ctx)
 {
-    counted_verifier_t *cv = (counted_verifier_t *)ctx;
-    cv->begin_calls++;
-    if (cv->real.keys == NULL || key_id == NULL || signature == NULL) return -1;
-    for (size_t i = 0; i < cv->real.key_count; ++i) {
-        if (memcmp(key_id, cv->real.keys[i].key_id, ECAT_FOE_EFW_KEY_ID_LEN) == 0) {
-            memcpy(cv->real.active_public_key, cv->real.keys[i].public_key,
-                   sizeof(cv->real.active_public_key));
-            memcpy(cv->real.signature, signature, sizeof(cv->real.signature));
-            crypto_sha512_init(&cv->real.hash);
-            cv->real.active = true;
-            return 0;
-        }
-    }
-    return -1;
+    counted_verifier_wrapper_t *w = (counted_verifier_wrapper_t *)ctx;
+    w->begin_calls++;
+    return w->real_callbacks.begin(key_id, signature, w->real_callbacks.user_ctx);
 }
 
 static int counted_update(const uint8_t *data, size_t len, void *ctx)
 {
-    counted_verifier_t *cv = (counted_verifier_t *)ctx;
-    cv->update_calls++;
-    if (!cv->real.active || (data == NULL && len != 0U)) return -1;
-    crypto_sha512_update(&cv->real.hash, data, len);
-    return 0;
+    counted_verifier_wrapper_t *w = (counted_verifier_wrapper_t *)ctx;
+    w->update_calls++;
+    return w->real_callbacks.update(data, len, w->real_callbacks.user_ctx);
 }
 
 static int counted_finish(void *ctx)
 {
-    counted_verifier_t *cv = (counted_verifier_t *)ctx;
-    cv->finish_calls++;
-    if (!cv->real.active) return -1;
-    uint8_t digest[64];
-    crypto_sha512_final(&cv->real.hash, digest);
-    int result = crypto_ed25519_ph_check(cv->real.signature, cv->real.active_public_key, digest);
-    crypto_wipe(digest, sizeof(digest));
-    crypto_wipe(&cv->real.hash, sizeof(cv->real.hash));
-    crypto_wipe(cv->real.signature, sizeof(cv->real.signature));
-    crypto_wipe(cv->real.active_public_key, sizeof(cv->real.active_public_key));
-    cv->real.active = false;
-    return result; /* 0=通过, 非0=签名无效 → 核心置 SIGNATURE_INVALID */
+    counted_verifier_wrapper_t *w = (counted_verifier_wrapper_t *)ctx;
+    w->finish_calls++;
+    w->last_finish_rc = w->real_callbacks.finish(w->real_callbacks.user_ctx);
+    return w->last_finish_rc;
 }
 
 static void counted_abort(void *ctx)
 {
-    counted_verifier_t *cv = (counted_verifier_t *)ctx;
-    cv->abort_calls++;
-    if (cv->real.active) {
-        crypto_wipe(&cv->real.hash, sizeof(cv->real.hash));
-        crypto_wipe(cv->real.signature, sizeof(cv->real.signature));
-        crypto_wipe(cv->real.active_public_key, sizeof(cv->real.active_public_key));
-        cv->real.active = false;
+    counted_verifier_wrapper_t *w = (counted_verifier_wrapper_t *)ctx;
+    w->abort_calls++;
+    if (w->real_callbacks.abort != NULL) {
+        w->real_callbacks.abort(w->real_callbacks.user_ctx);
     }
 }
 
-static void counted_verifier_init(counted_verifier_t *cv,
+static void counted_verifier_init(counted_verifier_wrapper_t *w,
                                   const ecat_foe_trusted_key_t *keys,
                                   size_t key_count,
                                   ecat_foe_signature_verifier_t *callbacks)
 {
-    memset(cv, 0, sizeof(*cv));
-    cv->real.keys      = keys;
-    cv->real.key_count = key_count;
+    memset(w, 0, sizeof(*w));
+    /* 通过真实生产初始化接口填充真实回调表与验签器实例 */
+    ecat_foe_monocypher_verifier_init(&w->real_verifier, keys, key_count, &w->real_callbacks);
+
     callbacks->begin    = counted_begin;
     callbacks->update   = counted_update;
     callbacks->finish   = counted_finish;
     callbacks->abort    = counted_abort;
-    callbacks->user_ctx = cv;
+    callbacks->user_ctx = w;
 }
 
 static void test_one_cross_layer_alias_case(
@@ -296,7 +284,7 @@ static void test_one_cross_layer_alias_case(
     static mock_driver_t fallback_driver;
     mock_driver_init(&fallback_driver);
 
-    counted_verifier_t verifier;
+    counted_verifier_wrapper_t verifier;
     ecat_foe_signature_verifier_t callbacks = {0};
     counted_verifier_init(&verifier, key, 1U, &callbacks);
 
@@ -322,6 +310,7 @@ static void test_one_cross_layer_alias_case(
     ecat_foe_core_on_abort(&core);
     core.shared_session = NULL;
     assert(ecat_foe_core_init(&core, &cfg) == 0);
+    flash.core = &core; /* 供驱动在 abort 发生瞬间捕获核心细分诊断 */
 
     static ecat_target_registry_t reg;
     assert(ecat_target_registry_init(&reg) == 0);
@@ -385,23 +374,27 @@ static void test_one_cross_layer_alias_case(
         assert(verifier.begin_calls == 1U);
         assert(verifier.update_calls > 0U);
         assert(verifier.finish_calls == 1U);
+        assert(verifier.last_finish_rc == 0); /* 证明真实产品 verifier_finish 执行并返回成功 (0) */
         assert(verifier.abort_calls == 0U);
-        assert(verifier.real.active == false); /* 验签上下文已完成并安全 wipe */
+        assert(verifier.real_verifier.active == false); /* 真实生产适配器验签上下文已完成并安全 wipe */
         /* 关键断言 2: 逐字节比对写入 Flash 的 payload 与签名包完全一致 */
         assert(memcmp(flash.flash, efw_package + HEADER_SIZE, efw_size - HEADER_SIZE) == 0);
         /* 关键断言 3: 传输层 CRC 与预期一致 */
         assert(ecat_transfer_get_crc32(&mgr) == ecat_foe_crc32_calc(efw_package, efw_size));
+        assert(flash.observed_abort_error == ECAT_FOE_CORE_OK);
         assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK);
     } else if (tamper_sig) {
-        /* 篡改签名用例: 写入与回读均顺利完成，真实到达 Monocypher finish，由 Ed25519ph 检出无效签名拒绝 */
+        /* 篡改签名用例: 写入与回读均顺利完成，真实到达 Monocypher finish，由真实产品适配器与 Ed25519ph 检出无效签名拒绝 */
         assert(fres == ECAT_TRANSFER_FAILED);
         assert(flash.valid == false);
         assert(flash.finalize_calls == 0U);
         assert(verifier.begin_calls == 1U);
         assert(verifier.update_calls > 0U);
-        assert(verifier.finish_calls == 1U); /* 证明真正到达并执行了 Ed25519ph finish 密码学校验 */
-        assert(verifier.real.active == false); /* 验签上下文已安全 wipe */
-        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_SIGNATURE_INVALID);
+        assert(verifier.finish_calls == 1U); /* 证明真正到达并执行了真实适配器的 Ed25519ph finish 密码学校验 */
+        assert(verifier.last_finish_rc != 0); /* 证明真实产品 verifier_finish 执行并检出签名无效返回非 0 错误 */
+        assert(verifier.real_verifier.active == false); /* 真实生产适配器验签上下文已安全 wipe */
+        assert(flash.observed_abort_error == ECAT_FOE_CORE_ERR_SIGNATURE_INVALID);
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK); /* 生产 abort 契约保持：完成清理后重置为 OK */
         assert(flash.abort_calls >= 1U);
     } else if (inject_read_corruption) {
         /* 回读损坏用例: 在 finish 阶段回读比对时，由物理介质回读 CRC32 完整性校验优先拦截 */
@@ -411,9 +404,10 @@ static void test_one_cross_layer_alias_case(
         assert(verifier.begin_calls == 1U);
         assert(verifier.update_calls > 0U);
         assert(verifier.finish_calls == 0U); /* 因回读 CRC 优先报错，尚未进入 finish 密码学校验 */
-        assert(verifier.abort_calls >= 1U);   /* 失败时安全中止并清理验签会话 */
-        assert(verifier.real.active == false);
-        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH);
+        assert(verifier.abort_calls >= 1U);   /* 失败时安全中止并清理真实验签会话 */
+        assert(verifier.real_verifier.active == false);
+        assert(flash.observed_abort_error == ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH);
+        assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_OK); /* 生产 abort 契约保持：完成清理后重置为 OK */
         assert(flash.abort_calls >= 1U);
     } else {
         assert(0 && "unhandled test branch");
