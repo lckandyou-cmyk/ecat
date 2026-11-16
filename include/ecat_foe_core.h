@@ -158,6 +158,7 @@ typedef struct {
     const ecat_foe_target_async_ops_t *async_ops; /**< 可选非阻塞驱动操作集 */
     void *async_user_ctx;                      /**< 异步驱动上下文 */
     bool asynchronous;                         /**< 该目标只通过异步 API 接入 */
+    bool async_safe_session_abort;             /**< 显式声明该驱动的 abort_session 符合安全契约 (不破坏未失效镜像)；置位时，若 start(INIT) 立即失败框架将安全调用 abort_session 清理部分获取的资源；未置位时沿用旧驱动契约由驱动自行回滚，框架不调用 abort_session */
 } ecat_foe_target_desc_t;
 
 /**

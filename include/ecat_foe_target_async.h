@@ -59,15 +59,23 @@ typedef struct ecat_foe_target_async_ops {
     /**
      * @brief 释放活动目标驱动会话的所有会话级资源
      *
-     * 触发契约 (框架严格保证):
-     * 1. 触发时机: 一旦向驱动发起 ECAT_FOE_TARGET_OP_INIT 操作 (无论 start 立即返回 COMPLETE、
-     *    PENDING 还是 FAILED，或是 poll 返回 FAILED，亦或是传输过程中的协议错误/外部 abort 取消)，
-     *    框架在终止该会话时严格保证调用且仅调用一次 abort_session()。
-     * 2. 资源回收责任: 驱动负责在此回调中释放会话持有的所有硬件外设锁、动态/静态句柄与内部状态。
-     * 3. 旧有效镜像保护约束: 若会话在尚未执行 ECAT_FOE_TARGET_OP_INVALIDATE 之前发生错误或被取消
-     *    (例如 INIT 自身失败)，abort_session() 严禁破坏或清除物理存储中原有的旧有效镜像标记；
-     *    介质失效标记清除严格由 ECAT_FOE_TARGET_OP_INVALIDATE 独立负责。
-     * 4. 成功闭环: 若 ECAT_FOE_TARGET_OP_FINALIZE 成功完成，会话正常提交结束，后续不再调用 abort_session()。
+     * 触发契约与兼容性设计:
+     * 1. 默认/旧版驱动契约 (未声明 async_safe_session_abort):
+     *    若 ECAT_FOE_TARGET_OP_INIT 的 start() 立即返回 FAILED，遵循与同步驱动相同的契约，
+     *    由驱动自身负责在 start() 内部回滚释放部分获取的资源，框架不会调用 abort_session()。
+     *    这确保了旧版在 abort_session() 中包含介质失效逻辑的驱动不会误破坏既有有效固件镜像。
+     * 2. 新版安全契约 (显式声明 async_safe_session_abort):
+     *    若驱动显式声明该能力，在 start(INIT) 立即失败时框架将安全调用 abort_session() 统一
+     *    回收驱动资源；驱动的 abort_session() 必须保证不破坏尚未执行 INVALIDATE 的旧有效镜像。
+     * 3. PENDING 期间失败与取消:
+     *    若 INIT 操作进入 PENDING 状态，会话已正式确立。后续若 poll(INIT) 返回 FAILED 或外部取消，
+     *    框架将调用 ops->abort (停止硬件) 并调用 ops->abort_session() 释放会话资源。
+     * 4. 边界约束 (Legacy Driver Inherent Boundary):
+     *    若旧版驱动在 abort_session() 中无条件清除了有效镜像标记 (valid=false)，一旦其 INIT
+     *    进入 PENDING 并在后续失败或取消，框架因必须中止硬件而调用 abort_session()，此时旧驱动
+     *    自身将清除 valid 标记。驱动若需在任何失败时机均保护旧镜像，必须遵循将介质失效严格限定于
+     *    ECAT_FOE_TARGET_OP_INVALIDATE 操作的新规范。
+     * 5. 成功闭环: 若 ECAT_FOE_TARGET_OP_FINALIZE 成功完成，会话正常提交结束，后续不再调用 abort_session()。
      */
     void (*abort_session)(void *ctx);
 } ecat_foe_target_async_ops_t;
@@ -116,8 +124,10 @@ ecat_foe_target_async_result_t ecat_foe_target_async_poll(
 /* Cancel a pending operation at most once; completed operations are untouched. */
 void ecat_foe_target_async_abort(ecat_foe_target_async_t *runner);
 
-/* Abort the current operation if pending and release its target session.
- * Guaranteed to call ops->abort (if pending) and ops->abort_session exactly once.
+/* Abort the current operation if pending and forward session abort to ops->abort_session.
+ * Calls ops->abort at most once (while pending); forwarding to ops->abort_session occurs
+ * per invocation. Upper-level session management (such as ecat_foe_core_async) enforces
+ * session lifecycle and guarantees that abort_session is invoked at most once per session.
  */
 void ecat_foe_target_async_abort_session(ecat_foe_target_async_t *runner);
 

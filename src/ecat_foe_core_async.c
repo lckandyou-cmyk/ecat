@@ -202,17 +202,32 @@ static int begin_operation(ecat_foe_core_async_t *s,
     default: phase = ECAT_FOE_CORE_ASYNC_PHASE_FINALIZE; break;
     }
     s->phase = phase;
-    if (kind == ECAT_FOE_TARGET_OP_INIT) {
+
+    const ecat_foe_target_desc_t *target = NULL;
+    if (s->core != NULL && s->core->hdr.target_id >= 1U &&
+        s->core->hdr.target_id <= ECAT_FOE_TARGET_COUNT) {
+        target = &s->core->cfg.targets[s->core->hdr.target_id - 1U];
+    }
+    bool safe_abort = (target != NULL && target->async_safe_session_abort);
+
+    if (kind == ECAT_FOE_TARGET_OP_INIT && safe_abort) {
+        /* 新版安全驱动：声明具备安全清理契约，前置置位以允许框架在立即失败时统一调用 abort_session 回收资源 */
         s->target_session_started = true;
     }
     ecat_foe_target_async_result_t r = ecat_foe_target_async_start(
         &s->runner, kind, offset, need_end, data, length, read_destination, erased_end);
     if (r == ECAT_FOE_TARGET_ASYNC_PENDING) {
+        if (kind == ECAT_FOE_TARGET_OP_INIT) {
+            s->target_session_started = true;
+        }
         return 1;
     }
     if (r == ECAT_FOE_TARGET_ASYNC_FAILED) {
         s->core->last_error = phase_error(phase);
         return -1;
+    }
+    if (kind == ECAT_FOE_TARGET_OP_INIT) {
+        s->target_session_started = true;
     }
     return complete_operation(s);
 }

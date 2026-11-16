@@ -24,6 +24,7 @@ typedef struct {
     bool fail_init_poll;
     bool fail_invalidate;
     bool resource_acquired;
+    bool safe_session_abort;
 } async_flash_t;
 
 typedef struct {
@@ -124,6 +125,11 @@ static ecat_foe_target_async_result_t flash_start(void *ctx,
     f->pending = true;
     f->resource_acquired = true;
     if (op->kind == ECAT_FOE_TARGET_OP_INIT && f->fail_init_immediate) {
+        if (!f->safe_session_abort) {
+            /* 模拟旧版驱动契约：INIT 立即失败由驱动在 start 内部自行回滚资源 */
+            f->resource_acquired = false;
+            f->pending = false;
+        }
         return ECAT_FOE_TARGET_ASYNC_FAILED;
     }
     if (f->immediate) return flash_poll(ctx, op);
@@ -190,6 +196,10 @@ static void flash_abort_session(void *ctx)
     async_flash_t *f = (async_flash_t *)ctx;
     f->pending = false;
     f->resource_acquired = false;
+    if (!f->safe_session_abort) {
+        /* 模拟旧版驱动在 abort_session 中无条件将 valid 置 false */
+        f->valid = false;
+    }
     f->aborts++;
 }
 
@@ -694,7 +704,11 @@ int main(void)
         size_t signed_total = make_signed_efw(signed_efw, payload, sizeof(payload));
         (void)signed_total;
 
-        /* Case A: start(INIT) 立即失败与资源回收、旧镜像保护、租约与验签释放 */
+        /* ------------------------------------------------------------------ */
+        /* Case A-1: 旧版驱动 (默认 async_safe_session_abort=false) INIT 立即失败 */
+        /* 验证既有契约: 驱动自行回滚资源，框架不调用 abort_session，旧有效镜像100%保留 */
+        /* ------------------------------------------------------------------ */
+        cfg.targets[0].async_safe_session_abort = false;
         CHECK(ecat_foe_core_deinit(&core) == 0);
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
@@ -705,6 +719,7 @@ int main(void)
         ecat_foe_ssc_init_async(&adapter, &core, &gate);
 
         flash.valid = true; /* 物理存储上原本已存在旧有效固件镜像 */
+        flash.safe_session_abort = false; /* 模拟旧版驱动: abort_session 会破坏 valid */
         flash.fail_init_immediate = true;
         flash.resource_acquired = false;
         flash.aborts = 0U;
@@ -713,26 +728,25 @@ int main(void)
         uint16_t w_rc = ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U);
         uint16_t d1_rc = ecat_foe_ssc_on_data_following(&adapter, signed_efw, 40U, true, 201U);
         uint16_t d2_rc = ecat_foe_ssc_on_data_following(&adapter, signed_efw + 40U, 100U, true, 202U);
-        CHECK(w_rc == 0U);
-        CHECK(d1_rc == 0U);
-        CHECK(d2_rc == 0U);
-        /* 第三包凑满 148B 头部并触发 INIT -> 驱动在 start 中获取资源后立即失败 */
+        CHECK(w_rc == 0U && d1_rc == 0U && d2_rc == 0U);
+
+        /* 第三包凑满 148B 头部并触发 INIT -> 旧驱动在 start 内部自行回滚资源并立即返回 FAILED */
         uint16_t err = ecat_foe_ssc_on_data_following(&adapter, signed_efw + 140U, 128U, true, 203U);
         CHECK(err == ECAT_FOE_SSC_ERR_PROGERROR);
-        CHECK(core.state == ECAT_FOE_STATE_IDLE); /* SSC 适配器在数据返回错误时自动闭环 abort 核心 */
+        CHECK(core.state == ECAT_FOE_STATE_IDLE);
         CHECK(!core.session_active); /* 租约已释放 */
         CHECK(!core.signature_active); /* 验签已关闭 */
-        CHECK(!core.driver_invalidated); /* 绝未执行过 INVALIDATE */
-        CHECK(flash.aborts == 1U); /* 框架保证且仅保证调用一次 abort_session */
-        CHECK(!flash.resource_acquired); /* 驱动半成品资源被清理 */
-        CHECK(flash.valid); /* 核心约束: 旧有效镜像绝不受破坏，依然有效！ */
+        CHECK(!core.driver_invalidated);
+        CHECK(flash.aborts == 0U); /* 核心保证: 对旧版驱动不调用 abort_session，防止清除 valid */
+        CHECK(!flash.resource_acquired); /* 旧版驱动在 start() 中自行回滚 */
+        CHECK(flash.valid); /* 关键核心保证: 旧有效镜像绝不受破坏！ */
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U && sig_v.finish_calls == 0U);
 
-        /* 外部再次调用 abort 不得产生第二次 abort_session 调用 */
+        /* 外部再次调用 abort 不得产生多余 abort_session 调用 */
         ecat_foe_ssc_on_abort(&adapter, 0U);
-        CHECK(flash.aborts == 1U);
+        CHECK(flash.aborts == 0U);
 
-        /* 同时验证在统一 upgrade 引擎直接写入时，last_error 准确保留为 DRV_INIT 直至上层主动清理 */
+        /* 在统一 upgrade 引擎直接写入时验证旧驱动 INIT 立即失败 */
         ecat_upgrade_t upg_test;
         CHECK(ecat_upgrade_init_async(&upg_test, &core, ecat_foe_core_async_ops(), &session) == 0);
         int src_id = 99;
@@ -740,12 +754,75 @@ int main(void)
         ecat_upgrade_request_t req_val = {ECAT_FOE_TARGET_MCU, 0x01000000U};
         CHECK(ecat_upgrade_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_UPGRADE_COMPLETE);
         flash.fail_init_immediate = true;
+        flash.safe_session_abort = false;
         flash.resource_acquired = false;
         flash.aborts = 0U;
         memset(&sig_v, 0, sizeof(sig_v));
         CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_UPGRADE_COMPLETE);
         CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_UPGRADE_COMPLETE);
-        /* 写入跨越头部并触发 INIT -> 立即失败，upgrade 引擎在失败时保留错误诊断并释放租约 */
+        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_UPGRADE_FAILED);
+        CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
+        CHECK(core.state == ECAT_FOE_STATE_ERROR);
+        CHECK(!core.session_active);
+        CHECK(!core.signature_active);
+        CHECK(flash.aborts == 0U);
+        CHECK(!flash.resource_acquired);
+        CHECK(flash.valid); /* 旧镜像依然受保护 */
+        CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
+        CHECK(ecat_upgrade_cancel(&upg_test, &src_id, tok_val) == ECAT_UPGRADE_STALE);
+        ecat_foe_core_on_abort(&core);
+        CHECK(core.state == ECAT_FOE_STATE_IDLE);
+
+        /* ------------------------------------------------------------------ */
+        /* Case A-2: 新版安全驱动 (显式声明 async_safe_session_abort=true)      */
+        /* 验证框架负责调用 abort_session 清理部分获取的资源，且镜像依然受保护   */
+        /* ------------------------------------------------------------------ */
+        cfg.targets[0].async_safe_session_abort = true;
+        CHECK(ecat_foe_core_deinit(&core) == 0);
+        CHECK(ecat_foe_core_init(&core, &cfg) == 0);
+        CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
+              sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
+        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
+              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
+              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
+        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+
+        flash.valid = true;
+        flash.safe_session_abort = true;
+        flash.fail_init_immediate = true;
+        flash.resource_acquired = false;
+        flash.aborts = 0U;
+        memset(&sig_v, 0, sizeof(sig_v));
+
+        CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
+        CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw, 40U, true, 201U) == 0U);
+        CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw + 40U, 100U, true, 202U) == 0U);
+        err = ecat_foe_ssc_on_data_following(&adapter, signed_efw + 140U, 128U, true, 203U);
+        CHECK(err == ECAT_FOE_SSC_ERR_PROGERROR);
+        CHECK(core.state == ECAT_FOE_STATE_IDLE);
+        CHECK(!core.session_active);
+        CHECK(!core.signature_active);
+        CHECK(!core.driver_invalidated);
+        CHECK(flash.aborts == 1U); /* 框架保证且仅保证调用一次 abort_session */
+        CHECK(!flash.resource_acquired); /* 驱动半成品资源被 abort_session 回收 */
+        CHECK(flash.valid); /* 旧有效镜像依然受保护 */
+        CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U && sig_v.finish_calls == 0U);
+
+        /* 外部再次调用 abort 不得产生第二次 abort_session 调用 */
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        CHECK(flash.aborts == 1U);
+
+        /* 在统一 upgrade 引擎直接写入时验证新版安全驱动 INIT 立即失败 */
+        CHECK(ecat_upgrade_init_async(&upg_test, &core, ecat_foe_core_async_ops(), &session) == 0);
+        tok_val = 0;
+        CHECK(ecat_upgrade_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_UPGRADE_COMPLETE);
+        flash.fail_init_immediate = true;
+        flash.safe_session_abort = true;
+        flash.resource_acquired = false;
+        flash.aborts = 0U;
+        memset(&sig_v, 0, sizeof(sig_v));
+        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw, 40U) == ECAT_UPGRADE_COMPLETE);
+        CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 40U, 100U) == ECAT_UPGRADE_COMPLETE);
         CHECK(ecat_upgrade_write(&upg_test, &src_id, tok_val, signed_efw + 140U, 128U) == ECAT_UPGRADE_FAILED);
         CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
         CHECK(core.state == ECAT_FOE_STATE_ERROR);
@@ -776,7 +853,9 @@ int main(void)
 
         /* Case B: start(INIT) 返回 PENDING 后 poll(INIT) 失败 */
         flash.valid = true;
+        flash.safe_session_abort = true;
         flash.fail_init_poll = true;
+        flash.fail_init_immediate = false;
         flash.resource_acquired = false;
         flash.aborts = 0U;
         memset(&sig_v, 0, sizeof(sig_v));
@@ -805,6 +884,7 @@ int main(void)
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
 
         /* Case C: INIT 成功但后续 INVALIDATE 失败 */
+        flash.safe_session_abort = true;
         flash.fail_init_poll = false;
         flash.fail_invalidate = true;
         flash.resource_acquired = false;
@@ -834,6 +914,7 @@ int main(void)
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
 
         /* Case D: 在 INIT PENDING 期间外部取消 */
+        flash.safe_session_abort = true;
         flash.fail_invalidate = false;
         flash.valid = true;
         flash.resource_acquired = false;
@@ -860,6 +941,29 @@ int main(void)
         CHECK(flash.valid); /* 未执行过 INVALIDATE，旧镜像不受影响 */
         CHECK(!core.session_active);
         CHECK(sig_v.begin_calls == 1U && sig_v.abort_calls == 1U);
+
+        /* Case E: runner 级 ecat_foe_target_async_abort_session 契约行为核验 */
+        {
+            ecat_foe_target_async_t test_runner;
+            uint8_t dummy_storage[64];
+            flash.safe_session_abort = true;
+            flash.aborts = 0U;
+            flash.pending = false;
+            CHECK(ecat_foe_target_async_init(&test_runner, &flash_ops, &flash,
+                                             dummy_storage, sizeof(dummy_storage)) == 0);
+            /* 当处于 pending 态时调用 abort_session: 触发 ops->abort 与 ops->abort_session */
+            test_runner.pending = true;
+            ecat_foe_target_async_abort_session(&test_runner);
+            CHECK(!test_runner.pending);
+            CHECK(test_runner.failed);
+            CHECK(flash.aborts == 1U);
+            /* 非 pending 态下再次调用: ops->abort 不再调用，ops->abort_session 按单次调用转发 */
+            ecat_foe_target_async_abort_session(&test_runner);
+            CHECK(flash.aborts == 2U);
+            /* 验证重置后可重新开始 */
+            CHECK(ecat_foe_target_async_reset(&test_runner) == 0);
+            CHECK(!test_runner.failed);
+        }
     }
 
     puts("PASS: async core header split, SSC BUSY/retry, Flash write/readback and finalize");

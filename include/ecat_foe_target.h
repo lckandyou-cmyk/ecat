@@ -8,9 +8,13 @@
  * 驱动生命周期与清理契约 (核心严格保证):
  * 1. 同步驱动 init 失败清理责任: 若同步驱动 init() 自身返回非零失败，表示驱动初始化未完成，驱动内部自行负责
  *    清理未初始化半成品资源；核心状态机不调用 abort()。
- * 2. 异步驱动 INIT 清理契约: 异步驱动在向其发起 ECAT_FOE_TARGET_OP_INIT 操作时即建立会话追踪；
- *    若 start(INIT) 立即返回 FAILED 或 poll(INIT) 返回 FAILED，核心严格保证调用一次 abort_session()
- *    回收驱动部分分配的资源；驱动在未执行 INVALIDATE 前必须保护旧有效镜像不受破坏。
+ * 2. 异步驱动 INIT 清理契约:
+ *    - 默认/旧版驱动 (未声明 async_safe_session_abort): 若 start(INIT) 立即返回 FAILED，
+ *      与同步驱动一致由驱动自身负责在 start() 内部回滚资源，核心不调用 abort_session()，
+ *      以保护旧版驱动 abort_session() 中可能存在的清空有效标记逻辑；
+ *    - 新版安全驱动 (显式声明 async_safe_session_abort): 在 start(INIT) 立即失败时核心将调用
+ *      一次 abort_session() 统一清理资源；驱动的 abort_session() 必须保证不破坏旧有效镜像；
+ *    - 无论何种驱动，若 INIT 进入 PENDING 状态，后续 poll 失败或取消均会调用 abort_session()。
  * 3. init 成功后异常清理责任: 一旦 init 成功，驱动生命周期会话正式激活。此后发生的任何后续失败
  *    (包括 invalidate 失败、按需擦除失败、写入失败、流 CRC 不匹配、物理回读失败/CRC 不符、
  *    finalize 失败或外部中止)，核心机严格保证调用且仅调用一次 abort() (同步) 或 abort_session() (异步)。
