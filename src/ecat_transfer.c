@@ -211,6 +211,16 @@ static bool is_owned(const ecat_transfer_t *t, const void *owner, uint64_t token
     return (t != NULL && ecat_upgrade_session_owns_mgr(get_transfer_session_const(t), t, owner, token));
 }
 
+static void update_export_size(ecat_transfer_t *t)
+{
+    if (t->target->driver.get_data_size != NULL) {
+        t->total_size = t->target->driver.get_data_size(t->target->user_ctx);
+        if (t->total_size > t->target->max_size) t->total_size = t->target->max_size;
+    } else {
+        t->total_size = t->expected_size > 0U ? t->expected_size : t->target->max_size;
+    }
+}
+
 ecat_transfer_result_t ecat_transfer_begin(
     ecat_transfer_t *t,
     const void *owner,
@@ -337,17 +347,8 @@ ecat_transfer_result_t ecat_transfer_begin(
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 计算可导出数据量 */
-        if (target->driver.get_data_size != NULL) {
-            t->total_size = target->driver.get_data_size(target->user_ctx);
-            if (t->total_size > target->max_size) {
-                t->total_size = target->max_size;
-            }
-        } else if (request->expected_size > 0U) {
-            t->total_size = request->expected_size;
-        } else {
-            t->total_size = target->max_size;
-        }
+        /* Size belongs to the opened read snapshot, not a pre-open view. */
+        t->total_size = 0U;
 
         if (t->is_async) {
             /* 异步 EXPORT 模式: 严格使用 async_ops 进行只读打开生命周期控制 (前置已校验 ops 完整性) */
@@ -362,6 +363,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 return ECAT_TRANSFER_PENDING;
             } else if (ares == ECAT_ASYNC_OP_COMPLETE) {
                 t->driver_initialized = true;
+                update_export_size(t);
                 *token = acquired_token;
                 return ECAT_TRANSFER_COMPLETE;
             } else {
@@ -414,6 +416,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                 /* 纯 read 驱动，无生命周期开销 */
                 t->driver_initialized = false;
             }
+            update_export_size(t);
         }
     } else {
         /* IMPORT 模式 */
@@ -1276,6 +1279,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                 t->pending = false;
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 t->driver_initialized = true;
+                update_export_size(t);
                 return ECAT_TRANSFER_COMPLETE;
             } else if (t->stage == ECAT_TRANSFER_STAGE_ERASE) {
                 uint32_t actual_erased = t->async_data_op.erased_end;

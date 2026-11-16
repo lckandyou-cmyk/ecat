@@ -20,8 +20,10 @@ int port_get_version_floor(uint16_t id, uint32_t *v)
 static uint8_t s_flash[TEST_FLASH_SIZE];
 
 static int mock_init(void *ctx) { (void)ctx; return 0; }
-static int mock_read_open(void *ctx) { (void)ctx; return 0; }
-static void mock_read_close(void *ctx) { (void)ctx; }
+static bool s_read_opened;
+static bool s_size_requires_open;
+static int mock_read_open(void *ctx) { (void)ctx; s_read_opened = true; return 0; }
+static void mock_read_close(void *ctx) { (void)ctx; s_read_opened = false; }
 static int mock_invalidate(void *ctx) { (void)ctx; return 0; }
 static int mock_erase_to(uint32_t need_end, uint32_t *erased_end, void *ctx)
 {
@@ -46,7 +48,7 @@ static int mock_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 static int mock_finalize(void *ctx) { (void)ctx; return 0; }
 static void mock_abort(void *ctx) { (void)ctx; }
 static uint32_t s_mock_size_override = TEST_FLASH_SIZE;
-static uint32_t mock_get_size(void *ctx) { (void)ctx; return s_mock_size_override; }
+static uint32_t mock_get_size(void *ctx) { (void)ctx; return s_size_requires_open && !s_read_opened ? 0U : s_mock_size_override; }
 
 /* 回调跟踪 */
 static bool s_cb_started = false;
@@ -104,6 +106,7 @@ static ecat_async_op_result_t ep_mock_async_start(void *ctx, ecat_async_data_op_
 {
     (void)ctx;
     if (op != NULL) {
+        if (op->kind == ECAT_ASYNC_DATA_OP_READ_OPEN && s_ep_async_next_res == ECAT_ASYNC_OP_COMPLETE) s_read_opened = true;
         if (s_ep_mock_use_override_actual) {
             op->actual_length = s_ep_mock_override_actual;
         } else {
@@ -119,6 +122,7 @@ static ecat_async_op_result_t ep_mock_async_poll(void *ctx, ecat_async_data_op_t
 {
     (void)ctx;
     if (op != NULL) {
+        if (op->kind == ECAT_ASYNC_DATA_OP_READ_OPEN && s_ep_async_next_res == ECAT_ASYNC_OP_COMPLETE) s_read_opened = true;
         if (s_ep_mock_use_override_actual) {
             op->actual_length = s_ep_mock_override_actual;
         } else {
@@ -183,6 +187,13 @@ int main(void)
         .on_session_abort = on_abort
     };
     ecat_transport_endpoint_set_callbacks(&ep_uart, &cbs);
+
+    s_size_requires_open = true;
+    uint32_t opened_size = 0;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, &opened_size) == ECAT_TRANSFER_COMPLETE);
+    assert(opened_size == TEST_FLASH_SIZE);
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
+    s_size_requires_open = false;
 
     /* ---------------------------------------------------------------------- */
     /* 1. UART 端点数据流写入导入测试                                        */
@@ -341,6 +352,7 @@ int main(void)
     async_target_desc.enabled = true;
     async_target_desc.asynchronous = true;
     async_target_desc.driver.async_ops = &ep_async_ops;
+    async_target_desc.driver.get_data_size = mock_get_size;
     assert(ecat_target_registry_add(&reg, &async_target_desc) == 0);
 
     /* 绑定暂存区 */
@@ -472,6 +484,8 @@ int main(void)
 
     /* 9.5 begin_export 处于 PENDING 生命周期与 poll 推进 */
     reset_cb_flags();
+    s_read_opened = false;
+    s_size_requires_open = true;
     s_ep_async_next_res = ECAT_ASYNC_OP_PENDING;
     uint32_t exp_total = 0;
     assert(ecat_transport_endpoint_begin_export(&ep_uart, 10U, &exp_total) == ECAT_TRANSFER_PENDING);
@@ -479,8 +493,7 @@ int main(void)
     assert(ep_uart.begin_pending == true);
     assert(ep_uart.state == ECAT_TRANSPORT_STATE_EXPORTING);
     assert(s_cb_started == false);
-    /* 契约断言: begin_export 返回 PENDING 时，*out_total_size 已被预先计算并正确赋值，无需等待后续 poll 回填 */
-    assert(exp_total == 1024U);
+    assert(exp_total == 0U);
 
     /* 在 begin_pending 期间调用 read_chunk / finish_export: 必须返回 BUSY */
     uint8_t exp_buf[64];
@@ -493,6 +506,8 @@ int main(void)
     assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     assert(ep_uart.begin_pending == false);
     assert(s_cb_started == true);
+    assert(ecat_transport_endpoint_get_total_export_size(&ep_uart) == 1024U);
+    s_size_requires_open = false;
 
     /* 正常读取并完成 */
     assert(ecat_transport_endpoint_read_chunk(&ep_uart, exp_buf, sizeof(exp_buf), &actual_exp) == ECAT_TRANSFER_CONTINUE);

@@ -440,6 +440,9 @@ ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *e
         if (ep->begin_pending) {
             /* 启动阶段推进完成: 清除 begin_pending 并单次触发 on_session_start */
             ep->begin_pending = false;
+            if (ep->state == ECAT_TRANSPORT_STATE_EXPORTING) {
+                ep->total_size = ecat_transfer_get_total_export_size(ep->transfer_mgr);
+            }
             if (ep->cbs.on_session_start != NULL) {
                 ecat_transfer_dir_t dir = (ep->state == ECAT_TRANSPORT_STATE_IMPORTING) ?
                                           ECAT_TRANSFER_DIR_IMPORT : ECAT_TRANSFER_DIR_EXPORT;

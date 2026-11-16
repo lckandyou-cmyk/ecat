@@ -117,6 +117,7 @@ typedef struct {
     ecat_foe_target_driver_t io;
     /**
      * @brief 获取可导出的有效数据大小 (字节)
+     * @note 在只读打开完成后调用，读取期间应返回该会话快照的大小。
      * @param user_ctx 用户上下文
      * @return 返回实际有效数据量；若为 NULL 则默认使用区块配置的 max_size
      */

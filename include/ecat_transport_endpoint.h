@@ -150,24 +150,29 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
  *
  * 【并发与导出总大小确定性契约】：
  * - 可导出总大小（*out_total_size）的确定：
- *   - 无论是同步还是异步模式，传输引擎在底层启动前已根据目标驱动的 get_data_size()、
- *     请求参数的 expected_size 或注册表 target->max_size 完成计算；
- *   - 只要 out_total_size 指针非空，本函数在同步就绪（ECAT_TRANSFER_COMPLETE）或
- *     异步打开挂起（ECAT_TRANSFER_PENDING）时均已将该总大小写入 *out_total_size；
- *   - 后续调用 poll 时不会保存也不会回填该指针；调用方在 begin_export 返回时即可立即获取并使用该数值；
+ *   - 只读打开完成后，根据 get_data_size() 或目标容量计算快照大小；
+ *   - COMPLETE 时写入 *out_total_size；PENDING 时暂写 0，poll 不保留或回填此指针。
+ *     poll 返回 COMPLETE 后用 ecat_transport_endpoint_get_total_export_size() 获取大小；
  * - 异步只读打开（READ_OPEN）挂起时返回 ECAT_TRANSFER_PENDING，需通过 poll 推进直到
  *   ECAT_TRANSFER_COMPLETE 后单次派发 on_session_start 回调；
  * - 在 pending 期间调用 read_chunk / finish_export 返回 ECAT_TRANSFER_BUSY 拦截。
  *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID
- * @param out_total_size 传出实际可导出的总字节数 (本函数返回 COMPLETE 或 PENDING 时均已写入)
+ * @param out_total_size COMPLETE 时传出大小，PENDING 时置 0
  * @return ECAT_TRANSFER_COMPLETE 成功建立导出通道，ECAT_TRANSFER_PENDING 异步就绪中，其他为错误/占用
  */
 ecat_transfer_result_t ecat_transport_endpoint_begin_export(
     ecat_transport_endpoint_t *ep,
     uint16_t target_id,
     uint32_t *out_total_size);
+
+/** 返回已打开导出会话的快照大小；会话未就绪时返回 0。 */
+static inline uint32_t ecat_transport_endpoint_get_total_export_size(const ecat_transport_endpoint_t *ep)
+{
+    return ep != NULL && ep->state == ECAT_TRANSPORT_STATE_EXPORTING && !ep->begin_pending
+        ? ep->total_size : 0U;
+}
 
 /**
  * @brief 分块拉取导出数据

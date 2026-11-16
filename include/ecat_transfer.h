@@ -152,6 +152,8 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
  * - 若底层异步驱动启动耗时操作 (如异步硬件初始化/失效化/擦除/打开)，返回 ECAT_TRANSFER_PENDING，
  *   此时会话已成功建立并分配 *token，但处于 pending 状态，调用方必须通过 ecat_transfer_poll 推进
  *   直到返回 ECAT_TRANSFER_COMPLETE 后方可开始读取或写入；
+ * - EXPORT 的大小在只读打开完成后确定；begin 返回 PENDING 时，须等 poll 完成后再调用
+ *   ecat_transfer_get_total_export_size 获取快照大小；
  * - 若引擎当前已被其他会话占用，或当前会话仍有前序操作处于 PENDING 态，返回 ECAT_TRANSFER_BUSY；
  * - 若 ACL 权限不足返回 ECAT_TRANSFER_DENIED；目标不存在或参数非法返回 ECAT_TRANSFER_INVALID。
  *
@@ -220,6 +222,7 @@ ecat_transfer_result_t ecat_transfer_read(
  * - 针对固件升级模式，引擎在进入下游前已将数据稳定捕获到暂存区 staging_buf，调用方 data 在函数返回后可复用；
  * - 若当前操作仍在 PENDING 期间重复调用，返回 ECAT_TRANSFER_BUSY 拦截并发写入；
  * - 同步完成返回 ECAT_TRANSFER_COMPLETE；其他为错误码。
+ * - 数据为 NULL 且长度非零时返回 INVALID 并保留会话；调用方可修正参数重试或显式取消。
  *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识
