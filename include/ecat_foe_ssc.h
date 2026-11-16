@@ -57,6 +57,7 @@ typedef struct {
  * @param adapter 适配层上下文指针
  * @param core    核心机上下文指针
  * @param max_packet_size SSC 邮箱单包大小 (通常为邮箱数据载荷容量)
+ * @note 同步和异步模式在接收请求前都必须绑定传输管理器。
  */
 void ecat_foe_ssc_init(ecat_foe_ssc_adapter_t *adapter, ecat_foe_core_t *core, uint32_t max_packet_size);
 /**

@@ -528,6 +528,32 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 15 项测试全部通过 (Mock 环境) <<<\n");
+    {
+        printf("[TEST 16] 未绑定管理器时拒绝 SSC 请求...");
+        setup_core_and_adapter(&core, &adapter, 64U);
+        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0U);
+        assert(core.state == ECAT_FOE_STATE_IDLE && s_mock_drv.count_init == 0U);
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        ecat_target_desc_t target = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
+        };
+        ecat_transfer_request_t request = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, TEST_FW_VER};
+        uint64_t token = 0;
+        int owner = 0;
+        assert(ecat_target_registry_init(&registry) == 0);
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(ecat_upgrade_session_owns_mgr(transfer.session_ptr, &transfer, &owner, token));
+        assert(ecat_transfer_cancel(&transfer, &owner, token) == ECAT_TRANSFER_COMPLETE);
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 16 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

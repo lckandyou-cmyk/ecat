@@ -88,12 +88,10 @@ static bool ssc_target_is_async(const ecat_foe_ssc_adapter_t *a, uint16_t target
 static void ssc_abort_core(ecat_foe_ssc_adapter_t *a)
 {
     if (ssc_has_transport(a)) ecat_foe_transport_abort(&a->transport);
-    else ecat_foe_core_on_abort(a->core);
 }
 
 static int ssc_end_core(ecat_foe_ssc_adapter_t *a)
 {
-    if (!ssc_has_transport(a)) return ecat_foe_core_on_end(a->core);
     int rc = ecat_foe_transport_start(&a->transport, NULL, 0U, false) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1;
     if (rc == 0) a->async_final_acked = true;
     return rc;
@@ -101,8 +99,7 @@ static int ssc_end_core(ecat_foe_ssc_adapter_t *a)
 
 static bool ssc_completed(const ecat_foe_ssc_adapter_t *a)
 {
-    return ssc_has_transport(a) ? a->async_final_acked :
-        (a->core->state == ECAT_FOE_STATE_SUCCESS || a->async_final_acked);
+    return a->async_final_acked;
 }
 
 int ecat_foe_ssc_set_expected_password(ecat_foe_ssc_adapter_t *adapter,
@@ -119,7 +116,7 @@ int ecat_foe_ssc_set_expected_password(ecat_foe_ssc_adapter_t *adapter,
 
 uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pName, uint16_t nameSize, uint32_t password)
 {
-    if (adapter == NULL || adapter->core == NULL || pName == NULL) {
+    if (adapter == NULL || adapter->core == NULL || pName == NULL || !ssc_has_transport(adapter)) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
     if (password != adapter->expected_password) {
@@ -149,9 +146,7 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
         ecat_foe_ssc_async_abort(adapter->async_gate);
     }
     /* 调用通用核心机处理 WRQ 请求，核验项目名称、硬件目标与防回滚版本 */
-    int rc = ssc_has_transport(adapter)
-        ? ecat_foe_transport_begin(&adapter->transport, pName, (size_t)nameSize)
-        : ecat_foe_core_on_wrq(adapter->core, pName, (size_t)nameSize);
+    int rc = ecat_foe_transport_begin(&adapter->transport, pName, (size_t)nameSize);
     if (rc != 0) {
         adapter->session_active = false;
         /* 保留核心机计算的标准 FoE 错误码 (如 0x8001 NOTFOUND, 0x8004 ILLEGAL 等) */
@@ -164,7 +159,7 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
 
 uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pData, uint16_t length)
 {
-    if (adapter == NULL || adapter->core == NULL) {
+    if (adapter == NULL || adapter->core == NULL || !ssc_has_transport(adapter)) {
         return ECAT_FOE_SSC_ERR_PROGERROR;
     }
     if (adapter->async_gate != NULL) {
@@ -211,9 +206,7 @@ uint16_t ecat_foe_ssc_on_data(ecat_foe_ssc_adapter_t *adapter, const uint8_t *pD
     }
 
     /* 写入常规数据块 */
-    int data_rc = ssc_has_transport(adapter)
-        ? (ecat_foe_transport_start(&adapter->transport, pData, length, true) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1)
-        : ecat_foe_core_on_data(adapter->core, pData, (size_t)length);
+    int data_rc = ecat_foe_transport_start(&adapter->transport, pData, length, true) == ECAT_UPGRADE_ASYNC_COMPLETE ? 0 : -1;
     if (data_rc != 0) {
         adapter->session_active = false;
         return ECAT_FOE_SSC_ERR_PROGERROR;
@@ -237,7 +230,7 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
                                         bool data_following,
                                         uint32_t now_ticks)
 {
-    if (adapter == NULL || adapter->core == NULL || adapter->async_gate == NULL) {
+    if (adapter == NULL || adapter->core == NULL || adapter->async_gate == NULL || !ssc_has_transport(adapter)) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
     if (!adapter->session_active) {
@@ -265,8 +258,7 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
         return result;
     }
     if (!data_following) {
-        if (ssc_has_transport(adapter) ? !adapter->transport.committed :
-            adapter->core->state != ECAT_FOE_STATE_SUCCESS) {
+        if (!adapter->transport.committed) {
             ecat_foe_ssc_async_abort(adapter->async_gate);
             ssc_abort_core(adapter);
             adapter->session_active = false;
@@ -282,7 +274,7 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
 uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
                                    uint32_t now_ticks)
 {
-    if (adapter == NULL || adapter->async_gate == NULL) {
+    if (adapter == NULL || adapter->async_gate == NULL || !ssc_has_transport(adapter)) {
         return ECAT_FOE_SSC_ERR_ILLEGAL;
     }
     uint16_t result = ecat_foe_ssc_async_poll(adapter->async_gate, now_ticks);
@@ -301,7 +293,7 @@ uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
 
 uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 {
-    if (adapter == NULL || adapter->core == NULL) {
+    if (adapter == NULL || adapter->core == NULL || !ssc_has_transport(adapter)) {
         return ECAT_FOE_SSC_ERR_PROGERROR;
     }
 
@@ -331,7 +323,7 @@ uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
 void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
 {
     (void)errorCode;
-    if (adapter == NULL || adapter->core == NULL) {
+    if (adapter == NULL || adapter->core == NULL || !ssc_has_transport(adapter)) {
         return;
     }
 

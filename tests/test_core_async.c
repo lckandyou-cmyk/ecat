@@ -313,6 +313,23 @@ static int setup_async_transfer(ecat_transfer_t *transfer, ecat_target_registry_
     return 0;
 }
 
+static ecat_target_registry_t ssc_registry;
+static ecat_transfer_t ssc_transfer;
+static uint8_t ssc_transfer_staging[128];
+
+static int setup_managed_ssc_async(ecat_foe_core_t *core, ecat_foe_core_async_t *session,
+    ecat_foe_ssc_adapter_t *adapter, ecat_foe_ssc_async_t *gate,
+    uint8_t *packet, size_t packet_size)
+{
+    if (setup_async_transfer(&ssc_transfer, &ssc_registry, core, session,
+                             ssc_transfer_staging, sizeof(ssc_transfer_staging)) != 0) return -1;
+    ecat_foe_ssc_init_async(adapter, core, gate);
+    if (ecat_foe_ssc_async_init(gate, ecat_foe_transport_async_ops(), &adapter->transport,
+            packet, packet_size, 100U, 0x800AU, ECAT_FOE_SSC_ERR_PACKETNO,
+            ECAT_FOE_SSC_ERR_PROGERROR) != 0) return -1;
+    return ecat_foe_ssc_bind_transfer(adapter, &ssc_transfer);
+}
+
 int main(void)
 {
     CHECK(test_async_firmware_without_sync_driver() == 0);
@@ -359,10 +376,8 @@ int main(void)
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
           sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
     const char name[] = "SERVO_DRV_MCU_V1.0.0.0.efw";
     CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
@@ -457,10 +472,8 @@ int main(void)
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
           sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
     flash.valid = true;
     before = flash.starts;
     CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
@@ -477,10 +490,8 @@ int main(void)
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
           sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-    CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-          packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-          ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-    ecat_foe_ssc_init_async(&adapter, &core, &gate);
+    CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
     (void)make_efw(efw, payload, sizeof(payload));
     put16(efw + 20, ECAT_FOE_TARGET_FPGA);
     put32(efw + 144, ecat_foe_crc32_calc(efw, 144U));
@@ -809,10 +820,8 @@ int main(void)
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
               sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+        CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
         flash.valid = true; /* 物理存储上原本已存在旧有效固件镜像 */
         flash.safe_session_abort = false; /* 模拟旧版驱动: abort_session 会破坏 valid */
@@ -829,7 +838,8 @@ int main(void)
         /* 第三包凑满 148B 头部并触发 INIT -> 旧驱动在 start 内部自行回滚资源并立即返回 FAILED */
         uint16_t err = ecat_foe_ssc_on_data_following(&adapter, signed_efw + 140U, 128U, true, 203U);
         CHECK(err == ECAT_FOE_SSC_ERR_PROGERROR);
-        CHECK(core.state == ECAT_FOE_STATE_IDLE);
+        CHECK(core.state == ECAT_FOE_STATE_ERROR);
+        CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
         CHECK(!core.session_active); /* 租约已释放 */
         CHECK(!core.signature_active); /* 验签已关闭 */
         CHECK(!core.driver_invalidated);
@@ -844,9 +854,8 @@ int main(void)
 
         /* 在统一 upgrade 引擎直接写入时验证旧驱动 INIT 立即失败 */
         ecat_transfer_t upg_test;
-        ecat_target_registry_t upg_registry;
         uint8_t upg_staging[128];
-        CHECK(setup_async_transfer(&upg_test, &upg_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
+        CHECK(setup_async_transfer(&upg_test, &ssc_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
         int src_id = 99;
         uint64_t tok_val = 0;
         ecat_transfer_request_t req_val = {1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
@@ -880,10 +889,8 @@ int main(void)
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
               sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+        CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
         flash.valid = true;
         flash.safe_session_abort = true;
@@ -897,7 +904,8 @@ int main(void)
         CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw + 40U, 100U, true, 202U) == 0U);
         err = ecat_foe_ssc_on_data_following(&adapter, signed_efw + 140U, 128U, true, 203U);
         CHECK(err == ECAT_FOE_SSC_ERR_PROGERROR);
-        CHECK(core.state == ECAT_FOE_STATE_IDLE);
+        CHECK(core.state == ECAT_FOE_STATE_ERROR);
+        CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT);
         CHECK(!core.session_active);
         CHECK(!core.signature_active);
         CHECK(!core.driver_invalidated);
@@ -911,7 +919,7 @@ int main(void)
         CHECK(flash.aborts == 1U);
 
         /* 在统一 upgrade 引擎直接写入时验证新版安全驱动 INIT 立即失败 */
-        CHECK(setup_async_transfer(&upg_test, &upg_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
+        CHECK(setup_async_transfer(&upg_test, &ssc_registry, &core, &session, upg_staging, sizeof(upg_staging)) == 0);
         tok_val = 0;
         CHECK(ecat_transfer_begin(&upg_test, &src_id, &req_val, &tok_val) == ECAT_TRANSFER_COMPLETE);
         flash.fail_init_immediate = true;
@@ -961,10 +969,8 @@ int main(void)
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
               sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+        CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
         CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
         CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw, 40U, true, 210U) == 0U);
@@ -972,7 +978,7 @@ int main(void)
         CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw + 140U, 128U, true, 212U) == 0x800AU);
         CHECK(gate.pending && flash.resource_acquired);
         CHECK(ecat_foe_ssc_on_main_loop(&adapter, 213U) == ECAT_FOE_SSC_ERR_PROGERROR);
-        CHECK(core.last_error == ECAT_FOE_CORE_OK); /* 经由 SSC abort 后清为 OK */
+        CHECK(core.last_error == ECAT_FOE_CORE_ERR_DRV_INIT); /* 失败清理后保留诊断 */
         CHECK(!core.session_active);
         CHECK(!core.signature_active);
         CHECK(!core.driver_invalidated);
@@ -992,10 +998,8 @@ int main(void)
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
               sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+        CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
         CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
         CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw, 40U, true, 220U) == 0U);
@@ -1022,10 +1026,8 @@ int main(void)
         CHECK(ecat_foe_core_init(&core, &cfg) == 0);
         CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
               sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-        CHECK(ecat_foe_ssc_async_init(&gate, ecat_foe_core_async_ssc_ops(), &session,
-              packet_storage, sizeof(packet_storage), 100U, 0x800AU,
-              ECAT_FOE_SSC_ERR_PACKETNO, ECAT_FOE_SSC_ERR_PROGERROR) == 0);
-        ecat_foe_ssc_init_async(&adapter, &core, &gate);
+        CHECK(setup_managed_ssc_async(&core, &session, &adapter, &gate,
+              packet_storage, sizeof(packet_storage)) == 0);
 
         CHECK(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)(sizeof(name) - 1U), 0U) == 0U);
         CHECK(ecat_foe_ssc_on_data_following(&adapter, signed_efw, 40U, true, 230U) == 0U);
