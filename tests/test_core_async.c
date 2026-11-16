@@ -264,7 +264,7 @@ static int test_async_firmware_without_sync_driver(void)
     CHECK(ecat_target_registry_init(&registry) == 0);
     CHECK(ecat_target_registry_add(&registry, &target) == 0);
     CHECK(ecat_transfer_init(&transfer, &registry, &core) == 0);
-    CHECK(ecat_transfer_init_async_firmware(&transfer, ecat_foe_core_async_ops(), &async) == 0);
+    CHECK(ecat_transfer_init_async_firmware(&transfer, &async) == 0);
     CHECK(ecat_transfer_set_staging_buffer(&transfer, staging, sizeof(staging)) == 0);
     CHECK(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
     size_t image_len = make_efw(image, payload, sizeof(payload));
@@ -309,7 +309,7 @@ static int setup_async_transfer(ecat_transfer_t *transfer, ecat_target_registry_
     if (ecat_target_registry_init(registry) != 0 ||
         ecat_target_registry_add(registry, &target) != 0 ||
         ecat_transfer_init(transfer, registry, core) != 0 ||
-        ecat_transfer_init_async_firmware(transfer, ecat_foe_core_async_ops(), async) != 0 ||
+        ecat_transfer_init_async_firmware(transfer, async) != 0 ||
         ecat_transfer_set_staging_buffer(transfer, staging, capacity) != 0) return -1;
     return 0;
 }
@@ -334,7 +334,6 @@ static int setup_managed_ssc_async(ecat_foe_core_t *core, ecat_foe_core_async_t 
 int main(void)
 {
     CHECK(test_async_firmware_without_sync_driver() == 0);
-    CHECK(ecat_foe_core_async_ops() != NULL);
     static async_flash_t flash;
     static uint8_t packet_storage[128];
     static uint8_t operation_storage[128];

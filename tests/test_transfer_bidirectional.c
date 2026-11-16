@@ -437,32 +437,7 @@ static const ecat_async_data_ops_t s_stage_data_ops = {
     .abort = stage_driver_abort
 };
 
-static bool s_fw_async_start_called = false;
-static bool s_fw_async_poll_called = false;
-static bool s_fw_async_abort_called = false;
-static ecat_upgrade_async_result_t s_fw_async_next_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-
-
-
-static const uint8_t *s_fw_async_last_data = NULL;
-static ecat_upgrade_async_result_t test_fw_async_start(void *ctx, const uint8_t *data, size_t len, bool more)
-{
-    (void)ctx; (void)len; (void)more;
-    s_fw_async_last_data = data;
-    s_fw_async_start_called = true;
-    return s_fw_async_next_res;
-}
-static ecat_upgrade_async_result_t test_fw_async_poll(void *ctx)
-{
-    (void)ctx;
-    s_fw_async_poll_called = true;
-    return s_fw_async_next_res;
-}
-static void test_fw_async_abort(void *ctx)
-{
-    (void)ctx;
-    s_fw_async_abort_called = true;
-}
+static void fake_firmware_abort(void *ctx) { (void)ctx; }
 
 typedef struct {
     uint8_t flash[1024];
@@ -1866,18 +1841,12 @@ int main(void)
     assert(ecat_transfer_is_pending(&async_xfer) == false);
 
     /* 10.4 固件升级复用异步核心验证 (FIRMWARE Async) */
-    ecat_upgrade_async_ops_t fw_ops = {
-        .start = test_fw_async_start,
-        .poll = test_fw_async_poll,
-        .abort = test_fw_async_abort
-    };
-    int fw_dummy_ctx = 0;
-    /* 核心未关联或伪造的 fake ops 必须被明确拒绝，防止绕过验签与权限检查 */
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == -1);
-    /* 即使把 abort 和 ctx 挂到 core 上，但由于 start/poll 不是权威核心，依然必须被严格拒绝 */
-    core.async_abort_hook = fw_ops.abort;
-    core.async_abort_ctx = &fw_dummy_ctx;
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fw_ops, &fw_dummy_ctx) == -1);
+    ecat_foe_core_async_t fake_fw_session = {0};
+    fake_fw_session.core = &core;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_fw_session) == -1);
+    core.async_abort_hook = fake_firmware_abort;
+    core.async_abort_ctx = &fake_fw_session;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_fw_session) == -1);
 
     /* 真实异步固件核心初始化并完成权威强绑定 */
     static uint8_t s_fw10_packet[512];
@@ -1895,7 +1864,7 @@ int main(void)
     core.cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     uint8_t fw_staging[256];
     assert(ecat_transfer_set_staging_buffer(&mgr_first, fw_staging, sizeof(fw_staging)) == 0);
 
@@ -1939,7 +1908,7 @@ int main(void)
     ecat_foe_core_on_abort(&core);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 100U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw + 100U, 100U) == ECAT_TRANSFER_COMPLETE);
@@ -1960,7 +1929,7 @@ int main(void)
     ecat_foe_core_on_abort(&core);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     /* 第 1 包头部 Magic 被篡改，真实核心当场检测到非法头部 Magic 并返回 FAILED 拦截 */
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, bad_efw, 100U) == ECAT_TRANSFER_FAILED);
@@ -1976,7 +1945,7 @@ int main(void)
     assert(ecat_transfer_init(&mgr_fw_nostaging, &reg, &core) == 0);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_fw_nostaging, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_fw_nostaging, &s_fw10_session) == 0);
     uint64_t tok_nostage = 0;
     assert(ecat_transfer_begin(&mgr_fw_nostaging, &client_owner1, &fw_async_req, &tok_nostage) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&mgr_fw_nostaging, &client_owner1, tok_nostage, fw_efw, 100U) == ECAT_TRANSFER_FAILED);
@@ -1990,7 +1959,7 @@ int main(void)
     g_abort_called = false;
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 200U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_cancel(&mgr_first, &client_owner1, fw_tok) == ECAT_TRANSFER_COMPLETE);
@@ -2380,34 +2349,24 @@ int main(void)
     /* 10.8.1: 管理器未关联 core (core == NULL) 时调用必须拒绝 */
     ecat_transfer_t mgr_no_core;
     memset(&mgr_no_core, 0, sizeof(mgr_no_core));
-    assert(ecat_transfer_init_async_firmware(&mgr_no_core, ecat_foe_core_async_ops(), &real_fw_async_core) == -1);
+    assert(ecat_transfer_init_async_firmware(&mgr_no_core, &real_fw_async_core) == -1);
 
-    /* 10.8.2: 伪造上下文 ctx 不匹配 core->async_abort_ctx 时必须拒绝 */
-    int fake_fw_ctx = 42;
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &fake_fw_ctx) == -1);
-
-    /* 10.8.3: 伪造 abort 回调不匹配 core->async_abort_hook 时必须拒绝 */
-    ecat_upgrade_async_ops_t fake_abort_ops = *ecat_foe_core_async_ops();
-    fake_abort_ops.abort = test_fw_async_abort;
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_abort_ops, &real_fw_async_core) == -1);
-
-    /* 10.8.4: 真实已初始化的异步固件核心与合法 ops 绑定成功 */
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &real_fw_async_core) == 0);
-
-    /* 10.8.5: 反例测试：复制合法 ops 但篡改 start 或 poll 的伪造操作集必须被当场拒绝 */
-    ecat_upgrade_async_ops_t fake_start_ops = *ecat_foe_core_async_ops();
-    fake_start_ops.start = test_fw_async_start; /* 篡改 start */
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_start_ops, &real_fw_async_core) == -1);
-
-    ecat_upgrade_async_ops_t fake_poll_ops = *ecat_foe_core_async_ops();
-    fake_poll_ops.poll = test_fw_async_poll; /* 篡改 poll */
-    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_poll_ops, &real_fw_async_core) == -1);
+    /* A different or uninitialized session must not bind to this core. */
+    ecat_foe_core_async_t fake_fw_ctx = {0};
+    fake_fw_ctx.core = &core;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &fake_fw_ctx) == -1);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, NULL) == -1);
+    void (*saved_abort_hook)(void *) = core.async_abort_hook;
+    core.async_abort_hook = fake_firmware_abort;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &real_fw_async_core) == -1);
+    core.async_abort_hook = saved_abort_hook;
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &real_fw_async_core) == 0);
 
     /* 10.9 FoE 工业总线适配器直接接入权威统一传输核心 (ecat_foe_transport_init_transfer) */
     printf("--- 测试 10.9: FoE 适配桥直连统一传输核心与会话互斥仲裁 ---\n");
     assert(ecat_target_registry_add_acl(&reg, 2U, 1U, ECAT_PERM_WRITE) == 0);
     uint8_t fw_sec_staging[256];
-    assert(ecat_transfer_init_async_firmware(&mgr_second, ecat_foe_core_async_ops(), &real_fw_async_core) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_second, &real_fw_async_core) == 0);
     assert(ecat_transfer_set_staging_buffer(&mgr_second, fw_sec_staging, sizeof(fw_sec_staging)) == 0);
     ecat_foe_transport_t foe_bridge;
     /* 参数非法检查 */
@@ -2573,7 +2532,7 @@ int main(void)
     s_fw_test_flash.fail_finalize = false;
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     /* 写入 150 字节 (EFW 头部 148 字节已解析且 target session 已启动，但未达到声明的 200 字节) */
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, fw_efw, 150U) == ECAT_TRANSFER_COMPLETE);
@@ -2600,7 +2559,7 @@ int main(void)
     assert(make_test_signed_efw(signed_efw, fw_payload, sizeof(fw_payload), 1U) == 200U);
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     /* 完整写入 200 字节 */
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, signed_efw, 200U) == ECAT_TRANSFER_COMPLETE);
@@ -2629,7 +2588,7 @@ int main(void)
     s_mock_verifier_fail_finish = 0;     /* 验签通过 */
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr_first, ecat_foe_core_async_ops(), &s_fw10_session) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     assert(ecat_transfer_begin(&mgr_first, &client_owner1, &fw_async_req, &fw_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&mgr_first, &client_owner1, fw_tok, signed_efw, 200U) == ECAT_TRANSFER_COMPLETE);
     assert(mgr_first.core_started == true);
@@ -3420,7 +3379,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&fw_backing[16], fw_efw, 64);
@@ -3439,7 +3398,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&fw_backing[0], fw_efw, 64);
@@ -3455,7 +3414,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&fw_backing[0], fw_efw, 64);
@@ -3471,7 +3430,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             s_fw_test_flash.poll_pending_count = 0U;
@@ -3548,7 +3507,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &fw_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&fw_backing[16], fw_efw, 64);
@@ -3575,7 +3534,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&big_backing[0], fw_efw, 160);
@@ -3595,7 +3554,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             memcpy(&big_backing[0], fw_efw, 160);
@@ -3615,7 +3574,7 @@ int main(void)
             ecat_foe_core_on_abort(&fw_core);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, s_fw_pkt, sizeof(s_fw_pkt),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             s_fw_test_flash.poll_pending_count = 1U;
@@ -3714,7 +3673,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
@@ -3740,7 +3699,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
@@ -3774,7 +3733,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[16], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
@@ -3800,7 +3759,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[16], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
@@ -3834,7 +3793,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
@@ -3860,7 +3819,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[0], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
@@ -3896,7 +3855,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, sep_staging, sizeof(sep_staging)) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, sep_packet, sizeof(sep_packet),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_COMPLETE);
@@ -3924,7 +3883,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, sep_staging, sizeof(sep_staging)) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, sep_packet, sizeof(sep_packet),
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             assert(ecat_transfer_write(&mgr, owner, token, fw_efw, efw_len) == ECAT_TRANSFER_PENDING);
@@ -3956,7 +3915,7 @@ int main(void)
             assert(ecat_transfer_set_staging_buffer(&mgr, &cross_backing[0], 256) == 0);
             assert(ecat_foe_core_async_init(&s_fw_sess, &fw_core, &cross_backing[16], 256,
                                             s_fw_op, sizeof(s_fw_op)) == 0);
-            assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &s_fw_sess) == 0);
+            assert(ecat_transfer_init_async_firmware(&mgr, &s_fw_sess) == 0);
             assert(ecat_transfer_begin(&mgr, owner, &fw_req, &token) == ECAT_TRANSFER_COMPLETE);
 
             /* 故意传入畸形非法数据 (非合法 EFW 魔数)，导致 core 立即拒绝 */

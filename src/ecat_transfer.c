@@ -101,28 +101,14 @@ int ecat_transfer_set_staging_buffer(
     return 0;
 }
 
-int ecat_transfer_init_async_firmware(
-    ecat_transfer_t *t,
-    const ecat_upgrade_async_ops_t *ops,
-    void *ctx)
+int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session)
 {
-    if (t == NULL || t->core == NULL || ops == NULL || ops->start == NULL ||
-        ops->poll == NULL || ops->abort == NULL || ctx == NULL) {
-        return -1;
-    }
-
-    const ecat_upgrade_async_ops_t *auth_ops = ecat_foe_core_async_ops();
-    if (auth_ops == NULL ||
-        ops->start != auth_ops->start ||
-        ops->poll != auth_ops->poll ||
-        ops->abort != auth_ops->abort ||
-        t->core->async_abort_hook != auth_ops->abort ||
-        t->core->async_abort_ctx != ctx) {
-        return -1;
-    }
-
+    if (t == NULL || t->core == NULL || session == NULL) return -1;
+    const ecat_upgrade_async_ops_t *ops = ecat_foe_core_async_ops();
+    if (session->core != t->core || t->core->async_abort_hook != ops->abort ||
+        t->core->async_abort_ctx != session) return -1;
     t->fw_async_ops = ops;
-    t->fw_async_ctx = ctx;
+    t->fw_async_ctx = session;
     return 0;
 }
 

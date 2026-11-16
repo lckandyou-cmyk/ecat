@@ -31,13 +31,14 @@ with tempfile.TemporaryDirectory(prefix='upgrade-build-') as tmp:
                                       '-fsyntax-only', str(probe)],
                                 capture_output=True, text=True)
         assert result.returncode != 0 and symbol in result.stderr, result.stderr
-    async_probe = work / 'async_abort.c'
-    async_probe.write_text('#include "ecat_foe_core_async.h"\n'
-                           'void *probe(void) { return (void *)&ecat_foe_core_async_abort; }\n')
-    result = subprocess.run(CC + ['-std=c99', '-I' + str(ROOT / 'include'),
-                                  '-fsyntax-only', str(async_probe)],
-                            capture_output=True, text=True)
-    assert result.returncode != 0 and 'ecat_foe_core_async_abort' in result.stderr, result.stderr
+    for symbol in ('ecat_foe_core_async_abort', 'ecat_foe_core_async_ops'):
+        async_probe = work / (symbol + '.c')
+        async_probe.write_text('#include "ecat_foe_core_async.h"\n'
+                               'void *probe(void) { return (void *)&' + symbol + '; }\n')
+        result = subprocess.run(CC + ['-std=c99', '-I' + str(ROOT / 'include'),
+                                      '-fsyntax-only', str(async_probe)],
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and symbol in result.stderr, result.stderr
     for mode in ('default', 'off', 'file', 'shared'):
         out = work / mode
         command = ['make', 'build-upgrade', 'UPGRADE_BUILD_DIR=' + str(out),

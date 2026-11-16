@@ -2,6 +2,7 @@
 #ifndef ECAT_FOE_CORE_INTERNAL_H
 #define ECAT_FOE_CORE_INTERNAL_H
 #include "ecat_foe_core.h"
+#include "ecat_upgrade_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,9 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core);
  * 释放底层驱动并重置核心状态机。
  */
 void ecat_foe_core_on_abort(ecat_foe_core_t *core);
+
+/* Backend callbacks are private to the transfer manager. */
+const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
 
 #ifdef __cplusplus
 }

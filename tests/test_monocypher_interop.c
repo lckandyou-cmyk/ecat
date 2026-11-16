@@ -335,7 +335,7 @@ static void test_one_cross_layer_alias_case(
     static ecat_foe_core_async_t core_sess;
     assert(ecat_foe_core_async_init(&core_sess, &core, core_packet_buf, core_packet_len,
                                     op_buf, sizeof(op_buf)) == 0);
-    assert(ecat_transfer_init_async_firmware(&mgr, ecat_foe_core_async_ops(), &core_sess) == 0);
+    assert(ecat_transfer_init_async_firmware(&mgr, &core_sess) == 0);
 
     ecat_transfer_request_t req = {
         .transport_id = 1U,

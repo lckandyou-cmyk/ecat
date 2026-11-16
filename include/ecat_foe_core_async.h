@@ -76,9 +76,6 @@ int ecat_foe_core_async_init(ecat_foe_core_async_t *session,
                              uint8_t *operation_storage,
                              size_t operation_capacity);
 
-/* Backend consumed by the unified transfer manager. */
-const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
-
 #ifdef __cplusplus
 }
 #endif

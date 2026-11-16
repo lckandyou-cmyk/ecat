@@ -21,6 +21,7 @@
 #include "ecat_target_registry.h"
 #include "ecat_foe_core.h"
 #include "ecat_upgrade_async.h"
+#include "ecat_foe_core_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -299,23 +300,11 @@ int ecat_transfer_set_staging_buffer(
     size_t capacity);
 
 /**
- * @brief 绑定可选的固件异步核心操作集 (针对 FIRMWARE 类异步目标)
- *
- * 【安全与鉴权契约】：
- * - 必须关联真实固件升级核心 (t->core != NULL)；
- * - ops 与 ctx 必须严格与固件核心已注册的异步钩子一致 (core->async_abort_hook == ops->abort &&
- *   core->async_abort_ctx == ctx)，防止未绑定的伪造 backend 绕过签名校验、防回滚与驱动生命周期；
- * - 任一条件不满足立即返回 -1，拒绝初始化。
- *
- * @param t 管理器上下文指针
- * @param ops 固件异步操作接口
- * @param ctx 固件异步上下文指针
- * @return 0 成功，-1 参数非法或与核心未绑定
+ * @brief 将已初始化的固件异步会话绑定到传输管理器。
+ * 会话必须由该管理器关联的固件核心初始化，且核心的中止钩子仍指向该会话。
+ * @return 0 成功，-1 参数非法或会话不属于该核心
  */
-int ecat_transfer_init_async_firmware(
-    ecat_transfer_t *t,
-    const ecat_upgrade_async_ops_t *ops,
-    void *ctx);
+int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session);
 
 /**
  * @brief 推进当前处于 PENDING 的异步操作进度
