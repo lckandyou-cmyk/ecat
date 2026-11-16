@@ -20,6 +20,17 @@ with tempfile.TemporaryDirectory(prefix='upgrade-build-') as tmp:
     foe.write_text('#include "ecat_foe_ssc.h"\n'
                    'int port_get_version_floor(uint16_t t, uint32_t *v) { (void)t; (void)v; return 0; }\n'
                    'int main(void) { ecat_foe_ssc_init(0, 0, 0); return 0; }\n')
+    # Firmware policy events are internal; applications enter via transfer APIs.
+    for symbol in ('ecat_foe_core_on_wrq', 'ecat_foe_core_begin_request',
+                   'ecat_foe_core_on_data', 'ecat_foe_core_on_end',
+                   'ecat_foe_core_on_abort'):
+        probe = work / (symbol + '.c')
+        probe.write_text('#include "ecat_foe_core.h"\n'
+                         'void *probe(void) { return (void *)&' + symbol + '; }\n')
+        result = subprocess.run(CC + ['-std=c99', '-I' + str(ROOT / 'include'),
+                                      '-fsyntax-only', str(probe)],
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and symbol in result.stderr, result.stderr
     for mode in ('default', 'off', 'file', 'shared'):
         out = work / mode
         command = ['make', 'build-upgrade', 'UPGRADE_BUILD_DIR=' + str(out),

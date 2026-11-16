@@ -1,3 +1,4 @@
+#include "test_core_helpers.h"
 /**
  * @file test_core.c
  * @brief EtherCAT FoE 核心状态机与 SOES 适配层测试套件 (阶段 B)
@@ -295,7 +296,7 @@ static size_t build_signed_test_efw(uint8_t *out, const uint8_t *payload, uint32
 
 static int test_wrq(ecat_foe_core_t *core, const char *fn)
 {
-    return ecat_foe_core_on_wrq(core, fn, (fn != NULL) ? strlen(fn) : 0);
+    return test_core_begin_filename(core, fn, (fn != NULL) ? strlen(fn) : 0);
 }
 
 static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, mock_driver_t *mock_sii, mock_driver_t *mock_eeprom)
@@ -1748,9 +1749,10 @@ static void test_config_validation_rules(void)
     TEST_ASSERT_EQ_INT(reinit_core.state, ECAT_FOE_STATE_ERROR, "状态必须变为 ERROR");
 
     /* 验证不能发起 WRQ */
+    ecat_foe_core_err_t config_error = reinit_core.last_error;
     int ret_reinit_wrq = test_wrq(&reinit_core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     TEST_ASSERT(ret_reinit_wrq != 0, "不可用 core 发起 WRQ 必须被拒绝");
-    TEST_ASSERT_EQ_INT(reinit_core.last_error, ECAT_FOE_CORE_ERR_INVALID_STATE, "不可用 core 错误码为 ERR_INVALID_STATE");
+    TEST_ASSERT_EQ_INT(reinit_core.last_error, config_error, "拒绝后保留配置错误");
 
     /* C. max_header_size 下限/对齐/上限检查 */
     cfg.max_header_size = 64U;
@@ -1827,13 +1829,13 @@ static void test_config_validation_rules(void)
     /* 模拟外部临时缓冲区失效/被破坏 */
     memset(temp_stack_proj, 0xAA, sizeof(temp_stack_proj));
     /* 核心机依靠内部深拷贝的 local_project_name 依然能够正常处理 WRQ */
-    int ret_decouple = ecat_foe_core_on_wrq(&core, "TEMP_PROJ_MCU_V1.0.0.0.efw", 26);
+    int ret_decouple = test_core_begin_filename(&core, "TEMP_PROJ_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT_EQ_INT(ret_decouple, 0, "项目名生命周期解耦: 外部缓冲失效后核心仍匹配成功");
     cfg.project_name = "SERVO_DRV";
     ecat_foe_core_init(&core, &cfg);
 
     memset(&core, 0, sizeof(core)); /* 模拟未初始化的野核心 */
-    int ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    int ret_wrq = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT(ret_wrq != 0, "未配置核心必须直接拒绝 WRQ");
 }
 
@@ -1846,11 +1848,11 @@ static void test_bounded_wrq_parsing(void)
     setup_default_core(&core, &mcu, NULL, NULL);
 
     /* 1. 长度为 0 */
-    int ret0 = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 0);
+    int ret0 = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 0);
     TEST_ASSERT(ret0 != 0, "长度为 0 的 WRQ 必须拒绝");
 
     /* 2. 长度超过 FOE_FN_MAX (31) */
-    int ret_long = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0_OVERFLOW.efw", 35);
+    int ret_long = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0_OVERFLOW.efw", 35);
     TEST_ASSERT(ret_long != 0, "长度超过 31 的 WRQ 必须拒绝");
 
     /* 3. 无 \0 结尾的有界缓冲区解析 (末尾携带垃圾数据) */
@@ -1858,7 +1860,7 @@ static void test_bounded_wrq_parsing(void)
     memset(raw_buf, 'X', sizeof(raw_buf));
     memcpy(raw_buf, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     /* 仅传入有效长度 26 字节，解析器不得向后读取 'X' */
-    int ret_bound = ecat_foe_core_on_wrq(&core, raw_buf, 26);
+    int ret_bound = test_core_begin_filename(&core, raw_buf, 26);
     TEST_ASSERT_EQ_INT(ret_bound, 0, "显式传入 26 字节长度有界解析必须成功");
     TEST_ASSERT_EQ_INT(core.req_target_id, 1, "正确解析 target_id 为 1");
     TEST_ASSERT(core.req_fw_version == 0x01000000U, "正确解析版本");
@@ -2481,7 +2483,7 @@ static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
     uint8_t efw[256];
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 16);
 
-    int ret_wrq = ecat_foe_core_on_wrq(&core_copy, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    int ret_wrq = test_core_begin_filename(&core_copy, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT_EQ_INT(ret_wrq, 0, "副本 WRQ 成功受理");
 
     feed_stream_chunks(&core_copy, efw, efw_len, 32, false);
@@ -2506,7 +2508,7 @@ static void test_100_failed_self_healing_cycles(void)
 
     for (int cycle = 0; cycle < 100; cycle++) {
         /* 1. 制造失败阶段: 发送 WRQ 并发送损坏的头部数据或中途少收中止 */
-        int ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+        int ret_wrq = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
         TEST_ASSERT_EQ_INT(ret_wrq, 0, "循环中 WRQ 正常受理");
 
         /* 发送 64 字节头部，使驱动 invalidate */
@@ -2522,7 +2524,7 @@ static void test_100_failed_self_healing_cycles(void)
 
         /* 2. 自愈恢复阶段: 在同一个 core 实例上重新发起合法 WRQ 并完成全量升级 */
         mock_driver_reset(&mcu);
-        ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+        ret_wrq = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
         TEST_ASSERT_EQ_INT(ret_wrq, 0, "自愈 WRQ 成功受理");
 
         int ret_feed = feed_stream_chunks(&core, efw, efw_len, 32, false);
@@ -2597,7 +2599,7 @@ static void test_null_project_name_rejection(void)
     TEST_ASSERT(!core.is_configured, "core.is_configured 为 false");
 
     /* 失败后 core 不可用，发起 WRQ 必须被拒绝 */
-    int ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    int ret_wrq = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT(ret_wrq != 0, "未成功初始化的 core 无法发起 WRQ");
 
     /* 2. 已初始化 core 再传独立的 NULL 名配置: 同样必须失败且变为不可用 */
@@ -2608,7 +2610,7 @@ static void test_null_project_name_rejection(void)
     TEST_ASSERT_EQ_INT(ret, -1, "已配置 core 传入 NULL 项目名同样拒绝");
     TEST_ASSERT(!core.is_configured, "失败后 core 立即变为不可用");
 
-    ret_wrq = ecat_foe_core_on_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
+    ret_wrq = test_core_begin_filename(&core, "SERVO_DRV_MCU_V1.0.0.0.efw", 26);
     TEST_ASSERT(ret_wrq != 0, "变为不可用的 core 无法发起 WRQ");
 
     /* 3. 明确 &core.cfg 因项目名为 NULL 不被支持 */

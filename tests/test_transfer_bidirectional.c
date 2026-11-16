@@ -1,3 +1,4 @@
+#include "../src/ecat_foe_core_internal.h"
 /**
  * @file test_transfer_bidirectional.c
  * @brief 双向数据传输 (导入与导出) 引擎全功能单元测试

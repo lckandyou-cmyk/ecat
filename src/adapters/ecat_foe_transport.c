@@ -1,3 +1,4 @@
+#include "../ecat_foe_core_internal.h"
 /* FoE bridge to the unified transfer manager. */
 #include "ecat_foe_transport.h"
 #include <string.h>

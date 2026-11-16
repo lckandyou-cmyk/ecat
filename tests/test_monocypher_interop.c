@@ -1,3 +1,4 @@
+#include "test_core_helpers.h"
 /* Real CLI-to-core Ed25519ph integration; Monocypher is supplied externally.
  * 边界说明: 本测试链接外部固定 Monocypher 4.0.3 密码学库，验证真实私钥签名与端到端密码学公钥验签；
  * 常规单元测试 (如 test_core.c, test_transfer_bidirectional.c) 使用 mock_signature 回调验证状态机与生命周期契约。
@@ -78,7 +79,7 @@ static int receive(const uint8_t *package, size_t size,
     ecat_foe_core_t core;
     assert(ecat_foe_core_init(&core, &cfg) == 0);
     const char *name = "INTEROP_MCU_V1.2.3.4.efw";
-    assert(ecat_foe_core_on_wrq(&core, name, strlen(name)) == 0);
+    assert(test_core_begin_filename(&core, name, strlen(name)) == 0);
     driver->inject_corrupt_read = corrupt_readback;
     for (size_t pos = 0; pos < size;) {
         size_t n = (size - pos > 37U) ? 37U : size - pos;

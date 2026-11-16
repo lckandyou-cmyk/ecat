@@ -1,3 +1,4 @@
+#include "../ecat_foe_core_internal.h"
 /**
  * @file ecat_foe_ssc.c
  * @brief Beckhoff SSC (Slave Stack Code) 协议栈适配层实现

@@ -1,3 +1,4 @@
+#include "test_core_helpers.h"
 /**
  * @file test_soes_real_harness.c
  * @brief 真实 SOES esc_foe.c 宿主独立测试 Harness
@@ -2116,7 +2117,7 @@ int main(void)
             assert(ver == 0x01000000U);
 
             /* 事实核验 B: 防回滚真正且严格在数据阶段解析已签名的固件头时执行 */
-            assert(ecat_foe_core_on_wrq(&core, low_ver_fn, strlen(low_ver_fn)) == 0);
+            assert(test_core_begin_filename(&core, low_ver_fn, strlen(low_ver_fn)) == 0);
             /* 模拟固件头写入，内部由 mock platform_port 提供防回滚下限 */
             assert(core.state == ECAT_FOE_STATE_WRQ_ACKED);
 

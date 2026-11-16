@@ -1,3 +1,4 @@
+#include "test_core_helpers.h"
 #include "ecat_foe_core_async.h"
 #include "ecat_foe_ssc.h"
 #include "mock_driver.h"
@@ -521,13 +522,13 @@ int main(void)
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_core_async_init(&session, &core, async_packet,
           sizeof(async_packet), operation_storage, sizeof(operation_storage)) == 0);
-    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(test_core_begin_filename(&core, name, sizeof(name) - 1U) == 0);
     CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
     ecat_foe_core_on_abort(&core);
     CHECK(sync_flash.count_abort == 1U);
-    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(test_core_begin_filename(&core, name, sizeof(name) - 1U) == 0);
     CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
-    CHECK(ecat_foe_core_on_wrq(&core, name, sizeof(name) - 1U) == 0);
+    CHECK(test_core_begin_filename(&core, name, sizeof(name) - 1U) == 0);
     CHECK(sync_flash.count_abort == 2U);
     CHECK(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN) == 0);
     CHECK(ecat_foe_core_deinit(&core) == 0);

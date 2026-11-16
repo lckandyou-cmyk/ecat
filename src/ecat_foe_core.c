@@ -1,3 +1,4 @@
+#include "ecat_foe_core_internal.h"
 /**
  * @file ecat_foe_core.c
  * @brief EtherCAT FoE 核心升级状态机实现 (依据 SAD-v0.1 第 1、3、4 节)
@@ -416,48 +417,6 @@ ecat_foe_core_err_t ecat_foe_core_begin_request(
     core->req_fw_version = request->fw_version;
     core->state = ECAT_FOE_STATE_WRQ_ACKED;
     return ECAT_FOE_CORE_OK;
-}
-
-int ecat_foe_core_on_wrq(ecat_foe_core_t *core, const char *filename, size_t filename_len)
-{
-    if (core == NULL || filename == NULL) {
-        return ECAT_FOE_ERRCODE_NOTDEFINED;
-    }
-
-    /* 若核心机配置未通过校验，坚决拒绝一切操作 */
-    if (!core->is_configured) {
-        core->last_error = ECAT_FOE_CORE_ERR_INVALID_STATE;
-        return ECAT_FOE_ERRCODE_NOTDEFINED;
-    }
-
-    /* 新会话自愈规则: 若上一个会话残留未闭环 (且未执行过 abort/finalize)，先调驱动 abort() */
-    if (core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
-        if (core->async_abort_hook != NULL) {
-            core->async_abort_hook(core->async_abort_ctx);
-        }
-        core_abort_driver(core);
-    }
-    /* 每次新 WRQ 必须重置会话级运行字段，完整保留核心配置与驱动生命周期 */
-    core_reset_session(core);
-
-    uint16_t parsed_tid = 0;
-    uint32_t parsed_ver = 0;
-    int vrc = ecat_foe_core_validate_wrq(core, filename, filename_len, &parsed_tid, &parsed_ver);
-    if (vrc != 0) {
-        if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
-            core->last_error = ECAT_FOE_CORE_ERR_WRQ_INVALID_NAME;
-        } else {
-            ecat_foe_core_err_t err = ECAT_FOE_CORE_OK;
-            parse_filename_reverse(filename, filename_len, core->local_project_name, &parsed_tid, &parsed_ver, &err);
-            core->last_error = (err != ECAT_FOE_CORE_OK) ? err : ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
-        }
-        core->state = ECAT_FOE_STATE_ERROR;
-        return vrc;
-    }
-
-    ecat_upgrade_request_t request = {parsed_tid, parsed_ver};
-    ecat_foe_core_err_t error = ecat_foe_core_begin_request(core, &request);
-    return ecat_foe_core_err_to_foe(error, true, false);
 }
 
 static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payload_data, size_t payload_len)

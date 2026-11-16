@@ -1,3 +1,4 @@
+#include "ecat_foe_core_internal.h"
 /**
  * @file ecat_transfer.c
  * @brief 嵌入式多通道双向传输管理器实现

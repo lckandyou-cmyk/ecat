@@ -1,3 +1,4 @@
+#include "ecat_foe_core_internal.h"
 #include "ecat_foe_core_async.h"
 
 #include <string.h>
