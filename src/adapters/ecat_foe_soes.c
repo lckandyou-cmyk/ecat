@@ -176,6 +176,7 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
         return vrc;
     }
     if (soes_target_is_async(adapter, tid)) {
+        ecat_foe_transport_abort(&adapter->transport);
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     return ecat_foe_transport_begin(&adapter->transport, filename, filename_len);

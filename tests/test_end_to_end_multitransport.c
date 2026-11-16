@@ -608,6 +608,8 @@ int main(void)
 
     /* D0.3: 在 FoE 拒绝异步目标的同时，其他有能力的通道 (UART 端点) 仍可正常异步访问目标 5 */
     assert(ecat_transport_endpoint_begin_import(&ep_uart, 5U, 64, 0) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_fpga_fn, strlen(soes_fpga_fn)) != 0);
+    assert(ecat_transport_endpoint_is_active(&ep_uart));
     ecat_transport_endpoint_abort(&ep_uart);
     assert(ecat_transfer_is_active(&mgr) == false);
 
@@ -634,6 +636,11 @@ int main(void)
     /* 写入第 1 块 (128 字节，全长包) */
     assert(ecat_foe_soes_write_cb(NULL, fw_buf, 128U) == 0U);
     assert(ecat_transfer_is_active(&mgr) == true);
+    /* 拒绝异步目标的新 WRQ 时，必须清理本适配器持有的旧会话。 */
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_fpga_fn, strlen(soes_fpga_fn)) != 0);
+    assert(ecat_transfer_is_active(&mgr) == false);
+    assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+    assert(ecat_foe_soes_write_cb(NULL, fw_buf, 128U) == 0U);
     /* 写入第 2 块 (52 字节 < 128U，短包触发 finalize 提交) */
     assert(ecat_foe_soes_write_cb(NULL, fw_buf + 128U, 52U) == 0U);
     /* 校验写入数据一致性与会话干净释放 */
