@@ -236,15 +236,6 @@ static const ecat_async_data_ops_t s_foe_staged_ops = {
 };
 
 typedef struct {
-    ecat_upgrade_async_result_t poll_res;
-    uint8_t received[128];
-    size_t received_len;
-    unsigned write_calls;
-} foe_staged_upg_mock_t;
-
-static foe_staged_upg_mock_t s_mock_staged_upg_ctx;
-
-typedef struct {
     ecat_async_op_result_t erase_start_res;
     ecat_async_op_result_t erase_poll_res;
     ecat_async_op_result_t write_start_res;
@@ -314,32 +305,6 @@ static const ecat_async_data_ops_t s_tr_overlap_ops = {
     .start = tr_overlap_start,
     .poll = tr_overlap_poll,
     .abort = tr_overlap_abort
-};
-
-static ecat_upgrade_async_result_t foe_staged_upg_start(void *ctx, const uint8_t *data, size_t length, bool more_data) {
-    foe_staged_upg_mock_t *m = (foe_staged_upg_mock_t *)ctx;
-    (void)more_data;
-    m->write_calls++;
-    m->received_len = length;
-    if (length <= sizeof(m->received) && data != NULL) {
-        memcpy(m->received, data, length);
-    }
-    return ECAT_UPGRADE_ASYNC_COMPLETE;
-}
-
-static ecat_upgrade_async_result_t foe_staged_upg_poll(void *ctx) {
-    foe_staged_upg_mock_t *m = (foe_staged_upg_mock_t *)ctx;
-    return m->poll_res;
-}
-
-static void foe_staged_upg_abort(void *ctx) {
-    (void)ctx;
-}
-
-static const ecat_upgrade_async_ops_t s_foe_staged_upg_ops = {
-    .start = foe_staged_upg_start,
-    .poll = foe_staged_upg_poll,
-    .abort = foe_staged_upg_abort
 };
 
 static test_async_data_hardware_t s_hw_stage_test;
@@ -805,6 +770,18 @@ int main(void)
 
     /* 旧令牌已失效 */
     assert(ecat_transfer_write(&manager, &channel_uart, token1, sample_params, 10) == ECAT_TRANSFER_STALE);
+
+    /* Invalid input remains retryable; only the owner can cancel the session. */
+    reset_mock_flags();
+    assert(ecat_transfer_begin(&manager, &channel_uart, &import_req, &token1) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_write(&manager, &channel_can, token1, NULL, 1U) == ECAT_TRANSFER_STALE);
+    assert(!g_abort_called);
+    assert(ecat_transfer_write(&manager, &channel_uart, token1, NULL, 1U) == ECAT_TRANSFER_INVALID);
+    assert(!g_abort_called);
+    assert(ecat_transfer_cancel(&manager, &channel_uart, token1) == ECAT_TRANSFER_COMPLETE);
+    assert(g_abort_called);
+    assert(ecat_transfer_begin(&manager, &channel_can, &import_req, &token1) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&manager, &channel_can, token1) == ECAT_TRANSFER_COMPLETE);
 
     /* ---------------------------------------------------------------------- */
     /* 2. 测试数据导出 (EXPORT): 回读系统日志                                 */
@@ -1315,20 +1292,21 @@ int main(void)
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, sess_tok) == ECAT_TRANSFER_COMPLETE);
     assert(core.cfg.targets[0].max_payload_size == 1024U);
 
-    /* 验证 Issue 4: 统一旧升级入口 (ecat_upgrade_t) 与新传输管理器的会话仲裁与 ACL */
-    printf("--- 测试 Issue 4: 统一旧升级入口与新管理器的会话仲裁与 ACL ---\n");
+    /* 验证 Issue 4: 统一传输管理器的会话仲裁与 ACL */
+    printf("--- 测试 Issue 4: 统一传输管理器的会话仲裁与 ACL ---\n");
     ecat_foe_core_on_abort(&core);
-    ecat_upgrade_t old_mgr;
-    assert(ecat_upgrade_init(&old_mgr, &core) == 0);
+    ecat_transfer_t peer_mgr;
+    assert(ecat_transfer_init(&peer_mgr, &reg, &core) == 0);
     ecat_upgrade_request_t old_req = {
         .target_id = 1U,
         .fw_version = 0x01020304U
     };
+    ecat_transfer_request_t peer_req = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01020304U};
     uint64_t old_token = 0;
-    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_begin(&peer_mgr, &channel_can, &peer_req, &old_token) == ECAT_TRANSFER_COMPLETE);
     assert(old_token != 0);
 
-    /* 4.1 旧入口活动期间，新管理器对共享 core 发起请求必须返回 BUSY */
+    /* 4.1 另一入口活动期间，本管理器对共享 core 发起请求必须返回 BUSY */
     uint64_t new_token = 0;
     ecat_transfer_request_t new_req = {
         .transport_id = 1U,
@@ -1338,36 +1316,36 @@ int main(void)
         .fw_version = 0x01020304U
     };
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
-    /* 新管理器无法取消旧入口会话 */
+    /* 本管理器无法取消另一入口会话 */
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, old_token) == ECAT_TRANSFER_STALE);
-    assert(ecat_upgrade_session_owns_mgr(old_mgr.session_ptr, &old_mgr, &channel_can, old_token));
+    assert(ecat_upgrade_session_owns_mgr(peer_mgr.session_ptr, &peer_mgr, &channel_can, old_token));
     /* 验证旧接口 release 无法绕过管理器身份检查 */
-    assert(ecat_upgrade_session_release(old_mgr.session_ptr, &channel_can, old_token) == ECAT_UPGRADE_SESSION_STALE);
+    assert(ecat_upgrade_session_release(peer_mgr.session_ptr, &channel_can, old_token) == ECAT_UPGRADE_SESSION_STALE);
 
-    /* 释放旧入口会话 */
-    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
+    /* 释放另一入口会话 */
+    assert(ecat_transfer_cancel(&peer_mgr, &channel_can, old_token) == ECAT_TRANSFER_COMPLETE);
 
-    /* 4.2 反向仲裁: 新管理器活动期间，旧入口发起请求必须返回 BUSY */
+    /* 4.2 反向仲裁: 本管理器活动期间，另一入口发起请求必须返回 BUSY */
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
     assert(new_token != 0);
     uint64_t dummy_old_token = 0;
-    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &dummy_old_token) == ECAT_UPGRADE_BUSY);
-    /* 旧入口无法取消新管理器持有的会话 */
-    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, new_token) == ECAT_UPGRADE_STALE);
+    assert(ecat_transfer_begin(&peer_mgr, &channel_can, &peer_req, &dummy_old_token) == ECAT_TRANSFER_BUSY);
+    /* 另一入口无法取消本管理器持有的会话 */
+    assert(ecat_transfer_cancel(&peer_mgr, &channel_can, new_token) == ECAT_TRANSFER_STALE);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
 
     /* 4.3 真实 FoE 传输适配器 (ecat_foe_transport_t) 仲裁竞争测试 */
     ecat_foe_transport_t foe_tr;
-    assert(ecat_foe_transport_init(&foe_tr, &old_mgr) == 0);
+    assert(ecat_foe_transport_init_transfer(&foe_tr, &fw_manager) == 0);
     const char *wrq_name = "TEST_PROJ_MCU_V1.2.3.4.efw";
     size_t wrq_name_len = strlen(wrq_name);
 
-    /* 新管理器占有时，FoE 适配器 begin 返回 wire error (ECAT_FOE_ERRCODE_NOTDEFINED) */
+    /* 本管理器占有时，FoE 适配器 begin 返回 wire error (ECAT_FOE_ERRCODE_NOTDEFINED) */
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == ECAT_FOE_ERRCODE_NOTDEFINED);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
 
-    /* FoE 适配器激活时，新管理器 begin 返回 BUSY */
+    /* FoE 适配器激活时，本管理器 begin 返回 BUSY */
     assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == 0);
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
     ecat_foe_transport_abort(&foe_tr);
@@ -1375,34 +1353,37 @@ int main(void)
     /* 4.4 真实文件传输适配器 (ecat_upgrade_file_t) 仲裁竞争测试 */
     uint8_t file_buf[128];
     ecat_upgrade_file_t file_tr;
-    assert(ecat_upgrade_file_init(&file_tr, &old_mgr, file_buf, sizeof(file_buf)) == 0);
+    assert(ecat_upgrade_file_init_transfer(&file_tr, &fw_manager, file_buf, sizeof(file_buf)) == 0);
+    size_t file_acl_count = reg.acl_rule_count;
+    assert(ecat_target_registry_add_acl(&reg, 2U, 1U, ECAT_PERM_WRITE) == 0);
     FILE *dummy_file = tmpfile();
     assert(dummy_file != NULL);
 
-    /* 新管理器占有时，File 适配器 begin 返回 BUSY */
+    /* 本管理器占有时，File 适配器 begin 返回 BUSY */
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_BUSY);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, new_token) == ECAT_TRANSFER_COMPLETE);
 
-    /* File 适配器激活时，新管理器 begin 返回 BUSY */
+    /* File 适配器激活时，本管理器 begin 返回 BUSY */
     assert(ecat_upgrade_file_begin(&file_tr, dummy_file, &old_req) == ECAT_UPGRADE_COMPLETE);
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &new_req, &new_token) == ECAT_TRANSFER_BUSY);
     assert(ecat_upgrade_file_cancel(&file_tr) == ECAT_UPGRADE_COMPLETE);
     fclose(dummy_file);
+    reg.acl_rule_count = file_acl_count;
 
-    /* 4.5 统一 ACL 管控: 旧入口及适配器不能绕过注册表权限管控 */
+    /* 4.5 统一 ACL 管控: 另一入口及适配器不能绕过注册表权限管控 */
     size_t saved_rule_cnt = reg.acl_rule_count;
     reg.acl_rule_count = 0;
     ecat_target_registry_set_enforce_acl(&reg, true);
-    /* 此时未向 FoE (transport_id=1) 配置 Target 1 的写权限，旧入口必须被拦截 */
-    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_FAILED);
-    assert(old_mgr.last_error == ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED);
+    /* 此时未向 FoE (transport_id=1) 配置 Target 1 的写权限，另一入口必须被拦截 */
+    assert(ecat_transfer_begin(&peer_mgr, &channel_can, &peer_req, &old_token) == ECAT_TRANSFER_DENIED);
+    assert(peer_mgr.last_error == ECAT_TRANSFER_ERR_PERMISSION_DENIED);
     assert(ecat_foe_transport_begin(&foe_tr, wrq_name, wrq_name_len) == ECAT_FOE_ERRCODE_NOTDEFINED);
 
     /* 恢复 ACL 白名单授权 FoE (ID=1) 对 Target 1 写入 */
     reg.acl_rule_count = saved_rule_cnt;
-    assert(ecat_upgrade_begin(&old_mgr, &channel_can, &old_req, &old_token) == ECAT_UPGRADE_COMPLETE);
-    assert(ecat_upgrade_cancel(&old_mgr, &channel_can, old_token) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_begin(&peer_mgr, &channel_can, &peer_req, &old_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&peer_mgr, &channel_can, old_token) == ECAT_TRANSFER_COMPLETE);
     ecat_target_registry_set_enforce_acl(&reg, false);
 
     /* 4.6 多传输管理器绑定权威注册表契约: 严禁后发管理器静默篡改核心权威注册表 */
@@ -1732,45 +1713,16 @@ int main(void)
     assert(mgr_second.active == true);
     assert(ecat_transfer_cancel(&mgr_second, &client_owner2, lease_tok2) == ECAT_TRANSFER_COMPLETE);
 
-    /* 9.2 transfer 管理器与 upgrade 管理器交叉调用隔离 */
-    ecat_upgrade_t upg_mgr;
-    assert(ecat_upgrade_init(&upg_mgr, &core) == 0);
-
-    /* 场景 A: transfer 管理器持租，在 upgrade 管理器上调用全部操作必须返回 STALE */
-    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &shared_req, &lease_tok1) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_upgrade_write(&upg_mgr, &client_owner1, lease_tok1, dummy_buf, sizeof(dummy_buf)) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_finish(&upg_mgr, &client_owner1, lease_tok1) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, lease_tok1) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner2, lease_tok1) == ECAT_UPGRADE_STALE);
-
-    /* upgrade 管理器尝试 begin 必须返回 BUSY */
-    ecat_upgrade_request_t upg_req = { .target_id = 1U, .fw_version = 0x01000000U };
+    /* Firmware and data requests on separate handles still share the lease. */
+    ecat_transfer_request_t upg_req = {1U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, 0x01000000U};
     uint64_t upg_tok = 0;
-    assert(ecat_upgrade_begin(&upg_mgr, &client_owner2, &upg_req, &upg_tok) == ECAT_UPGRADE_BUSY);
-    assert(mgr_first.active == true);
+    assert(ecat_transfer_begin(&mgr_first, &client_owner1, &shared_req, &lease_tok1) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_begin(&mgr_second, &client_owner2, &upg_req, &upg_tok) == ECAT_TRANSFER_BUSY);
     assert(ecat_transfer_cancel(&mgr_first, &client_owner1, lease_tok1) == ECAT_TRANSFER_COMPLETE);
-
-    /* 场景 B: upgrade 管理器持租，在 transfer 管理器上调用全部操作必须返回 STALE */
-    assert(ecat_upgrade_begin(&upg_mgr, &client_owner1, &upg_req, &upg_tok) == ECAT_UPGRADE_COMPLETE);
-    assert(ecat_transfer_write(&mgr_first, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf)) == ECAT_TRANSFER_STALE);
-    assert(ecat_transfer_read(&mgr_first, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf), &dummy_actual) == ECAT_TRANSFER_STALE);
-    assert(ecat_transfer_finish(&mgr_first, &client_owner1, upg_tok) == ECAT_TRANSFER_STALE);
+    assert(ecat_transfer_begin(&mgr_second, &client_owner1, &upg_req, &upg_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_cancel(&mgr_first, &client_owner1, upg_tok) == ECAT_TRANSFER_STALE);
     assert(ecat_transfer_begin(&mgr_first, &client_owner2, &shared_req, &lease_tok1) == ECAT_TRANSFER_BUSY);
-    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, upg_tok) == ECAT_UPGRADE_COMPLETE);
-
-    /* 9.3 两个 upgrade 管理器共享同一个 core: 非发起管理器调用必须返回 STALE */
-    ecat_upgrade_t upg_second;
-    assert(ecat_upgrade_init(&upg_second, &core) == 0);
-    assert(ecat_upgrade_begin(&upg_mgr, &client_owner1, &upg_req, &upg_tok) == ECAT_UPGRADE_COMPLETE);
-    assert(ecat_upgrade_write(&upg_second, &client_owner1, upg_tok, dummy_buf, sizeof(dummy_buf)) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_finish(&upg_second, &client_owner1, upg_tok) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_cancel(&upg_second, &client_owner1, upg_tok) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_cancel(&upg_second, &client_owner2, upg_tok) == ECAT_UPGRADE_STALE);
-    assert(ecat_upgrade_begin(&upg_second, &client_owner2, &upg_req, &lease_tok2) == ECAT_UPGRADE_BUSY);
-    assert(ecat_upgrade_cancel(&upg_mgr, &client_owner1, upg_tok) == ECAT_UPGRADE_COMPLETE);
-    assert(ecat_upgrade_begin(&upg_second, &client_owner2, &upg_req, &lease_tok2) == ECAT_UPGRADE_COMPLETE);
-    assert(ecat_upgrade_cancel(&upg_second, &client_owner2, lease_tok2) == ECAT_UPGRADE_COMPLETE);
+    assert(ecat_transfer_cancel(&mgr_second, &client_owner1, upg_tok) == ECAT_TRANSFER_COMPLETE);
 
     printf("--- 测试 Section 10: 真正非阻塞异步双向传输与统一状态机 (Async DATA / FIRMWARE) ---\n");
     /* 10.1 异步目标缺失异步驱动时在 begin 阶段必须被严格拒绝，无任何副作用 */
@@ -2938,10 +2890,10 @@ int main(void)
     }
 
     /* ---------------------------------------------------------------------- */
-    /* 10.16 FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支) */
+    /* 10.16 FoE 适配桥首包暂存重叠内存防御与安全拷贝 */
     /* ---------------------------------------------------------------------- */
     {
-        printf("--- 测试 10.16: FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支) ---\n");
+        printf("--- 测试 10.16: FoE 适配桥首包暂存重叠内存防御与安全拷贝 ---\n");
 
         ecat_foe_core_t local_core;
         ecat_foe_core_cfg_t local_cfg;
@@ -3070,100 +3022,7 @@ int main(void)
             ecat_foe_transport_abort(&foe_tr);
         }
 
-        /* 2. Upgrade 分支下的重叠/相同/独立缓冲区测试 */
-        {
-            memset(&s_mock_staged_upg_ctx, 0, sizeof(s_mock_staged_upg_ctx));
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
-
-            ecat_upgrade_t upg;
-            memset(&upg, 0, sizeof(upg));
-            upg.core = &local_core;
-            upg.asynchronous = true;
-            upg.pending = true;
-            upg.async_ops = &s_foe_staged_upg_ops;
-            upg.async_ctx = &s_mock_staged_upg_ctx;
-
-            ecat_foe_transport_t foe_tr_upg;
-            memset(&foe_tr_upg, 0, sizeof(foe_tr_upg));
-            foe_tr_upg.upgrade = &upg;
-
-            uint8_t buffer[256];
-            uint8_t expected[64];
-            uint8_t separate[64];
-            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
-            for (size_t i = 0; i < 64; i++) separate[i] = (uint8_t)(0x90 + i);
-
-            /* Case 2A: 前向部分重叠 (staged_buf < data && staged_buf + len > data) */
-            memcpy(expected, &buffer[16], 64);
-            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
-            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
-            foe_tr_upg.pending = true;
-            foe_tr_upg.begin_pending = true;
-            upg.pending = true;
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
-
-            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[16], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
-            assert(foe_tr_upg.has_staged_packet == true);
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
-            assert(s_mock_staged_upg_ctx.received_len == 64U);
-            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
-            ecat_foe_transport_abort(&foe_tr_upg);
-
-            /* Case 2B: 后向部分重叠 (data < staged_buf && data + len > staged_buf) */
-            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
-            memcpy(expected, &buffer[0], 64);
-            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[16], 128) == 0);
-            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
-            foe_tr_upg.pending = true;
-            foe_tr_upg.begin_pending = true;
-            upg.pending = true;
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
-
-            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
-            assert(foe_tr_upg.has_staged_packet == true);
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
-            assert(s_mock_staged_upg_ctx.received_len == 64U);
-            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
-            ecat_foe_transport_abort(&foe_tr_upg);
-
-            /* Case 2C: 完全相同地址 (staged_buf == data) */
-            for (size_t i = 0; i < 256; i++) buffer[i] = (uint8_t)(i + 1);
-            memcpy(expected, &buffer[0], 64);
-            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
-            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
-            foe_tr_upg.pending = true;
-            foe_tr_upg.begin_pending = true;
-            upg.pending = true;
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
-
-            assert(ecat_foe_transport_start(&foe_tr_upg, &buffer[0], 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
-            assert(foe_tr_upg.has_staged_packet == true);
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
-            assert(s_mock_staged_upg_ctx.received_len == 64U);
-            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
-            ecat_foe_transport_abort(&foe_tr_upg);
-
-            /* Case 2D: 完全独立不重叠缓冲区 */
-            memcpy(expected, separate, 64);
-            assert(ecat_foe_transport_set_staged_buffer(&foe_tr_upg, &buffer[0], 128) == 0);
-            assert(ecat_upgrade_session_acquire_mgr(&upg.session, &upg, &foe_tr_upg, &foe_tr_upg.token) == ECAT_UPGRADE_SESSION_OK);
-            foe_tr_upg.pending = true;
-            foe_tr_upg.begin_pending = true;
-            upg.pending = true;
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_PENDING;
-
-            assert(ecat_foe_transport_start(&foe_tr_upg, separate, 64, true) == ECAT_UPGRADE_ASYNC_PENDING);
-            assert(foe_tr_upg.has_staged_packet == true);
-            s_mock_staged_upg_ctx.poll_res = ECAT_UPGRADE_ASYNC_COMPLETE;
-            assert(ecat_foe_transport_poll(&foe_tr_upg) == ECAT_UPGRADE_ASYNC_COMPLETE);
-            assert(s_mock_staged_upg_ctx.received_len == 64U);
-            assert(memcmp(s_mock_staged_upg_ctx.received, expected, 64) == 0);
-            ecat_foe_transport_abort(&foe_tr_upg);
-        }
-        printf("  [PASS] FoE 适配桥首包暂存重叠内存防御与安全拷贝 (Transfer 与 Upgrade 双分支 8 项场景) 全部通过\n");
+        printf("  [PASS] FoE 适配桥首包暂存重叠内存防御与安全拷贝 (4 项场景) 全部通过\n");
     }
 
     /* ---------------------------------------------------------------------- */
