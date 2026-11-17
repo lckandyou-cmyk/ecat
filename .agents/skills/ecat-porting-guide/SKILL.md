@@ -38,8 +38,9 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 移植时应先确认以下核心行为及其适用边界：
 
 1. **无动态内存的核心实现**：FoE 升级状态机与容器解析核心使用纯 C99 且不调用动态内存分配。移植层和协议栈仍需自行管理各自的资源；实际 RAM/Flash 占用需在目标工具链上测量；
-2. **写入范围由本地分区配置决定**：升级核心不使用 FoE 请求或固件头提供的物理写地址。目标驱动仍必须校验本地分区范围、偏移加法溢出及介质约束；正确配置和边界检查是防止越界写入的必要条件，不等于固件真实性验证；
-3. **先失效、校验后提交**：在擦除目标镜像前将其有效状态置为无效；仅在接收完成且流 CRC 与介质回读 CRC 一致、启用验签时签名也验证通过后提交。实际掉电安全性取决于目标驱动和元数据写入设计。
+2. **单一权威目标注册表与静态 ABI 防护**：固件（`ECAT_TARGET_TYPE_FIRMWARE`）与普通数据（`ECAT_TARGET_TYPE_DATA`）目标统一在单个 `ecat_target_registry_t` 中注册，支持 `1..65535` 任意非零稀疏目标 ID（`1..4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 唯一规范名为大写四位十六进制 `T0005`～`TFFFF`），总槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 静态限制。公开头内建编译期 ABI 链接符号（`ecat_target_registry_abi_v2_...`、`ecat_foe_config_abi_v3_...`），若覆盖容量或配置宏，所有编译单元须使用完全一致的宏定义，否则链接期将有意报错阻断混链；
+3. **写入范围由本地分区配置决定**：升级核心不使用 FoE 请求或固件头提供的物理写地址。目标驱动仍必须校验本地分区范围、偏移加法溢出及介质约束；正确配置和边界检查是防止越界写入的必要条件，不等于固件真实性验证；
+4. **先失效、校验后提交**：在擦除目标镜像前将其有效状态置为无效；仅在接收完成且流 CRC 与介质回读 CRC 一致、启用验签时签名也验证通过后提交。实际掉电安全性取决于目标驱动和元数据写入设计。
 
 ---
 
@@ -139,7 +140,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 
 ## 4. 目标存储 Flash 驱动生命周期与契约
 
-用户对接同步目标存储驱动时，应以当前 `ecat_foe_target_driver_t` 接口为准实现所需回调（参考 `examples/bootloader_soes/bootloader_flash_driver.c`），并遵守以下生命周期契约。启用防回滚时还必须实现联合提交回调；不要把示例驱动当成已经验证的真实板级实现。
+用户通过 `ecat_target_desc_t` 将固件目标注册进 `ecat_target_registry_t`（`type = ECAT_TARGET_TYPE_FIRMWARE`，填写 `target_id`、`max_size`、`write_unit`）。对接同步目标存储驱动时，在 `driver.fw_ops` / `driver.user_ctx` 中按 `ecat_foe_target_driver_t` 接口实现所需回调（参考 `examples/bootloader_soes/bootloader_flash_driver.c`）；对接异步固件目标时，置 `asynchronous = true` 并在 `driver.fw_async_ops` / `driver.fw_async_user_ctx` 中实现 `ecat_foe_target_async_ops_t`。启用防回滚时还必须实现联合提交回调；不要把示例驱动当成已经验证的真实板级实现。
 
 ```text
   [WRQ 通过] -> 接收并校验完整固件头（包括启用时的防回滚检查）
@@ -165,7 +166,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 ```
 
 ### 4.1 关键契约细则
-1. **`init()` 失败自行清理**：若初始化返回非零失败，驱动自行清理资源，核心机设计规则为不调用 `abort()`；
+1. **`init()` 失败清理边界**：同步路径下初始化返回非零失败时，驱动自行清理资源，核心机不调用 `abort()`。异步固件路径下默认（`async_safe_session_abort = false`）当 `start(INIT)` 立即返回 `FAILED` 时同样由驱动自行回滚半成品资源、框架不调用 `abort_session()`；仅当驱动显式声明 `async_safe_session_abort = true`（承诺尚未执行 `invalidate` 前调用 `abort_session` 绝不破坏旧有效镜像）时，框架才会在 `INIT` 立即失败时统一调用一次 `abort_session()`；
 2. **`init()` 成功后异常恰好调用一次 `abort()`**：驱动一旦初始化成功，后续任何阶段失败（擦除、写入、校验或主站中止），核心机调用且仅调用一次 `abort()` 恢复外设安全态；
 3. **`invalidate()` 早于擦除执行**：在擦除任何物理扇区前先清除有效标记，防止中途掉电时留下被破坏却带有有效标记的固件；
 4. **`erase_to()` 按需推进**：根据写入进度向上按扇区粒度对齐擦除，未执行 `invalidate` 前拒绝擦除，避免一次性全片擦除耗时过长；
@@ -184,7 +185,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 
 ### 5.1 Simple Open EtherCAT Slave (SOES) 接入规范
 - **适配层源码**：`src/adapters/ecat_foe_soes.c` 与 `include/ecat_foe_soes.h`；
-- **统一会话**：先初始化目标注册表和 `ecat_transfer_t`，再将 SOES 适配器通过 `ecat_foe_soes_bind_transfer` 绑定；未绑定时请求会被拒绝。
+- **统一会话与生命周期**：依次初始化 `ecat_target_registry_t`（注册目标描述符）、固件核心 `ecat_foe_core_init`（`cfg.registry = &registry`）与 `ecat_transfer_init(&transfer, &registry, &core)`，再调用 `ecat_foe_soes_init` 并通过 `ecat_foe_soes_bind_transfer` 绑定；未绑定时请求会被拒绝。`foe_cfg->files[]` 中的动态文件名指针指向 `ecat_foe_soes_adapter_t.synced_filenames` 内部缓冲，适配器实例生命周期必须覆盖 `foe_cfg->files[]` 的整个访问期。核心注册表允许混合定义同步与异步目标，但原生 SOES 为纯同步模型，命中异步目标的 FoE 请求会在前置钩子处直接以 `0x8001 (NOTFOUND)` 拒绝。
 - **接入架构**：**前后置邮箱嗅探与中和钩子架构**：
   1. `ecat_foe_soes_pre_process_hook`：在 SOES 协议栈处理前嗅探接收邮箱中的 WRQ，并对核心状态与驱动无副作用地预检文件名和元数据；钩子会暂存 WRQ，并临时调整 SOES 文件表条目/计数以路由请求，随后由后置流程恢复文件计数；
   2. `ESC_foeprocess()`：SOES 原生进程处理，校验密码与 BOOT 态并排队响应；
@@ -196,15 +197,15 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 - **适配层源码**：`src/adapters/ecat_foe_ssc.c` 与 `include/ecat_foe_ssc.h`；
 - **FoE 密码**：SSC 适配器检查本地预期密码，默认值为 0；如需非零密码，须在接收 WRQ 前配置并在目标 SSC 与 TwinCAT 上联调。FoE 密码不是密码学固件认证。
 - **运行模式**：
-  1. **同步模式**：初始化目标注册表和 `ecat_transfer_t`，调用 `ecat_foe_ssc_init` 后通过 `ecat_foe_ssc_bind_transfer` 绑定同一个管理器；`ecat_foe_ssc_on_data` 经管理器调用同步目标驱动。须测量目标驱动最坏耗时及主站/协议栈限制；
-  2. **异步路径**：配置异步固件目标后，用 `ecat_foe_core_async_init` 建立静态缓冲会话，并用 `ecat_transfer_init_async_firmware(&transfer, &session)` 绑定。先初始化 SSC adapter，再用 `ecat_foe_transport_async_ops()` 和 `&adapter.transport` 初始化 gate，最后通过 `ecat_foe_ssc_bind_transfer` 绑定管理器。SSC DATA handler 传入真实 `bDataFollowing`，主循环周期调用 `ecat_foe_ssc_on_main_loop`。pending 包只在相同包重试时确认；结束包须等回读 CRC 与 finalize 成功。该路径有宿主契约测试，真实 SSC 与板侧行为仍需实测。
+  1. **同步模式**：依次初始化 `ecat_target_registry_t`、`ecat_foe_core_t`（`cfg.registry = &registry`）与 `ecat_transfer_t`，调用 `ecat_foe_ssc_init` 后通过 `ecat_foe_ssc_bind_transfer` 绑定同一个管理器；`ecat_foe_ssc_on_data` 经管理器调用同步目标驱动。须测量目标驱动最坏耗时及主站/协议栈限制；
+  2. **异步路径**：在 `ecat_target_registry_t` 中为异步固件目标配置 `asynchronous = true` 与 `driver.fw_async_ops` / `driver.fw_async_user_ctx`，初始化 `ecat_foe_core_t` 与 `ecat_transfer_t`，用 `ecat_foe_core_async_init` 建立静态缓冲会话，并用 `ecat_transfer_init_async_firmware(&transfer, &session)` 绑定且配置独立传输暂存区。先初始化 SSC adapter，再用 `ecat_foe_transport_async_ops()` 和 `&adapter.transport` 初始化 gate，最后通过 `ecat_foe_ssc_bind_transfer` 绑定管理器。SSC DATA handler 传入真实 `bDataFollowing`，主循环周期调用 `ecat_foe_ssc_on_main_loop`。pending 包只在相同包重试时确认；结束包须等回读 CRC 与 finalize 成功。该路径有宿主契约测试，真实 SSC 与板侧行为仍需实测。
 
 ### 5.3 ESC 芯片与 Mailbox SyncManager 配置生命周期管理
 1. **按状态核实 Mailbox/SyncManager 配置**：
    - BOOT 与 PRE-OP / SAFE-OP / OP 状态下的邮箱大小、地址和 SyncManager 分配由 ESC、协议栈及设备描述配置决定，不能假定 BOOT 邮箱固定为 1024 字节或状态切换时必然缩减；
    - 分别核对 Bootloader 与 APP 使用的 ESC 内存布局，并确认 FoE 请求/响应容量与过程数据区域不冲突；
-2. **EEPROM (SII) 保护**：
-   - 本库可将 FoE 目标映射到本地配置的 MCU、FPGA 或 EEPROM 存储。SII/ESC 配置 EEPROM 是否开放为升级目标必须显式设计和启用；不要把修改 SII 配置与 MCU 固件 FoE 下载混为一谈，误写 SII 可能导致从站配置异常。
+2. **EEPROM (SII) 保护与扩展目标**：
+   - 本库支持将 `1..65535` 任意非零 FoE 固件目标映射到本地注册的存储分区（`1..4` 为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 为 `T0005`～`TFFFF`；`efw_pack.py --foe-packet-size` 的双字节 `0xFF` 尾对齐仅作用于 `target_id == 3` 的 `SII` 目标）。SII/ESC 配置 EEPROM 是否开放为升级目标必须显式设计和启用；不要把修改 SII 配置与 MCU 固件 FoE 下载混为一谈，误写 SII 可能导致从站配置异常。
 
 ---
 
@@ -277,7 +278,7 @@ description: 嵌入式 EtherCAT 从站 FoE 固件升级库的移植检查清单�
 3. **打开 FoE 下载对话框**：
    - 在 Online 界面点击 **Download...** 按钮；
    - 选择 `efw_pack.py pack` 生成的有效容器文件（通常为 `*.efw`）；原始 `*.bin` 是打包输入，不能直接当作包含 EFW 头的 FoE 容器上传，除非设备另有明确支持；
-   - 在 Edit FoE Name 对话框中输入请求文件名，必须符合本地解析规则中的工程名、目标名、版本和小写 `.efw` 扩展名，例如 `SERVO_DRV_MCU_V1.0.0.0.efw`；工程名对应打包参数 `--project-name`（通常与 `BOOTLOADER_PROJECT_NAME` 相同），不是数值型 `--project-id`；
+   - 在 Edit FoE Name 对话框中输入请求文件名，必须符合本地解析规则中的工程名、目标名（`1..4` 为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 为唯一大写四位十六进制 `T0005`～`TFFFF`）、版本和小写 `.efw` 扩展名，且请求名总长不超过 31 字节（如 `SERVO_DRV_MCU_V1.0.0.0.efw` 或 `SERVO_DRV_T002A_V1.0.0.0.efw`）；工程名对应打包参数 `--project-name`（通常与 `BOOTLOADER_PROJECT_NAME` 相同），不是数值型 `--project-id`；
    - 若从站启用了密码保护，填入对应的十六进制密码（Password）；
 4. **监控下载进度**：
    - 点击 OK 开始传输。观察 TwinCAT 状态栏传输进度条；
