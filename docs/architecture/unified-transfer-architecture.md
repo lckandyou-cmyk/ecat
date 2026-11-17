@@ -22,8 +22,8 @@
 ```mermaid
 flowchart TD
     subgraph Layer4_Transports["Layer 4: 传输通道接入与适配桥 (Transports & Adapters)"]
-        SOES_APP["SOES 回调 (FOE_write / FOE_read)"]
-        SSC_APP["SSC 轮询与重试门 (ecat_foe_ssc_step)"]
+        SOES_APP["SOES 前后置钩子与写入回调 (pre/post_hook / write_cb)"]
+        SSC_APP["SSC 回调与主循环轮询 (ecat_foe_ssc_on_main_loop)"]
         FILE_APP["文件流调用 (ecat_transfer_file_step)"]
         CUSTOM_APP["自定义总线 (UART/CAN 中断或任务)"]
 
@@ -59,14 +59,14 @@ flowchart TD
     SSC_APP --> SSC_ADAPT
     SOES_ADAPT --> FOE_BRIDGE
     SSC_ADAPT --> FOE_BRIDGE
-    FOE_BRIDGE -->|原生接入: init_transfer| MGR_BEGIN
+    FOE_BRIDGE -->|ecat_foe_transport_init| MGR_BEGIN
     FOE_BRIDGE --> MGR_WRITE
     FOE_BRIDGE --> MGR_FINISH
     FOE_BRIDGE --> MGR_POLL
     FOE_BRIDGE --> MGR_CANCEL
 
     FILE_APP --> FILE_ADAPT
-    FILE_ADAPT -->|原生接入: init_transfer| MGR_BEGIN
+    FILE_ADAPT -->|ecat_transfer_file_init| MGR_BEGIN
     FILE_ADAPT --> MGR_WRITE
     FILE_ADAPT --> MGR_FINISH
     FILE_ADAPT --> MGR_POLL
@@ -197,20 +197,20 @@ flowchart TD
 
 ## 5. 代码与测试规模精确统计 (Code & Test Metrics)
 
-项目架构演进阶段的源码规模基线记录（统一目标注册表扩展见 [`custom-firmware-targets.md`](custom-firmware-targets.md)）：
+当前统一架构（含单一目标注册表 `1..65535` 扩展，详见 [`custom-firmware-targets.md`](custom-firmware-targets.md)）的实测源码规模统计：
 
 | 模块分类 | 文件清单 | 文件数 | 代码行数 (LOC) | 职责与技术说明 |
 | :--- | :--- | :---: | :---: | :--- |
-| **公开头文件** | `include/*.h` | 21 | 3,097 | 严格 ANSI C99 / 零 malloc / ABI 强校验 |
-| **核心生产源码** | `src/*.c` | 9 | 4,658 | 权威统一核心、会话仲裁、固件策略机、EFW 解析 |
-| **适配器源码** | `src/adapters/*.c` | 5 | 1,804 | SOES、SSC、FoE 适配桥、本地文件流适配器 |
-| **测试套件** | `tests/*.c` | 17 | 13,222 | 单元测试、端到端多通道集成测试、ASan 契约测试 |
-| **示例与参考实现**| `examples/**/*.c` | 7 | 2,808 | 最小 Bootloader、驱动模板、Host Demo、Monocypher |
-| **项目 C 源码总计**| 全部源码与测试 | 59 | **25,589** | 编译规范 `-Wall -Wextra -Werror -pedantic` |
+| **公开头文件** | `include/*.h` | 19 | 3,169 | 严格 ANSI C99 / 零 malloc / ABI `v2` & `v3` 强校验 |
+| **核心生产源码** | `src/*.c` | 8 | 4,563 | 权威统一核心、单一目标注册表、会话仲裁、固件策略机、EFW 解析 |
+| **适配器源码** | `src/adapters/*.c` | 5 | 1,597 | SOES、SSC、FoE 适配桥、宿主文件流适配器 |
+| **C 测试套件** | `tests/*.c` | 17 | 17,100 | 单元测试、端到端多通道集成测试、ASan/UBSan 契约测试 |
+| **示例与参考实现**| `examples/**/*.c` | 7 | 2,820 | 最小 Bootloader、驱动模板、Host Demo、Monocypher 验签 |
+| **项目 C 源码总计**| 上述五类汇总 | 56 | **29,249** | 编译规范 `-Wall -Wextra -Werror -pedantic`（另含内部头 `src/ecat_foe_core_internal.h` 83 行） |
 
 > **量化质量指标**：
-> - **测试代码比率**：单元与集成测试代码行数（13,222 行）与生产代码行数（6,462 行）之比达 **2.05 : 1**。
-> - **测试覆盖矩阵**：包含 562 项断言的 C 单元测试、31 项 PDF 夹具测试、44 项文档规范测试、13 项 SSC 状态机测试、真实 SOES Harness 测试、真实 Monocypher 密码学互操作测试与最小 Bootloader 5 大核心场景测试，全量测试套件通过率 **100% (562/562)**。
+> - **测试代码比率**：C 单元与集成测试代码行数（17,100 行）与生产实现代码行数（6,160 行）之比达 **2.78 : 1**。
+> - **测试覆盖矩阵**：覆盖同步/异步核心、单一目标注册表（含 `T0005`～`TFFFF` 扩展目标与 `MAX_BLOCKS=40` 多字节位图）、双向传输、端点、多通道仲裁、31 项 PDF 引文夹具测试、44 项源码引文测试、固定上游 SOES Harness 与 Bootloader 集成测试、Monocypher 4.0.3 Ed25519ph 真实互操作测试及 5 种静态库构建矩阵，全量宿主测试套件 100% 通过。
 
 ---
 
@@ -256,10 +256,10 @@ flowchart TD
 1. **静态结构体上下文 (Static Context Overhead)**：
    - 全路径零动态内存分配（Zero heap malloc），所有结构体大小编译期固定，可在 `.bss`、数据段或任务栈分配。
    - `ecat_transfer_t` 新增异步支持增量仅 48 字节；`ecat_transport_endpoint_t` 增量仅 8 字节。
-   - **FoE 首包受控暂存瘦身与共享生命周期实测**：移除适配桥内部写死的 512 字节静态数组，改为调用方显式配置外部暂存区；SSC 异步模式自动复用 gate 已有的 `packet_storage` 并通过 `staged_shared` 标志受控管理。实测静态上下文瘦身效果：
-     - `ecat_foe_transport_t`：宿主 64-bit 由 576 降至 64 字节（-512B, -88.9%），32-bit Cortex-M ABI 下由 552 降至 40 字节（-512B, -92.8%）；
-     - `ecat_foe_soes_adapter_t`：宿主 64-bit 由 704 降至 192 字节，32-bit Cortex-M 下由 664 降至 152 字节；
-     - `ecat_foe_ssc_adapter_t`：宿主 64-bit 由 608 降至 96 字节，32-bit Cortex-M 下由 576 降至 64 字节。
+   - **FoE 首包受控暂存瘦身与实例内聚上下文实测**（默认 `ECAT_TARGET_REGISTRY_MAX_BLOCKS = 16`）：移除适配桥内部写死的 512 字节静态数组，改为调用方显式配置外部暂存区；SSC 异步模式自动复用 gate 已有的 `packet_storage` 并通过 `staged_shared` 标志受控管理；SOES 适配器将 `file_map` 与 `synced_filenames` 内聚到适配器实例中（移除文件静态全局缓冲以支持多实例隔离）。Clang 实测静态结构体尺寸：
+     - `ecat_foe_transport_t`：宿主 64-bit 为 56 字节，32-bit Cortex-M ABI 下仅 36 字节（较早期内置 512B 暂存缩减超 90%）；
+     - `ecat_foe_soes_adapter_t`：宿主 64-bit 为 320 字节，32-bit Cortex-M ABI 下为 276 字节（含 16 槽映射表与 4 条 32B 动态文件名实例缓冲）；
+     - `ecat_foe_ssc_adapter_t`：宿主 64-bit 为 88 字节，32-bit Cortex-M ABI 下仅 56 字节。
    - **共享缓存生命周期、重叠拷贝消除与单次稳定捕获**：
      - 当复用门控已有暂存区时，传输层 abort 中止操作但不提前擦除共享暂存区，保留有效载荷供重发包比对，直至门控握手闭环或错误终结时由门控集中清零；
      - 当暂存区与传入数据指针重合时显式跳过内存拷贝；若指向同一缓冲区的不同偏移（前向或后向部分重叠），全面采用 `memmove` 进行安全搬移，彻底消除 C 标准下 `memcpy` 重叠参数的未定义行为（UB）；
@@ -279,7 +279,7 @@ flowchart TD
 | **动态堆内存 (Dynamic Heap)** | **0 字节 (严格禁止 malloc)** | **0 字节** | 100% 静态确定，无堆碎片隐患 |
 | **核心结构体增量 (`ecat_transfer_t`)**| 静态固定 | **+48 字节** | 包含异步 ops 指针与 stage 内部枚举 |
 | **端点结构体增量 (`endpoint_t`)** | 静态固定 | **+8 字节** | 包含 pending begin 状态位与目标缓存 |
-| **FoE 适配桥瘦身 (`transport_t`)** | 静态瘦身 | **-512 字节 (-92.8%)** | 移除硬编码 512B 暂存，32-bit ABI 下仅 40 字节 |
+| **FoE 适配桥瘦身 (`transport_t`)** | 静态瘦身 | **-512 字节** | 移除硬编码 512B 暂存，32-bit ABI 下仅 36 字节 |
 | **函数调用链深度** | 有界调用，禁止递归 | **3~4 层** | 深度稳定可预测 |
 | **限制栈回归测试** | 宿主机受限栈环境 | **1MB 与 8MB 栈通过** | 宿主机环境下运行无栈溢出 (rc=0) |
 | **目标硬件栈开销** | 依赖目标编译器与 ABI | **须板级实测** | 集成方须按目标编译选项评估栈与中断裕量 |
@@ -297,9 +297,9 @@ flowchart TD
 2. **总线协议栈异步重传能力与纯同步适配器边界**：
    - **SOES 协议栈**：原生 SOES 缺乏异步重传与暂存重发握手门控机制，其写入回调为纯同步阻塞调用。在 `ecat_foe_soes_bind_transfer` 阶段允许包含给其他通道使用的异步目标的混合注册表或核心配置成功绑定；但在运行时 WRQ 阶段，若主站请求的目标属于异步目标（`desc->asynchronous == true`），前置钩子将直接切断条目（`foe_cfg->n_files = 0`）由原生 SOES 向主站回复 0x8001 拒绝，坚决防止发送 ACK(0) 接收会话后在数据阶段意外失败，且绝不激活会话、不影响其他通道正常读写该异步目标；
    - **Beckhoff SSC 纯同步模式**：未挂载异步门（`async_gate == NULL`）的纯同步 SSC 适配器在 `bind_transfer` 时允许混合配置绑定；而在 `on_write` 阶段当请求目标为异步目标时返回 `ECAT_FOE_SSC_ERR_ILLEGAL` (0x8004) 拦截，不发 ACK(0) 且不激活会话；仅在挂载了官方标准异步门控（`ecat_foe_ssc_async_t`）时方可承载异步目标；
-   - **SSC 异步重发与超时错误码契约实测**：在挂载异步门控场景下，同包首包在挂起超时后重发准确返回 `ECAT_FOE_SSC_ERR_PROGERROR` (0x800B)；若超时后收到异包或包号被篡改则严格返回 `ECAT_FOE_SSC_ERR_PACKETNO` (0x8005) 并安全终止会话，协议错误码与重试逻辑经真实 SSC 回调端到端验证无误。
+   - **SSC 异步重发与超时错误码契约实测**：在挂载异步门控场景下，同包首包在挂起超时后重发准确返回 `ECAT_FOE_SSC_ERR_PROGERROR` (0x800B)；若超时后收到异包或包号被篡改则严格返回 `ECAT_FOE_SSC_ERR_PACKETNO` (0x8005) 并安全终止会话，协议错误码与重试逻辑已在宿主端通过 SSC 适配器契约回调端到端验证（商业 Beckhoff SSC 官方源码栈与 TwinCAT 主站仍待实机联调）。
 3. **物理 32 位 MCU 动态联调边界**：
-   - 当前所有测试（562 项单元测试、SOES Harness、Bootloader 集成）均在宿主机仿真环境下 100% 绿灯通过，并通过了 32 位静态编译检查（`sizeof(size_t) == 4` 编译检查）；
+   - 当前所有测试（全量单元测试、固定基线 SOES Harness、Bootloader 集成与 Monocypher 验签）均在宿主机仿真环境下 100% 绿灯通过，并通过了 32 位布局编译检查；
    - **尚未在真实物理 32 位 MCU 硬件上进行动态烧录与在线双向传输实测**；
    - 真实硬件部署前，集成方须针对具体芯片进行底层驱动移植验证（特别是 Flash 擦写时钟周期、看门狗喂狗间隔、中断优先级配置以及 Flash 读写期间的总线互斥）。
 4. **底层驱动异步中止硬件停止契约与仿真测试边界**：

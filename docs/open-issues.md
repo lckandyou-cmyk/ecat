@@ -95,7 +95,7 @@
    - 触发条件澄清：空包路径出现条件是传输总长度（`header_length + payload_length`）恰为底层 FoE 单包数据容量（`ESC_FOE_DATA_SIZE`）的整数倍，与应用层 `foe_cfg->buffer_size` 无关；TwinCAT 实际分包行为标记为 **【未核实】**。
    - 当前实现：不修改 SOES 源码；后置邮箱钩子在核心结束失败时将排队的 ACK 改写为 FoE 错误（0x8000），真实 SOES 宿主链路已测试，设备和主站待验证。
    - 安全底线：`drv->invalidate()` 已提前清除固件就绪/有效标记，失败时设备重启设计目标为停留在 Bootloader 等待重新升级（取决于 Bootloader 引导前置校验完备性及介质掉电写入原子性）。
-   - 缓解措施 1：打包工具新增可选参数 `--foe-packet-size N`，必要时在 payload 末尾填充 `0xFF` 规避空包路径（SII 目标补 2 字节整倍数），填充计入 `payload_length` 与 `payload_crc32`。此为尽力而为缓解，主站实际分包大小标记为 **【未核实】**。
+   - 缓解措施 1：打包工具新增可选参数 `--foe-packet-size N`，必要时在 payload 末尾填充 `0xFF` 规避空包路径（`target_id == 3` 即 SII 目标补 2 字节整倍数，其余 `1..65535` 目标补 1 字节），填充计入 `payload_length` 与 `payload_crc32`。此为尽力而为缓解，主站实际分包大小标记为 **【未核实】**。
    - 缓解措施 2：适配层记录“最后提交失败”状态，在主站发起 `BOOT -> INIT` 状态切换时通过 `post_state_change_hook`（`esc.c` 状态迁移后置钩子调用点）拒绝迁移（`*an = ESCboot | ESCerror`）并调用 `ESC_ALerror(ALERR_NOVALIDFIRMWARE)`（`0x0014`）设置 AL 状态码拦截。（SSC 侧状态迁移拒绝与设置 AL Status Code 机制标记为 **【未核实】**）。
    - 出处：`docs/architecture/SAD-v0.1.md` 第 1.2 节、第 3.2 节、第 5.1 节第 15 条。
 
@@ -164,7 +164,7 @@
      1. 首次 BOOT→INIT 被拦：固件升级未完成闭环时，主站请求进入 INIT；SOES 准备迁移至 `ESCinit`；适配层 `post_state_change_hook` 拦截，将目标状态改写为 `ESCboot | ESCerror` 并设置 AL 状态码为 `ALERR_NOVALIDFIRMWARE`（`0x0014`）；从站停留在 BOOT+Error 态。
      2. 主站再次请求 INIT：主站向 `ALcontrol` 再次写入 `ESCinit`（`0x01`）。
      3. SOES 行为：SOES 在第 1115 行因 `ac == ESCinit` 成立，执行 `an &= ESCREG_AL_ERRACKMASK` 清除错误位；在第 1123 行跳过检查；因从站当前实际状态仍为 `ESCboot`，再次判断为 `BOOT_TO_INIT` 迁移；再次执行 `ESC_stopmbx()` 并设 `an = ESCinit`。
-     4. 钩子是否再拦：执行到第 1305 行 `post_state_change_hook` 时，由于核心机未完成状态由单一真值源 `target_incomplete_mask` 保持，`ecat_foe_core_upgrade_incomplete()` 仍为真，且状态迁移仍为从 BOOT 到 INIT，钩子拦截条件再次满足，再次改写为 `*an = ESCboot | ESCerror` 并设置 `ALERR_NOVALIDFIRMWARE`（`0x0014`）。从站将持续被拦截在 BOOT+Error 态，不会误进入 INIT。
+     4. 钩子是否再拦：执行到第 1305 行 `post_state_change_hook` 时，由于核心机未完成状态由定长字节槽位位图 `target_incomplete_slots` 单一真值源保持，`ecat_foe_core_upgrade_incomplete()` 仍为真，且状态迁移仍为从 BOOT 到 INIT，钩子拦截条件再次满足，再次改写为 `*an = ESCboot | ESCerror` 并设置 `ALERR_NOVALIDFIRMWARE`（`0x0014`）。从站将持续被拦截在 BOOT+Error 态，不会误进入 INIT。
      5. 真实协议栈与主站行为边界说明：上述时序完全属于对 SOES 单一文件源码的静态逻辑推演（【推断，未验证】），尚未在集成真实 SOES 协议栈和物理主站环境下验证过。现场主站（如 TwinCAT）在面对 `0x0014` 错误后的重试逻辑、超时处理以及状态机恢复步骤可能因实现而异，真实硬件行为需以现场动态测试为准。
    - 当前策略：只要未完成状态仍存在，后置钩子对每次匹配的 `BOOT -> INIT` 迁移持续拦截；这不是可选策略回调。主站错误确认本身不会清除核心的未完成状态。
    - 待验证：真实设备和 TwinCAT 的重复请求、错误确认与恢复流程；单次拦截或应用层策略回调仅为未来可评估的替代方案。
@@ -179,6 +179,6 @@
    - TwinCAT 的 `sFoEPathName` 表示从站侧文件名，独立于 PC 本地路径：[Beckhoff 文档](https://infosys.beckhoff.com/content/1033/tcplclib_tc2_ethercat/16248044683.html)。
 
 5. **升级未闭环状态在 deinit/reinit 与断电重启后的已知局限【已知局限】**：
-   - 机制实现：核心机内部通过位掩码（`target_incomplete_mask`）按目标记录固件未完成状态，保证在单次 core 内存生命周期内，只有相同目标成功 finalize 才能解除其未完成状态，防止多目标交叉升级时误放行残缺固件。
+   - 机制实现：核心机内部通过按注册表槽位索引的定长字节位图（`target_incomplete_slots`）记录各固件目标的未完成状态，保证在单次 core 内存生命周期内，只有相同目标成功 finalize 才能解除其未完成状态，防止多目标交叉升级时误放行残缺固件。
    - 内存易失性局限：该位掩码驻留在 RAM 运行态。若应用层主动调用 `ecat_foe_core_deinit` 或重新 `ecat_foe_core_init`，结构体清零导致该状态丢失；若设备发生硬件断电重启，RAM 数据丢失，重新初始化后未完成状态必然归零。
    - 工程边界与防变砖要求：本核心库不变更持久化驱动契约接口，明确记录该局限，不声称在纯内存层解决跨掉电追踪问题。在真实硬件系统中，物理固件有效性必须依赖底层驱动在非易失性存储介质（如 Flash 标志位、校验区）中的真实记录，以及 Bootloader 引导启动时的完整性自检兜底。
