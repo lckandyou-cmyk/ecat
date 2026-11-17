@@ -97,7 +97,7 @@ cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c s
 
 同样的选项必须用于应用和适配器的编译。`ECAT_FOE_HEADER_BUF_MAX` 和 `ECAT_FOE_MAX_WRITE_UNIT` 支持预处理整数常量表达式（例如 `(144U + 4U)`、`(1U << 8)`），各编译单元求值后的数值必须一致；括号、进制和算术写法不同不会造成假错配。若不一致，链接器会报告未定义的 `ecat_foe_config_abi_...` 符号；请重新使用一致配置编译所有对象。此检查要求编译器支持 `used` 和 `retain` 属性，使用核心公开头的目标也须链接核心对象。
 
-本版本更新了核心配置结构的 ABI 标识。升级时必须重新编译使用核心公开头的所有对象和库；旧对象与新版核心混用时会在链接阶段报未定义的配置 ABI 符号。
+本版本统一以 `ecat_target_registry_t` 承载全部固件与数据目标，并同步升级了核心配置与注册表的 ABI 标识（`ecat_foe_config_abi_v3_...`、`ecat_target_registry_abi_v2_...`）。升级时必须重新编译使用公开头的所有对象和库；旧对象混用时会在链接阶段报未定义的 ABI 符号。
 
 ## 可选升级入口
 
@@ -109,7 +109,7 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgra
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
-默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。 新增的目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)。数据区块数量受注册表容量限制，固件导入目前仍映射核心的 1～4 号目标；ACL 和签名验证须按设备配置启用。
+默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)与[可注册固件目标设计](docs/architecture/custom-firmware-targets.md)。固件与数据目标统一由 `ecat_target_registry_t` 管理，支持 `1～65535` 非零目标 ID（`1～4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5～65535` 规范名为 `T0005`～`TFFFF`），注册槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制；ACL 和签名验证须按设备配置启用。
 
 此次架构调整移除了旧升级管理器及其兼容入口，使用旧接口的工程需要迁移到 `ecat_transfer_t` 并重新编译。固件核心的内部事件不再作为应用传输入口。
 
@@ -140,6 +140,7 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-onl
 - [旧 EFW v1 格式说明（历史）](docs/spec/efw-format-v0.1.md)
 - [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)
 - [统一传输架构说明](docs/architecture/unified-transfer-architecture.md)
+- [可注册固件目标设计](docs/architecture/custom-firmware-targets.md)
 - [SOES 接入分析](docs/architecture/soes-integration-options.md)
 - [SSC 异步阶段说明](docs/architecture/ssc-async-stage1.md)
 

@@ -197,7 +197,7 @@ flowchart TD
 
 ## 5. 代码与测试规模精确统计 (Code & Test Metrics)
 
-项目完整代码基线精确统计（截至 `codex/async-transfer` 分支）：
+项目架构演进阶段的源码规模基线记录（统一目标注册表扩展见 [`custom-firmware-targets.md`](custom-firmware-targets.md)）：
 
 | 模块分类 | 文件清单 | 文件数 | 代码行数 (LOC) | 职责与技术说明 |
 | :--- | :--- | :---: | :---: | :--- |

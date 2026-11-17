@@ -22,7 +22,7 @@ FoE 协议栈 ── FoE 适配桥 ──┐
 - **支持全关与自定义**：系统允许关闭所有内置协议，仅保留核心框架。通过 `ecat_transport_endpoint_t` 仅需几行代码即可将任意私有总线（如 CAN、UART、SPI 等）接入框架。
 
 ### 2.2 目标区块自由扩展 (Target Block Registry)
-- **注册目标**：通过 `ecat_target_registry_t` 注册数据或固件目标，数量受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制（默认 16）。固件导入仍须映射到核心已启用的 1～4 号目标；注册更多数据区块不扩展固件核心目标数。
+- **注册目标**：`ecat_target_registry_t` 是数据与固件目标的唯一权威配置，支持任意非零 `uint16_t` 目标 ID（`1～65535`，`1～4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5～65535` 为 `T0005`～`TFFFF`），总槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制（默认 16）。
 - **业务类型区分**：
   - **固件类区块 (`ECAT_TARGET_TYPE_FIRMWARE`)**：由固件核心解析 EFW 并检查目标和设备兼容性。Ed25519ph 验签和防回滚由本地配置决定，默认不强制启用；启用后须按核心契约提供相应后端与驱动。
   - **数据类区块 (`ECAT_TARGET_TYPE_DATA`)**：面向参数、日志、配置、字库等纯数据流，轻量读写并支持流式 CRC32 完整性计算。
@@ -136,7 +136,7 @@ ecat_transport_endpoint_finish_import(&uart_ep);
 - **固件容器流总长物理上限 (Firmware Container Limit)**：
   - 依据 `docs/spec/efw-format-v0.2.md:53`，固件头部恒定为 148 字节，空包规避填充若存在亦计入 `payload_length`，传输流中绝不存在独立的尾部未覆盖填充区，流总长恒定为 `header_length + payload_length`；
   - 驱动层不足 `write_unit` 的物理 Flash 补齐仅发生在设备内部缓冲写入阶段，不属于传输流尺寸；
-  - 固件容器流物理总上限精确为 `min(target.max_size, core.max_payload_size) + 148U`。任何超过此物理上限的流在 `begin` 阶段立即被精准拦截。
+  - 固件容器流物理总上限精确为 `target.max_size + 148U`（以注册表本地 `max_size` 为唯一真源）。任何超过此物理上限的流在 `begin` 阶段立即被精准拦截。
 
 ## 6. 集成边界与检查
 

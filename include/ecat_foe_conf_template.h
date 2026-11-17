@@ -4,7 +4,7 @@
  *
  * 用户移植时复制为 ecat_foe_conf.h，置于包含路径，并对所有编译单元定义
  * ECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"。否则使用本模板。
- * 身份、目标及安全策略仍须在 ecat_foe_core_cfg_t 中配置。
+ * 固件与数据目标统一在 ecat_target_registry_t 中注册，身份及安全策略在 ecat_foe_core_cfg_t 中配置。
  * 两个缓冲区尺寸可使用预处理整数常量表达式；所有编译单元须使用相同数值。
  * ABI 检查按求值结果编码，不要求宏的写法一致。
  * 所有物理基地址与分区限额完全由本地硬编码管理，坚决不信任固件携带的任何物理地址。
@@ -79,12 +79,6 @@ extern "C" {
 
 #define ECAT_FOE_USER_EEPROM_BASE_ADDR      0x00000000U
 #define ECAT_FOE_USER_EEPROM_MAX_SIZE       (8U * 1024U)
-
-/* 目标字样与 Target ID 映射项 */
-typedef struct {
-    const char *name_str;  /* 目标字样 (禁止含下划线) */
-    uint16_t target_id;    /* 对应的 Target ID */
-} ecat_foe_target_map_t;
 
 /* 防回滚版本下限读取接口 (启用时由 Platform/Port 实现)。 */
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver);

@@ -17,7 +17,7 @@
 | `0x0C` | 4 | `hardware_id` | 与设备本地硬件 ID 相符 |
 | `0x10` | 2 | `hw_ver_min` | 支持的最低硬件版本 |
 | `0x12` | 2 | `hw_ver_max` | 支持的最高硬件版本 |
-| `0x14` | 2 | `target_id` | MCU=1、FPGA=2、SII=3、EEPROM=4 |
+| `0x14` | 2 | `target_id` | 非零 `1..65535`（`1..4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 为 `T0005`..`TFFFF`；`0` 非法） |
 | `0x16` | 2 | `flags` | 当前必须为零 |
 | `0x18` | 4 | `fw_version` | Major/Minor/Patch/Build，各占 8 位 |
 | `0x1C` | 4 | `min_allow_version` | 防回滚下限元数据；开关独立配置 |
@@ -50,7 +50,7 @@ ASCII("ECAT-EFW-SIG-V2") || 0x00
 
 仓库固定了跨实现测试包 [`efw-v2-ed25519ph-monocypher.efw`](../../tests/fixtures/efw-v2-ed25519ph-monocypher.efw)。测试私钥种子为 `00 01 … 1f`（仅公开测试密钥，绝不可用于发布）；对应公钥为 `03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8`，Key ID 为 `4ecfdac260da4302`。测试载荷共 257 字节，`payload[i] = (13*i + 7) mod 256`。该包由 Monocypher 4.0.3 生成；有 PyNaCl/libsodium 的主机测试要求 CLI 生成结果与固定包逐字节相同，以覆盖签名实现间的互通。
 
-FoE 空包规避填充若由打包器添加 `0xFF`，填充属于 payload，会计入 `payload_length`、CRC 和签名。尾部没有独立的未覆盖填充区。
+FoE 空包规避填充若由打包器添加 `0xFF`（`target_id = 3` 即 SII 补 2 字节，其余 `1..65535` 目标补 1 字节），填充属于 payload，会计入 `payload_length`、CRC 和签名。尾部没有独立的未覆盖填充区。FoE 请求文件名 `<PROJECT>_<TARGET>_V<M.m.p.b>.efw` 总长不超过 31 字节 ASCII。
 
 Key ID 定义为：
 

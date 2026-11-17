@@ -99,9 +99,9 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgra
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
-The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md), [file stream integration](examples/file_stream/README.md), and [multichannel guide](docs/multichannel-bidirectional-framework.md) for synchronous and asynchronous import/export and custom endpoints. Registry capacity is configurable; firmware imports still map to the core's enabled targets 1–4. ACL enforcement and signature verification require explicit local configuration.
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md), [file stream integration](examples/file_stream/README.md), [multichannel guide](docs/multichannel-bidirectional-framework.md), and [custom firmware targets](docs/architecture/custom-firmware-targets.md) for synchronous and asynchronous import/export and custom endpoints. Both firmware and data targets are configured in a single `ecat_target_registry_t` supporting nonzero target IDs `1–65535` (`MCU`/`FPGA`/`SII`/`EEPROM` for `1–4` and `T0005`–`TFFFF` for `5–65535`), bounded statically by `ECAT_TARGET_REGISTRY_MAX_BLOCKS`. ACL enforcement and signature verification require explicit local configuration.
 
-The old upgrade manager and compatibility entry points have been removed. Existing integrations must migrate to `ecat_transfer_t` and rebuild; firmware-core event functions are internal implementation details.
+The old upgrade manager, compatibility entry points, and duplicate four-slot core target array have been removed, with registry ABI bumped to v2 and core ABI bumped to v3. Existing integrations must migrate to `ecat_transfer_t` + `ecat_target_registry_t` and rebuild all translation units.
 
 ## Verification status
 
@@ -129,6 +129,7 @@ Passing host tests does not establish hardware or full protocol-stack validation
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
 - [Historical EFW v1 specification](docs/spec/efw-format-v0.1.md)
 - [Unified transfer architecture](docs/architecture/unified-transfer-architecture.md)
+- [Custom firmware targets](docs/architecture/custom-firmware-targets.md)
 - [SOES integration analysis](docs/architecture/soes-integration-options.md)
 - [SSC asynchronous stage note](docs/architecture/ssc-async-stage1.md)
 
