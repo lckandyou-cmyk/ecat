@@ -3,10 +3,10 @@
 tools/efw_pack.py: EtherCAT .efw 固件容器打包与检查工具 (format v2)
 
 严格遵循 docs/spec/efw-format-v0.2.md 规范：
-- 打包模式 (pack): 根据参数与二进制文件生成规范的 .efw 固件容器
-- 检查模式 (inspect/unpack): 解析 .efw 容器头，校验 Header CRC32、Payload CRC32 及各字段合法性
-- 支持 --foe-packet-size N 尾部 0xFF 填充 (第 2.2 节)
-- 遵循第 7 节文件名规范与双向定宽版本映射规则
+- 打包模式 (pack): 根据参数与二进制文件生成规范的 148 字节头部 .efw v2 固件容器 (支持可选 Ed25519ph 签名)
+- 检查模式 (inspect/info/unpack): 解析 .efw 容器头，校验 Header CRC32、Payload CRC32、可选签名及各字段合法性
+- 支持 --foe-packet-size N 尾部 0xFF 空包规避填充 (SII 补 2 字节，其余 1..65535 目标补 1 字节)
+- 遵循规范 FoE 文件名编码 (<PROJECT>_<TARGET>_V<M.m.p.b>.efw，支持 MCU/FPGA/SII/EEPROM 与 T0005..TFFFF)
 """
 
 import sys
@@ -298,7 +298,7 @@ def pack_efw(
     header_length = EFW_HEADER_MIN_LEN
     payload = bytearray(bin_data)
 
-    # 尾部填充处理 (第 2.2 节)
+    # FoE 整包规避尾部填充处理 (docs/spec/efw-format-v0.2.md)
     if foe_packet_size > 0:
         total_len = header_length + len(payload)
         if total_len % foe_packet_size == 0:

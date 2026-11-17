@@ -1,6 +1,6 @@
 /**
  * @file ecat_foe_core.h
- * @brief EtherCAT FoE 核心升级状态机接口定义 (依据 SAD-v0.1 第 1、3、4 节)
+ * @brief EtherCAT FoE 固件升级核心策略状态机接口定义
  *
  * 核心状态机特性：
  * - 纯 C99 实现，零 malloc，零动态内存分配

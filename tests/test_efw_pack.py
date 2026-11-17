@@ -171,7 +171,7 @@ def test_positive_cross_check():
 
 
 def test_filename_generator():
-    """验证第 7 节文件名规范生成"""
+    """验证规范 FoE 文件名生成"""
     with tempfile.TemporaryDirectory() as tmpdir:
         bin_path = os.path.join(tmpdir, 'test.bin')
         with open(bin_path, 'wb') as f:
@@ -196,7 +196,7 @@ def test_filename_generator():
             assert os.path.exists(expected_name), f"期望生成文件名 {expected_name} 未找到"
         finally:
             os.chdir(orig_cwd)
-    print("  [PASS] 第 7 节规范文件名生成格式 SERVO_DRV_MCU_V1.2.3.4.efw")
+    print("  [PASS] 规范文件名生成格式 SERVO_DRV_MCU_V1.2.3.4.efw")
 
 
 def test_empty_payload_rejected_without_output():
@@ -245,7 +245,7 @@ def test_empty_payload_rejected_without_output():
 
 
 def test_foe_packet_size_padding():
-    """验证 --foe-packet-size N 尾部填充规避空包 (第 2.2 节)"""
+    """验证 --foe-packet-size N 尾部填充规避空包"""
     with tempfile.TemporaryDirectory() as tmpdir:
         # N = 512
         # header_length = 148；若 payload = 512 - 148 = 364 字节，总长恰为 512。

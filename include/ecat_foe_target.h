@@ -1,9 +1,10 @@
 /**
  * @file ecat_foe_target.h
- * @brief 目标驱动接口抽象定义 (依据 SAD-v0.1 第 4.2 节草案)
+ * @brief 固件目标存储驱动接口与生命周期契约定义
  *
  * 目标驱动是用户对接实际物理存储介质 (如片内 Flash、外部 SPI Flash、I2C EEPROM)
- * 的纯 C 函数指针集合。分区容量只认本地静态配置 ECAT_FOE_xxx_MAX_SIZE，驱动不暴露容量。
+ * 的纯 C 函数指针集合。分区容量与写入对齐粒度统一由本地 ecat_target_registry_t 中的
+ * ecat_target_desc_t (max_size / write_unit) 静态配置，坚决不依赖外部报文携带的地址或长度。
  *
  * 驱动生命周期与清理契约 (核心严格保证):
  * 1. 同步驱动 init 失败清理责任: 若同步驱动 init() 自身返回非零失败，表示驱动初始化未完成，驱动内部自行负责

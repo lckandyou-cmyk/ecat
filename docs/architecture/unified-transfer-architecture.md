@@ -201,12 +201,12 @@ flowchart TD
 
 | 模块分类 | 文件清单 | 文件数 | 代码行数 (LOC) | 职责与技术说明 |
 | :--- | :--- | :---: | :---: | :--- |
-| **公开头文件** | `include/*.h` | 19 | 3,169 | 严格 ANSI C99 / 零 malloc / ABI `v2` & `v3` 强校验 |
+| **公开头文件** | `include/*.h` | 19 | 3,135 | 严格 ANSI C99 / 零 malloc / ABI `v2` & `v3` 强校验 |
 | **核心生产源码** | `src/*.c` | 8 | 4,563 | 权威统一核心、单一目标注册表、会话仲裁、固件策略机、EFW 解析 |
 | **适配器源码** | `src/adapters/*.c` | 5 | 1,597 | SOES、SSC、FoE 适配桥、宿主文件流适配器 |
 | **C 测试套件** | `tests/*.c` | 17 | 17,100 | 单元测试、端到端多通道集成测试、ASan/UBSan 契约测试 |
 | **示例与参考实现**| `examples/**/*.c` | 7 | 2,820 | 最小 Bootloader、驱动模板、Host Demo、Monocypher 验签 |
-| **项目 C 源码总计**| 上述五类汇总 | 56 | **29,249** | 编译规范 `-Wall -Wextra -Werror -pedantic`（另含内部头 `src/ecat_foe_core_internal.h` 83 行） |
+| **项目 C 源码总计**| 上述五类汇总 | 56 | **29,215** | 编译规范 `-Wall -Wextra -Werror -pedantic`（另含内部头 `src/ecat_foe_core_internal.h` 83 行） |
 
 > **量化质量指标**：
 > - **测试代码比率**：C 单元与集成测试代码行数（17,100 行）与生产实现代码行数（6,160 行）之比达 **2.78 : 1**。
