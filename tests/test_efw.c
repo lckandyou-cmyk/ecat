@@ -222,24 +222,55 @@ static void test_selected_target_identity(void)
     get_default_valid_config(&cfg);
     TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(s_spec_valid_efw,
         ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr), ECAT_FOE_EFW_OK, "解析有效头");
+
+    /* 高编号与常规扩展编号目标 (65535 / 42) */
     hdr.target_id = 65535U;
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, &target),
-        ECAT_FOE_EFW_OK, "允许已解析的高编号目标");
+        ECAT_FOE_EFW_OK, "允许已解析的高编号目标 65535");
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
-        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝包与本地目标不匹配");
+        ECAT_FOE_EFW_ERR_TARGET_MISMATCH, "拒绝包头 target_id 与选定目标不一致");
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, NULL),
-        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝不存在的目标");
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝本地未注册目标");
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 0U, &target),
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝零选定目标 ID");
+
     hdr.target_id = 0U;
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 0U, &target),
-        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝零编号");
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝包头零编号目标");
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "包头零编号即便选定目标非零也按未知目标拒绝");
+
+    /* 禁用状态与零容量失败关闭 (Fail-Closed) */
     hdr.target_id = 42U;
     target.enabled = false;
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED, "拒绝禁用目标");
     target.enabled = true;
+    target.max_payload_size = 0U;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "零容量 max_payload_size == 0 必须失败关闭");
     target.max_payload_size = 15U;
     TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "执行本地容量限制");
+    target.max_payload_size = 16U;
+
+    /* 扩展目标上的强制签名与防回滚策略 */
+    cfg.signature_verify_enable = true;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED, "高编号目标强制验签时拒绝未签名包");
+    hdr.signed_package = true;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_OK, "高编号目标已签名包通过元数据核验");
+    cfg.signature_verify_enable = false;
+    hdr.signed_package = false;
+
+    cfg.anti_rollback_enable = true;
+    target.version_floor = 0x02000000U;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_ERR_ANTI_ROLLBACK, "高编号目标执行独立防回滚下限拦截");
+    target.version_floor = hdr.fw_version;
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+        ECAT_FOE_EFW_OK, "高编号目标版本达到下限时放行");
 }
 
 static void test_legacy_v1_rejected(void)

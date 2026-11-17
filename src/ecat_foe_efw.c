@@ -318,9 +318,12 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         return ECAT_FOE_EFW_ERR_HW_VER_NOT_SUPPORTED;
     }
 
-    /* The locally resolved ID must match the signed package identity. */
-    if (hdr->target_id == 0U || hdr->target_id != selected_id || tcfg == NULL) {
+    /* The locally resolved ID must exist, be non-zero, and match the signed package identity. */
+    if (hdr->target_id == 0U || selected_id == 0U || tcfg == NULL) {
         return ECAT_FOE_EFW_ERR_TARGET_UNKNOWN;
+    }
+    if (hdr->target_id != selected_id) {
+        return ECAT_FOE_EFW_ERR_TARGET_MISMATCH;
     }
     if (!tcfg->enabled) {
         return ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED;
@@ -331,8 +334,8 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         return ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY;
     }
 
-    /* 10. payload_length 未超过本地硬编码配置中分配的分区容量上限 */
-    if (tcfg->max_payload_size > 0U && hdr->payload_length > tcfg->max_payload_size) {
+    /* 10. payload_length 未超过本地硬编码配置中分配的分区容量上限 (0 表示零容量，失败关闭) */
+    if (tcfg->max_payload_size == 0U || hdr->payload_length > tcfg->max_payload_size) {
         return ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE;
     }
 
@@ -397,6 +400,8 @@ const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)
         return "Local hardware version not supported";
     case ECAT_FOE_EFW_ERR_TARGET_UNKNOWN:
         return "Target unknown";
+    case ECAT_FOE_EFW_ERR_TARGET_MISMATCH:
+        return "Header target ID mismatches selected target";
     case ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED:
         return "Target not enabled";
     case ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE:

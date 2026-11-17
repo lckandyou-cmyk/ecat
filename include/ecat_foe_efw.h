@@ -76,7 +76,8 @@ typedef enum {
     ECAT_FOE_EFW_ERR_HARDWARE_ID_MISMATCH,    /**< hardware_id 与从站本地配置不符 */
     ECAT_FOE_EFW_ERR_HW_VER_RANGE_INVALID,    /**< 硬件版本区间倒置 (hw_ver_min > hw_ver_max) */
     ECAT_FOE_EFW_ERR_HW_VER_NOT_SUPPORTED,    /**< 当前从站本地硬件版本不在支持区间内 */
-    ECAT_FOE_EFW_ERR_TARGET_UNKNOWN,          /**< target_id 为未知目标 */
+    ECAT_FOE_EFW_ERR_TARGET_UNKNOWN,          /**< target_id 为未知目标或零编号 */
+    ECAT_FOE_EFW_ERR_TARGET_MISMATCH,         /**< 头部 target_id 与会话选定目标不一致 */
     ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED,      /**< target_id 在从站本地未开启使能 */
     ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE,       /**< payload_length 超过本地分区容量上限 */
     ECAT_FOE_EFW_ERR_MIN_ALLOW_VER_INVALID,   /**< 允许运行下限大于固件版本 (min_allow_version > fw_version) */
@@ -102,7 +103,7 @@ typedef struct {
     uint32_t hardware_id;                        /**< 0x0C: 目标硬件板型标识 ID */
     uint16_t hw_ver_min;                         /**< 0x10: 支持的最低硬件版本号 */
     uint16_t hw_ver_max;                         /**< 0x12: 支持的最高硬件版本号 */
-    uint16_t target_id;                          /**< 0x14: 升级目标标识 ID (1..4) */
+    uint16_t target_id;                          /**< 0x14: 升级目标标识 ID (1..65535) */
     uint16_t flags;                              /**< 0x16: 升级标志位 (必须为 0) */
     uint32_t fw_version;                         /**< 0x18: 固件版本号数值 (Major<<24|Minor<<16|Patch<<8|Build) */
     uint32_t min_allow_version;                  /**< 0x1C: 允许运行的最低版本号 */
@@ -120,7 +121,7 @@ typedef struct {
  */
 typedef struct {
     bool     enabled;                            /**< 是否使能该目标 */
-    uint32_t max_payload_size;                   /**< 分区最大允许容量 (字节)，0 表示未配置上限 */
+    uint32_t max_payload_size;                   /**< 分区最大允许容量 (字节)，必须 > 0 (0 按零容量拒绝) */
     uint32_t version_floor;                      /**< 防回滚当前版本下限 */
 } ecat_foe_efw_target_cfg_t;
 
