@@ -141,7 +141,6 @@ EFW_RESERVED_LEN = 20
 
 TARGET_MAP = {
     "MCU": 0x0001,
-    "APP": 0x0001,
     "FPGA": 0x0002,
     "SII": 0x0003,
     "EEPROM": 0x0004,
@@ -153,6 +152,15 @@ TARGET_ID_TO_NAME = {
     0x0003: "SII",
     0x0004: "EEPROM",
 }
+
+
+def format_target_name(target_id: int) -> str:
+    """将 1..65535 目标 ID 编码为唯一双射规范名称 (MCU/FPGA/SII/EEPROM 或 T0005..TFFFF)"""
+    if not isinstance(target_id, int) or isinstance(target_id, bool) or not (1 <= target_id <= 0xFFFF):
+        raise ValueError(f"不支持的升级目标 ID: {target_id} (允许范围: 1..65535)")
+    if target_id in TARGET_ID_TO_NAME:
+        return TARGET_ID_TO_NAME[target_id]
+    return f"T{target_id:04X}"
 
 
 def parse_version_str(v_str: str) -> int:
@@ -185,15 +193,26 @@ def format_version_int(val: int) -> str:
 
 
 def parse_target_id(target_arg: str) -> int:
-    """解析目标名称或 Target ID"""
-    t_upper = target_arg.strip().upper()
-    if t_upper in TARGET_MAP:
-        return TARGET_MAP[t_upper]
-    if t_upper.startswith('0X'):
-        return int(t_upper, 16)
-    if t_upper.isdigit():
-        return int(t_upper, 10)
-    raise ValueError(f"未知升级目标: {target_arg} (支持: MCU, FPGA, SII, EEPROM)")
+    """解析规范目标名称 (MCU/FPGA/SII/EEPROM、T0005..TFFFF) 或 1..65535 数值 ID"""
+    raw = target_arg.strip()
+    if raw in TARGET_MAP:
+        return TARGET_MAP[raw]
+    if len(raw) == 5 and raw[0] == 'T' and all(c in '0123456789ABCDEF' for c in raw[1:]):
+        tid = int(raw[1:], 16)
+        if 5 <= tid <= 0xFFFF:
+            return tid
+        raise ValueError(f"严禁使用歧义目标编码 {target_arg} (1..4 仅允许 MCU/FPGA/SII/EEPROM，5..65535 使用 T0005..TFFFF)")
+    if raw.startswith(('0x', '0X')) and len(raw) > 2 and all(c in '0123456789abcdefABCDEF' for c in raw[2:]):
+        tid = int(raw, 16)
+        if 1 <= tid <= 0xFFFF:
+            return tid
+        raise ValueError(f"目标 ID 超出合法范围 1..65535: {target_arg}")
+    if raw.isascii() and raw.isdigit():
+        tid = int(raw, 10)
+        if 1 <= tid <= 0xFFFF:
+            return tid
+        raise ValueError(f"目标 ID 超出合法范围 1..65535: {target_arg}")
+    raise ValueError(f"未知升级目标: {target_arg} (支持: MCU, FPGA, SII, EEPROM, T0005..TFFFF 或 1..65535)")
 
 
 def crc32_ieee(data: bytes) -> int:
@@ -268,8 +287,8 @@ def pack_efw(
         raise ValueError('最低硬件版本不能大于最高硬件版本')
     if min_allow_version > fw_version:
         raise ValueError('最低允许版本不能大于固件版本')
-    if target_id not in TARGET_ID_TO_NAME:
-        raise ValueError('不支持的升级目标 ID')
+    if not isinstance(target_id, int) or isinstance(target_id, bool) or not (1 <= target_id <= 0xFFFF):
+        raise ValueError('不支持的升级目标 ID (允许范围: 1..65535)')
     if len(bin_data) == 0:
         raise ValueError('固件有效负载不能为空')
     if foe_packet_size < 0:
@@ -339,7 +358,7 @@ def pack_efw(
     if not out_path:
         if not project_name or project_name in ('.', '..') or any(c in project_name for c in ('/', '\\', '\0')):
             raise ValueError('项目名不能包含路径分隔符或为空')
-        target_name = TARGET_ID_TO_NAME[target_id]
+        target_name = format_target_name(target_id)
         ver_str = format_version_int(fw_version)
         out_path = f"{project_name}_{target_name}_V{ver_str}.efw"
         if len(os.fsencode(out_path)) > 31:
@@ -470,7 +489,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
     if hw_ver_min > hw_ver_max or min_allow_version > fw_version:
         print('错误: 硬件或固件版本范围无效', file=sys.stderr)
         return False
-    if target_id not in TARGET_ID_TO_NAME:
+    if not (1 <= target_id <= 0xFFFF):
         print(f'错误: 不支持的升级目标 ID: {target_id}', file=sys.stderr)
         return False
     if payload_length == 0:
@@ -504,7 +523,7 @@ def inspect_efw(efw_path: str, extract_bin: str = None, overwrite: bool = False,
         print('错误: 指定了公钥，但固件未签名', file=sys.stderr)
         return False
 
-    target_name = TARGET_ID_TO_NAME.get(target_id, "未知")
+    target_name = format_target_name(target_id)
 
     if summary:
         print("EFW 包有效（结构和 CRC 校验通过；设备兼容性未验证）")
@@ -570,7 +589,7 @@ def main():
     pack_p.add_argument("-d", "--hardware-id", required=True, help="硬件板型 ID (如 0x00000001)")
     pack_p.add_argument("--hw-ver-min", type=int, default=1, help="支持的最低硬件版本 (默认 1)")
     pack_p.add_argument("--hw-ver-max", type=int, default=1, help="支持的最高硬件版本 (默认 1)")
-    pack_p.add_argument("-t", "--target", required=True, help="升级目标 (MCU, FPGA, SII, EEPROM 或数字 ID)")
+    pack_p.add_argument("-t", "--target", required=True, help="升级目标 (MCU, FPGA, SII, EEPROM, T0005..TFFFF 或 1..65535)")
     pack_p.add_argument("-v", "--fw-version", required=True, help="固件版本 (如 1.2.3.4 或 0x01020304)")
     pack_p.add_argument("--min-allow-version", default="0", help="防回滚允许运行下限 (默认 0)")
     pack_p.add_argument("--foe-packet-size", type=int, default=0, help="FoE 单包大小 (如 512)，用于空包规避填充")

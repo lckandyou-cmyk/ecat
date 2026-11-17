@@ -55,9 +55,10 @@ static void update_header_crc(uint8_t *package)
     put_u32(package + 144U, ecat_foe_crc32_calc(package, 144U));
 }
 
-static int receive(const uint8_t *package, size_t size,
-                   const ecat_foe_trusted_key_t *key, mock_driver_t *driver,
-                   bool corrupt_readback)
+static int receive_for_target(const uint8_t *package, size_t size,
+                              const ecat_foe_trusted_key_t *key, mock_driver_t *driver,
+                              bool corrupt_readback, uint16_t target_id,
+                              const char *foe_name)
 {
     ecat_foe_monocypher_verifier_t verifier = {0};
     ecat_foe_signature_verifier_t callbacks = {0};
@@ -66,8 +67,8 @@ static int receive(const uint8_t *package, size_t size,
     ecat_target_registry_t reg;
     ecat_target_desc_t target = {0};
     assert(ecat_target_registry_init(&reg) == 0);
-    target.target_id = 1U;
-    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.target_id = target_id;
+    memcpy(target.name, "fw_slot", sizeof("fw_slot"));
     target.type = ECAT_TARGET_TYPE_FIRMWARE;
     target.permissions = ECAT_PERM_WRITE;
     target.max_size = MOCK_DRIVER_MEM_SIZE;
@@ -88,8 +89,7 @@ static int receive(const uint8_t *package, size_t size,
     cfg.registry = &reg;
     ecat_foe_core_t core;
     assert(ecat_foe_core_init(&core, &cfg) == 0);
-    const char *name = "INTEROP_MCU_V1.2.3.4.efw";
-    assert(test_core_begin_filename(&core, name, strlen(name)) == 0);
+    assert(test_core_begin_filename(&core, foe_name, strlen(foe_name)) == 0);
     driver->inject_corrupt_read = corrupt_readback;
     for (size_t pos = 0; pos < size;) {
         size_t n = (size - pos > 37U) ? 37U : size - pos;
@@ -97,6 +97,14 @@ static int receive(const uint8_t *package, size_t size,
         pos += n;
     }
     return ecat_foe_core_on_end(&core);
+}
+
+static int receive(const uint8_t *package, size_t size,
+                   const ecat_foe_trusted_key_t *key, mock_driver_t *driver,
+                   bool corrupt_readback)
+{
+    return receive_for_target(package, size, key, driver, corrupt_readback,
+                              1U, "INTEROP_MCU_V1.2.3.4.efw");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -431,11 +439,12 @@ static void test_one_cross_layer_alias_case(
 
 int main(int argc, char **argv)
 {
-    assert(argc == 4);
-    uint8_t original[BUFFER_SIZE], package[BUFFER_SIZE], public_key[32];
+    assert(argc == 5);
+    uint8_t original[BUFFER_SIZE], package[BUFFER_SIZE], ext_signed[BUFFER_SIZE], public_key[32];
     size_t size = read_file(argv[1], original, sizeof(original));
     size_t unsigned_size = read_file(argv[2], package, sizeof(package));
-    assert(size > HEADER_SIZE && unsigned_size > HEADER_SIZE);
+    size_t ext_size = read_file(argv[4], ext_signed, sizeof(ext_signed));
+    assert(size > HEADER_SIZE && unsigned_size > HEADER_SIZE && ext_size > HEADER_SIZE);
     assert(read_file(argv[3], public_key, sizeof(public_key)) == sizeof(public_key));
     ecat_foe_trusted_key_t key;
     memcpy(key.key_id, original + 72U, sizeof(key.key_id));
@@ -446,6 +455,17 @@ int main(int argc, char **argv)
     assert(receive(original, size, &key, &driver, false) == 0);
     assert(driver.count_finalize == 1U && driver.valid_flag);
     assert(memcmp(driver.mem, original + HEADER_SIZE, size - HEADER_SIZE) == 0);
+
+    /* 扩展目标 T002A (42) 真实 CLI 签名包验签通过，且跨目标重放至 MCU (1) 在驱动调用前被拒绝 */
+    mock_driver_init(&driver);
+    assert(receive_for_target(ext_signed, ext_size, &key, &driver, false,
+                              42U, "INTEROP_T002A_V1.2.3.4.efw") == 0);
+    assert(driver.count_finalize == 1U && driver.valid_flag);
+    assert(memcmp(driver.mem, ext_signed + HEADER_SIZE, ext_size - HEADER_SIZE) == 0);
+
+    mock_driver_init(&driver);
+    assert(receive(ext_signed, ext_size, &key, &driver, false) != 0);
+    assert(driver.count_init == 0U && driver.count_finalize == 0U);
 
     mock_driver_init(&driver);
     assert(receive(package, unsigned_size, &key, &driver, false) != 0);

@@ -445,6 +445,87 @@ def test_signed_package_round_trip():
     print("  [PASS] Ed25519ph signed package vector, signature verification and tamper rejection")
 
 
+def test_extended_targets_t0005_to_tffff():
+    """验证 T0005..TFFFF 唯一双射目标编码、31B 命名边界、非 SII 补齐与歧义拒绝"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_path = os.path.join(tmpdir, 'ext.bin')
+        with open(bin_path, 'wb') as f:
+            f.write(b'\x5A' * 364)
+
+        orig_cwd = os.getcwd()
+        os.chdir(tmpdir)
+        try:
+            # 1. 使用数值 42 与规范名 T002A 打包产出完全一致，且默认自动生成 SERVO_DRV_T002A_V1.2.3.4.efw (28 字节 <= 31)
+            res_num = subprocess.run([
+                sys.executable, PACK_TOOL, 'pack', '--bin', bin_path,
+                '--project-id', '0x10010001', '--project-name', 'SERVO_DRV',
+                '--hardware-id', '1', '--target', '42', '--fw-version', '1.2.3.4'
+            ], capture_output=True, text=True)
+            assert res_num.returncode == 0, res_num.stderr
+            auto_name = os.path.join(tmpdir, 'SERVO_DRV_T002A_V1.2.3.4.efw')
+            assert os.path.exists(auto_name)
+
+            tok_out = os.path.join(tmpdir, 'tok.efw')
+            res_tok = subprocess.run([
+                sys.executable, PACK_TOOL, 'pack', '--bin', bin_path,
+                '--project-id', '0x10010001', '--project-name', 'SERVO_DRV',
+                '--hardware-id', '1', '--target', 'T002A', '--fw-version', '1.2.3.4',
+                '--out', tok_out
+            ], capture_output=True, text=True)
+            assert res_tok.returncode == 0, res_tok.stderr
+            assert open(auto_name, 'rb').read() == open(tok_out, 'rb').read()
+
+            # 2. TFFFF (65535) 打包 + --foe-packet-size 512 仅补 1 字节 0xFF (非 SII)
+            hi_out = os.path.join(tmpdir, 'hi.efw')
+            res_hi = subprocess.run([
+                sys.executable, PACK_TOOL, 'pack', '--bin', bin_path,
+                '--project-id', '0x10010001', '--hardware-id', '1',
+                '--target', 'TFFFF', '--fw-version', '1.0.0.0',
+                '--foe-packet-size', '512', '--out', hi_out
+            ], capture_output=True, text=True)
+            assert res_hi.returncode == 0, res_hi.stderr
+            hi_bytes = open(hi_out, 'rb').read()
+            assert len(hi_bytes) == 148 + 365
+            assert int.from_bytes(hi_bytes[20:22], 'little') == 0xFFFF
+
+            # 3. inspect / info / unpack 输出规范名称 T002A 与 TFFFF
+            info_42 = subprocess.run([sys.executable, PACK_TOOL, 'info', auto_name], capture_output=True, text=True)
+            assert info_42.returncode == 0 and 'T002A (0x002A)' in info_42.stdout
+            insp_hi = subprocess.run([sys.executable, PACK_TOOL, 'inspect', hi_out], capture_output=True, text=True)
+            assert insp_hi.returncode == 0 and '65535 (TFFFF)' in insp_hi.stdout
+
+            # 4. 超出 31 字节自动文件名预算必须拒绝
+            too_long_proj = subprocess.run([
+                sys.executable, PACK_TOOL, 'pack', '--bin', bin_path,
+                '--project-id', '1', '--project-name', 'LONG_PROJECT_NAME',
+                '--hardware-id', '1', '--target', 'T002A', '--fw-version', '1.2.3.4'
+            ], capture_output=True, text=True)
+            assert too_long_proj.returncode != 0 and '31 字节' in too_long_proj.stderr
+
+            # 5. 严禁非法或歧义目标编码: 0, 65536, T0000..T0004, 小写 T002a/t002A, 非 4 位 T2A, 旧别名 APP
+            for bad_target in ('0', '0x0', '65536', '0x10000', 'T0000', 'T0001', 'T0004',
+                               'T002a', 't002A', 'T2A', 'T0002A', 'APP', 'mcu'):
+                bad_out = os.path.join(tmpdir, f'bad-{bad_target}.efw')
+                bad_res = subprocess.run([
+                    sys.executable, PACK_TOOL, 'pack', '--bin', bin_path,
+                    '--project-id', '1', '--hardware-id', '1',
+                    '--target', bad_target, '--fw-version', '1.0.0.0', '--out', bad_out
+                ], capture_output=True, text=True)
+                assert bad_res.returncode != 0, f"非法目标 {bad_target} 必须拒绝"
+                assert not os.path.exists(bad_out)
+
+            # 6. 手工构造 target_id = 0 的容器在 inspect/info 阶段必须拒绝
+            zero_tid = bytearray(open(auto_name, 'rb').read())
+            zero_tid[20:22] = (0).to_bytes(2, 'little')
+            zero_tid[144:148] = (binascii.crc32(zero_tid[:144]) & 0xffffffff).to_bytes(4, 'little')
+            zero_path = os.path.join(tmpdir, 'zero-tid.efw')
+            open(zero_path, 'wb').write(zero_tid)
+            assert subprocess.run([sys.executable, PACK_TOOL, 'info', zero_path], capture_output=True).returncode != 0
+        finally:
+            os.chdir(orig_cwd)
+    print("  [PASS] T0005..TFFFF 扩展目标双射编码、31B 预算与歧义拦截")
+
+
 if __name__ == '__main__':
     print("--- 运行 Python efw_pack 工具测试 ---")
     test_overwrite_write_failure_preserves_output()
@@ -458,4 +539,5 @@ if __name__ == '__main__':
     test_empty_payload_rejected_without_output()
     test_foe_packet_size_padding()
     test_signed_package_round_trip()
+    test_extended_targets_t0005_to_tffff()
     print("--- Python efw_pack 工具测试全部通过 ---")

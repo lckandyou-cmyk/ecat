@@ -3585,14 +3585,16 @@ static void test_sparse_high_targets_and_data_target_rejection(void)
         TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, tid), "当前高编号目标 incomplete 置位");
         TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 7U), "DATA 目标不受污染");
 
-        /* 重新完整升级恢复 */
+        /* 重新通过规范 FoE TXXXX 文件名发起完整升级恢复 */
+        const char *wrq_fn = (tid == 42U) ? "SERVO_DRV_T002A_V2.0.0.0.efw"
+                                          : "SERVO_DRV_TFFFF_V2.0.0.0.efw";
         mock_driver_reset(drv);
         drv->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
         memset(&verifier, 0, sizeof(verifier));
         memcpy(verifier.expected, efw, efw_len);
         verifier.expected_len = efw_len;
 
-        TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &req), ECAT_FOE_CORE_OK, "恢复 begin_request 成功");
+        TEST_ASSERT_EQ_INT(test_wrq(&core, wrq_fn), 0, "规范 TXXXX 文件名 WRQ 成功");
         TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, efw_len, 37U, false), 0, "分块流式写入成功");
         TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "高编号验签与防回滚原子提交成功");
         TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, tid), "升级完成后该目标 incomplete 清除");
@@ -3604,6 +3606,21 @@ static void test_sparse_high_targets_and_data_target_rejection(void)
         ecat_foe_core_on_abort(&core); /* 重置核心状态机至 IDLE 以发起下一目标会话 */
     }
     TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "全部高编号目标完成后全局 incomplete 清零");
+
+    /* 3. 严禁歧义或非法 TXXXX 文件名别名 */
+    const char *bad_names[] = {
+        "SERVO_DRV_T0000_V1.0.0.0.efw",
+        "SERVO_DRV_T0001_V1.0.0.0.efw",
+        "SERVO_DRV_T0004_V1.0.0.0.efw",
+        "SERVO_DRV_T002a_V1.0.0.0.efw",
+        "SERVO_DRV_t002A_V1.0.0.0.efw",
+        "SERVO_DRV_T2A_V1.0.0.0.efw",
+        "SERVO_DRV_T0007_V1.0.0.0.efw" /* DATA 目标 7 严禁通过 FoE 固件通道受理 */
+    };
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++) {
+        TEST_ASSERT_EQ_INT(test_wrq(&core, bad_names[i]), ECAT_FOE_ERRCODE_NOTFOUND,
+                           "歧义编码或 DATA 目标 TXXXX WRQ 必须返回 NOTFOUND");
+    }
 }
 
 /* -------------------------------------------------------------------------- */

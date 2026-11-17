@@ -63,12 +63,17 @@ with tempfile.TemporaryDirectory(prefix="ecat-release-test-") as directory:
     struct.pack_into("<I", signed, 144, binascii.crc32(signed[:144]) & 0xffffffff)
     (root / "bad-signature.efw").write_bytes(signed)
     run("info", "bad-signature.efw", "--public-key", "public.bin", ok=False)
-    # Reject self-contradictory metadata at pack and inspect, before touching files.
+    run("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "T002A",
+        "-v", "1.0.0.0", "-o", "ext-target.efw")
+    ext_info = run("info", "ext-target.efw")
+    assert b"T002A (0x002A)" in ext_info.stdout
+    # Reject self-contradictory metadata and invalid/ambiguous targets before touching files.
     base = ("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "MCU", "-v", "1.0.0.0")
     run(*base, "--hw-ver-min", "9", "--hw-ver-max", "1", "-o", "bad-range.efw", ok=False)
     run(*base, "--min-allow-version", "2.0.0.0", "-o", "bad-version.efw", ok=False)
-    run("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", "99",
-        "-v", "1.0.0.0", "-o", "bad-target.efw", ok=False)
+    for bad_target in ("0", "65536", "T0001", "T002a"):
+        run("pack", "-i", "input.bin", "-p", "1", "-d", "1", "-t", bad_target,
+            "-v", "1.0.0.0", "-o", "bad-target.efw", ok=False)
     run(*base, "-n", "../escape", ok=False)
     run(*base, "-o", "input.bin", "--overwrite", ok=False)
     assert (root / "input.bin").read_bytes() == payload

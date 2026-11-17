@@ -3058,9 +3058,141 @@ int main(void)
 
             printf("  [PASS] 深度风险 11: 统一管理器混合目标共存绑定与逐目标切断验证通过\n");
         }
+
+        /* 深度风险 12: T002A (42) / TFFFF (65535) 扩展目标端到端升级与双实例文件名缓冲隔离 */
+        {
+            reset_soes_environment();
+            static mock_driver_t drv_42;
+            static mock_driver_t drv_hi;
+            mock_driver_init(&drv_42);
+            mock_driver_init(&drv_hi);
+
+            ecat_target_registry_t ext_reg;
+            assert(ecat_target_registry_init(&ext_reg) == 0);
+            harness_add_fw_target(&ext_reg, 42U, "dsp_42", &drv_42);
+            harness_add_fw_target(&ext_reg, 65535U, "fpga_ffff", &drv_hi);
+
+            ecat_foe_core_t core_a, core_b;
+            ecat_foe_core_cfg_t cfg_a, cfg_b;
+            init_harness_cfg(&cfg_a, &drv_42);
+            cfg_a.registry = &ext_reg;
+            assert(ecat_foe_core_init(&core_a, &cfg_a) == 0);
+
+            ecat_target_registry_t reg_b;
+            assert(ecat_target_registry_init(&reg_b) == 0);
+            harness_add_fw_target(&reg_b, 42U, "dsp_42", &drv_42);
+            init_harness_cfg(&cfg_b, &drv_42);
+            cfg_b.project_name = "OTHER_DEV";
+            cfg_b.registry = &reg_b;
+            assert(ecat_foe_core_init(&core_b, &cfg_b) == 0);
+
+            ecat_transfer_t tr_a, tr_b;
+            assert(ecat_transfer_init(&tr_a, &ext_reg, &core_a) == 0);
+            assert(ecat_transfer_init(&tr_b, &reg_b, &core_b) == 0);
+
+            ecat_foe_soes_adapter_t adp_a, adp_b;
+            ecat_foe_soes_init(&adp_a, &core_a, s_foe_cfg.buffer_size);
+            ecat_foe_soes_init(&adp_b, &core_b, s_foe_cfg.buffer_size);
+            assert(ecat_foe_soes_bind_transfer(&adp_a, &tr_a) == 0);
+            assert(ecat_foe_soes_bind_transfer(&adp_b, &tr_b) == 0);
+            assert(ecat_foe_soes_set_mbx_context(&adp_a, MBXcontrol, MBX, 4, 128) == 0);
+            assert(ecat_foe_soes_set_mbx_context(&adp_b, MBXcontrol, MBX, 4, 128) == 0);
+
+            ecat_foe_soes_reset_target_file_map(&adp_a);
+            assert(ecat_foe_soes_set_target_file_map(&adp_a, 42U, 0) == 0);
+            assert(ecat_foe_soes_set_target_file_map(&adp_a, 65535U, 1) == 0);
+            ecat_foe_soes_reset_target_file_map(&adp_b);
+            assert(ecat_foe_soes_set_target_file_map(&adp_b, 42U, 0) == 0);
+
+            s_foe_cfg.n_files = 2;
+            s_foe_files[0].name = "placeholder_42";
+            s_foe_files[0].filepass = 0;
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+            s_foe_files[1].name = "placeholder_ffff";
+            s_foe_files[1].filepass = 0;
+            s_foe_files[1].write_function = ecat_foe_soes_write_cb;
+
+            /* 1. 验证双实例 synced_filenames 彼此隔离不互相覆盖 */
+            foe_file_cfg_t files_b[1] = {{ .name = "init_b", .max_data = 4096, .write_function = ecat_foe_soes_write_cb }};
+            foe_cfg_t cfg_soes_b = s_foe_cfg;
+            cfg_soes_b.files = files_b;
+            cfg_soes_b.n_files = 1;
+            const char *fn_b = "OTHER_DEV_T002A_V9.9.9.9.efw";
+            _FOE *req = (_FOE *)&MBX[0];
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fn_b));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, fn_b, strlen(fn_b));
+            assert(ecat_foe_soes_pre_process_hook(&adp_b, &cfg_soes_b, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fn_b)) == 0);
+            assert(strcmp(files_b[0].name, fn_b) == 0);
+
+            /* 2. 在实例 A 上拒绝 T0001 歧义别名，随后完成 T002A 与 TFFFF 真实 SOES 升级闭环 */
+            const char *bad_alias = "SERVO_DRV_T0001_V1.0.0.0.efw";
+            MBXcontrol[0].state = MBXstate_inclaim;
+            req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(bad_alias));
+            req->mbxheader.mbxtype = MBXFOE;
+            req->foeheader.opcode = FOE_OP_WRQ;
+            req->foeheader.password = 0;
+            memcpy(req->filename, bad_alias, strlen(bad_alias));
+            assert(ecat_foe_soes_pre_process_hook(&adp_a, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(bad_alias)) != 0);
+            ESC_foeprocess();
+            assert(get_last_outbound_foe()->foeheader.opcode == FOE_OP_ERR);
+            mock_master_read_outbox();
+
+            const uint16_t tids[2] = { 42U, 65535U };
+            const char *fns[2] = { "SERVO_DRV_T002A_V1.2.3.4.efw", "SERVO_DRV_TFFFF_V1.2.3.4.efw" };
+            mock_driver_t *drvs[2] = { &drv_42, &drv_hi };
+            for (size_t i = 0; i < 2U; i++) {
+                uint8_t payload[24];
+                for (size_t b = 0; b < sizeof(payload); b++) payload[b] = (uint8_t)(0x70U + b + i);
+                size_t efw_len = build_harness_test_efw(
+                    s_efw_test_buf, 0x10010001U, 0x00000001U, 1U, 1U,
+                    tids[i], 0U, 0x01020304U, 0U, payload, sizeof(payload));
+
+                MBXcontrol[0].state = MBXstate_inclaim;
+                req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + strlen(fns[i]));
+                req->mbxheader.mbxtype = MBXFOE;
+                req->foeheader.opcode = FOE_OP_WRQ;
+                req->foeheader.password = 0;
+                memcpy(req->filename, fns[i], strlen(fns[i]));
+                assert(ecat_foe_soes_pre_process_hook(&adp_a, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + strlen(fns[i])) == 0);
+                ESC_foeprocess();
+                _FOE *ack0 = get_last_outbound_foe();
+                assert(ack0->foeheader.opcode == FOE_OP_ACK && ack0->foeheader.packetnumber == 0);
+                assert(ecat_foe_soes_post_process_hook(&adp_a, &s_foe_cfg, (const uint8_t *)ack0, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+                mock_master_read_outbox();
+
+                /* 实例 B 的私有文件名缓冲完全未被实例 A 改写 */
+                assert(strcmp(files_b[0].name, fn_b) == 0);
+
+                uint32_t pkt_no = 1U;
+                for (size_t off = 0; off < efw_len;) {
+                    size_t chunk = (efw_len - off > 116U) ? 116U : (efw_len - off);
+                    MBXcontrol[0].state = MBXstate_inclaim;
+                    req->mbxheader.length = (uint16_t)(sizeof(_FOEh) + chunk);
+                    req->mbxheader.mbxtype = MBXFOE;
+                    req->foeheader.opcode = FOE_OP_DATA;
+                    req->foeheader.packetnumber = pkt_no;
+                    memcpy(req->data, s_efw_test_buf + off, chunk);
+                    assert(ecat_foe_soes_pre_process_hook(&adp_a, &s_foe_cfg, MBX, sizeof(_MBXh) + sizeof(_FOEh) + chunk) == 0);
+                    ESC_foeprocess();
+                    _FOE *dack = get_last_outbound_foe();
+                    assert(dack->foeheader.opcode == FOE_OP_ACK && dack->foeheader.packetnumber == pkt_no);
+                    assert(ecat_foe_soes_post_process_hook(&adp_a, &s_foe_cfg, (const uint8_t *)dack, sizeof(_MBXh) + sizeof(_FOEh)) == 0);
+                    mock_master_read_outbox();
+                    off += chunk;
+                    pkt_no++;
+                }
+                assert(drvs[i]->valid_flag == true);
+                assert(memcmp(drvs[i]->mem, payload, sizeof(payload)) == 0);
+            }
+            printf("  [PASS] 深度风险 12: T002A/TFFFF 真实 SOES 升级闭环与双实例文件名缓冲隔离验证通过\n");
+        }
     }
 
     printf("------------------------------------------------------------\n");
-    printf(">>> 真实 SOES esc_foe 11 项宿主行为与前置钩子验证全部通过！<<<\n");
+    printf(">>> 真实 SOES esc_foe 12 项宿主行为与前置钩子验证全部通过！<<<\n");
     return 0;
 }

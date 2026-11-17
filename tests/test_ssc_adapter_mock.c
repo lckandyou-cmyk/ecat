@@ -593,6 +593,73 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 16 项测试全部通过 (Mock 环境) <<<\n");
+    {
+        printf("[TEST 17] 验证扩展目标 T002A (42) / TFFFF (65535) 升级与 T0001 歧义拒绝...");
+        static mock_driver_t drv_42;
+        static mock_driver_t drv_hi;
+        mock_driver_init(&drv_42);
+        mock_driver_init(&drv_hi);
+        mock_driver_init(&s_mock_drv);
+
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        assert(ecat_target_registry_init(&registry) == 0);
+        ecat_target_desc_t t1 = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
+            .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
+        };
+        ecat_target_desc_t t42 = {
+            .target_id = 42U, .name = "dsp_42", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
+            .enabled = true, .driver = { .io = drv_42.driver }, .user_ctx = &drv_42
+        };
+        ecat_target_desc_t thi = {
+            .target_id = 65535U, .name = "fpga_ffff", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
+            .enabled = true, .driver = { .io = drv_hi.driver }, .user_ctx = &drv_hi
+        };
+        assert(ecat_target_registry_add(&registry, &t1) == 0);
+        assert(ecat_target_registry_add(&registry, &t42) == 0);
+        assert(ecat_target_registry_add(&registry, &thi) == 0);
+
+        setup_core_with_registry(&core, &registry, &adapter, 64U);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
+
+        /* T0001 歧义编码必须返回 NOTFOUND */
+        const char *bad_alias = "SERVO_DRV_T0001_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, bad_alias, (uint16_t)strlen(bad_alias), 0U) == ECAT_FOE_SSC_ERR_NOTFOUND);
+
+        /* T002A 与 TFFFF 完整短包升级闭环 */
+        const uint16_t ext_ids[2] = { 42U, 65535U };
+        const char *ext_names[2] = { "SERVO_DRV_T002A_V1.0.0.0.efw", "SERVO_DRV_TFFFF_V1.0.0.0.efw" };
+        mock_driver_t *ext_drvs[2] = { &drv_42, &drv_hi };
+        for (size_t i = 0; i < 2U; i++) {
+            uint8_t ext_payload[24];
+            for (size_t b = 0; b < sizeof(ext_payload); b++) ext_payload[b] = (uint8_t)(0x40U + b + i);
+            uint8_t ext_img[256];
+            size_t ext_len = build_valid_firmware(ext_img, sizeof(ext_img), ext_payload, sizeof(ext_payload));
+            /* 更新头部 target_id 并重算 Header CRC */
+            ext_img[20] = (uint8_t)(ext_ids[i] & 0xFFU);
+            ext_img[21] = (uint8_t)(ext_ids[i] >> 8);
+            uint32_t hcrc = ecat_foe_crc32_calc(ext_img, 144U);
+            ext_img[144] = (uint8_t)hcrc; ext_img[145] = (uint8_t)(hcrc >> 8);
+            ext_img[146] = (uint8_t)(hcrc >> 16); ext_img[147] = (uint8_t)(hcrc >> 24);
+
+            assert(ecat_foe_ssc_on_write(&adapter, ext_names[i], (uint16_t)strlen(ext_names[i]), 0U) == 0U);
+            for (size_t off = 0; off < ext_len;) {
+                uint16_t chunk = (uint16_t)((ext_len - off > 64U) ? 64U : (ext_len - off));
+                assert(ecat_foe_ssc_on_data(&adapter, ext_img + off, chunk) == 0U);
+                off += chunk;
+            }
+            assert(adapter.session_active == false);
+            assert(ext_drvs[i]->valid_flag == true);
+            assert(memcmp(ext_drvs[i]->mem, ext_payload, sizeof(ext_payload)) == 0);
+        }
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 17 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

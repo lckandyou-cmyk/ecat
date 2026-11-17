@@ -22,8 +22,14 @@ def main():
                                  '--public-key-out', str(root / 'public'),
                                  '--out', str(root / 'signed.efw')], check=True)
         subprocess.run(common + ['--out', str(root / 'unsigned.efw')], check=True)
+        ext_cmd = [sys.executable, str(tool), 'pack', '--bin', str(root / 'payload'),
+                   '--project-id', '0x10010001', '--hardware-id', '1', '--target', 'T002A',
+                   '--fw-version', '1.2.3.4', '--signing-key', str(root / 'seed'),
+                   '--out', str(root / 'signed_t002a.efw')]
+        subprocess.run(ext_cmd, check=True)
         subprocess.run([str(harness), str(root / 'signed.efw'),
-                        str(root / 'unsigned.efw'), str(root / 'public')], check=True)
+                        str(root / 'unsigned.efw'), str(root / 'public'),
+                        str(root / 'signed_t002a.efw')], check=True)
 
 
 if __name__ == '__main__':

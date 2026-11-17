@@ -146,7 +146,10 @@ static bool parse_filename_reverse(
     const char *target_part = fn + second_us + 1;
     size_t target_part_len = last_us - (second_us + 1);
 
-    /* 严格区分大小写: 目标字样必须全大写 */
+    /* 严格区分大小写与唯一双射规范:
+     * - 1..4 仅接受传统规范名称 MCU / FPGA / SII / EEPROM
+     * - 5..65535 仅接受 'T' + 4 位大写十六进制 (T0005 ~ TFFFF)
+     * - 严禁 T0000 ~ T0004、小写十六进制或非 4 位宽度等歧义别名 */
     uint16_t tid = 0;
     if (target_part_len == 3 && memcmp(target_part, "MCU", 3) == 0) {
         tid = ECAT_FOE_TARGET_MCU;
@@ -156,6 +159,26 @@ static bool parse_filename_reverse(
         tid = ECAT_FOE_TARGET_SII;
     } else if (target_part_len == 6 && memcmp(target_part, "EEPROM", 6) == 0) {
         tid = ECAT_FOE_TARGET_EEPROM;
+    } else if (target_part_len == 5 && target_part[0] == 'T') {
+        uint32_t parsed_hex = 0U;
+        for (size_t i = 1U; i < 5U; i++) {
+            char c = target_part[i];
+            uint32_t nibble = 0U;
+            if (c >= '0' && c <= '9') {
+                nibble = (uint32_t)(c - '0');
+            } else if (c >= 'A' && c <= 'F') {
+                nibble = (uint32_t)(c - 'A') + 10U;
+            } else {
+                *out_err = ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN;
+                return false;
+            }
+            parsed_hex = (parsed_hex << 4) | nibble;
+        }
+        if (parsed_hex < 5U || parsed_hex > 0xFFFFU) {
+            *out_err = ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN;
+            return false;
+        }
+        tid = (uint16_t)parsed_hex;
     } else {
         *out_err = ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN;
         return false;
