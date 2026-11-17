@@ -72,24 +72,55 @@ static bool g_current_test_failed = false;
 /* -------------------------------------------------------------------------- */
 /*                            平台防回滚桩接口实现                            */
 /* -------------------------------------------------------------------------- */
-static uint32_t s_mock_version_floors[ECAT_FOE_TARGET_COUNT] = {0};
+typedef struct {
+    uint16_t target_id;
+    bool used;
+    uint32_t floor_ver;
+} mock_floor_entry_t;
+
+static mock_floor_entry_t s_mock_version_floors[16];
 static bool s_mock_get_floor_fail = false;
 static bool s_mock_commit_fail = false;
 static uint16_t s_mock_floor_fail_target_id = 0;
 static unsigned s_mock_get_floor_calls = 0;
+static uint16_t s_mock_last_floor_target_id = 0;
+
+static mock_floor_entry_t *mock_find_or_alloc_floor(uint16_t target_id)
+{
+    if (target_id == 0U) {
+        return NULL;
+    }
+    mock_floor_entry_t *free_slot = NULL;
+    for (size_t i = 0; i < sizeof(s_mock_version_floors) / sizeof(s_mock_version_floors[0]); i++) {
+        if (s_mock_version_floors[i].used && s_mock_version_floors[i].target_id == target_id) {
+            return &s_mock_version_floors[i];
+        }
+        if (!s_mock_version_floors[i].used && free_slot == NULL) {
+            free_slot = &s_mock_version_floors[i];
+        }
+    }
+    if (free_slot != NULL) {
+        free_slot->used = true;
+        free_slot->target_id = target_id;
+        free_slot->floor_ver = 0U;
+    }
+    return free_slot;
+}
 
 int port_get_version_floor(uint16_t target_id, uint32_t *floor_ver)
 {
     s_mock_get_floor_calls++;
+    s_mock_last_floor_target_id = target_id;
     if (s_mock_get_floor_fail) {
         return -1;
     }
     if (s_mock_floor_fail_target_id != 0 && target_id == s_mock_floor_fail_target_id) {
         return -1;
     }
-    if (target_id >= 1 && target_id <= ECAT_FOE_TARGET_COUNT) {
+    mock_floor_entry_t *entry = mock_find_or_alloc_floor(target_id);
+    if (entry != NULL) {
         if (floor_ver != NULL) {
-            *floor_ver = s_mock_version_floors[target_id - 1];
+            *floor_ver = entry->floor_ver;
         }
         return 0;
     }
@@ -101,8 +132,9 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
     if (s_mock_commit_fail) {
         return -1;
     }
-    if (target_id >= 1 && target_id <= ECAT_FOE_TARGET_COUNT) {
-        s_mock_version_floors[target_id - 1] = new_floor_ver;
+    mock_floor_entry_t *entry = mock_find_or_alloc_floor(target_id);
+    if (entry != NULL) {
+        entry->floor_ver = new_floor_ver;
         return 0;
     }
     return -1;
@@ -115,12 +147,13 @@ static int mock_finalize_with_version_floor(uint16_t target_id,
                                              void *user_ctx)
 {
     mock_driver_t *mock = (mock_driver_t *)user_ctx;
-    if (mock == NULL || target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT ||
+    mock_floor_entry_t *entry = mock_find_or_alloc_floor(target_id);
+    if (mock == NULL || entry == NULL ||
         s_mock_commit_fail || mock->inject_fail_finalize) {
         return -1;
     }
 
-    uint32_t current_floor = s_mock_version_floors[target_id - 1U];
+    uint32_t current_floor = entry->floor_ver;
     uint32_t committed_floor = (current_floor > min_allow_version)
         ? current_floor : min_allow_version;
     if (fw_version < current_floor || fw_version < committed_floor) {
@@ -131,7 +164,7 @@ static int mock_finalize_with_version_floor(uint16_t target_id,
     if (mock->op_count < (sizeof(mock->op_history) / sizeof(mock->op_history[0]))) {
         mock->op_history[mock->op_count++] = MOCK_OP_FINALIZE;
     }
-    s_mock_version_floors[target_id - 1U] = committed_floor;
+    entry->floor_ver = committed_floor;
     mock->valid_flag = true;
     return 0;
 }
@@ -299,8 +332,69 @@ static int test_wrq(ecat_foe_core_t *core, const char *fn)
     return test_core_begin_filename(core, fn, (fn != NULL) ? strlen(fn) : 0);
 }
 
+static ecat_target_registry_t s_core_regs[8];
+static unsigned s_core_reg_cursor = 0U;
+
+static ecat_target_registry_t *alloc_test_core_reg(void)
+{
+    ecat_target_registry_t *reg = &s_core_regs[(s_core_reg_cursor++) & 7U];
+    (void)ecat_target_registry_init(reg);
+    return reg;
+}
+
+static ecat_target_desc_t *mock_core_target_mut(ecat_foe_core_t *core, uint16_t target_id)
+{
+    if (core == NULL || core->registry == NULL) {
+        return NULL;
+    }
+    ecat_target_registry_t *reg = (ecat_target_registry_t *)core->registry;
+    for (size_t i = 0; i < reg->target_count; i++) {
+        if (reg->targets[i].target_id == target_id) {
+            return &reg->targets[i];
+        }
+    }
+    return NULL;
+}
+
+static void add_mock_fw_target(ecat_target_registry_t *reg,
+                               uint16_t target_id,
+                               const char *name,
+                               bool enabled,
+                               uint32_t max_size,
+                               uint32_t write_unit,
+                               mock_driver_t *mock)
+{
+    static mock_driver_t s_disabled_mock;
+    ecat_target_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.target_id = target_id;
+    strncpy(desc.name, name, sizeof(desc.name) - 1U);
+    desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    desc.permissions = ECAT_PERM_WRITE;
+    desc.max_size = max_size;
+    desc.write_unit = write_unit;
+    desc.enabled = enabled;
+    if (mock != NULL) {
+        mock->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+        desc.driver.io = mock->driver;
+        desc.user_ctx = mock;
+    } else {
+        mock_driver_init(&s_disabled_mock);
+        s_disabled_mock.driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+        desc.driver.io = s_disabled_mock.driver;
+        desc.user_ctx = &s_disabled_mock;
+    }
+    TEST_ASSERT_EQ_INT(ecat_target_registry_add(reg, &desc), 0, "测试固件目标注册成功");
+}
+
 static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, mock_driver_t *mock_sii, mock_driver_t *mock_eeprom)
 {
+    ecat_target_registry_t *reg = alloc_test_core_reg();
+    add_mock_fw_target(reg, 1U, "mcu", (mock_mcu != NULL), 384U * 1024U, 8U, mock_mcu);
+    add_mock_fw_target(reg, 2U, "fpga", false, 64U * 1024U, 8U, NULL);
+    add_mock_fw_target(reg, 3U, "sii", (mock_sii != NULL), 4U * 1024U, 2U, mock_sii);
+    add_mock_fw_target(reg, 4U, "eeprom", (mock_eeprom != NULL), 8U * 1024U, 4U, mock_eeprom);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -309,43 +403,7 @@ static void setup_default_core(ecat_foe_core_t *core, mock_driver_t *mock_mcu, m
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    /* Target 1: MCU */
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = (mock_mcu != NULL);
-    cfg.targets[0].max_payload_size = 384U * 1024U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = (mock_mcu != NULL) ? &mock_mcu->driver : NULL;
-    cfg.targets[0].user_ctx = mock_mcu;
-    if (mock_mcu != NULL) {
-        mock_mcu->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
-    }
-
-    /* Target 2: FPGA (禁用) */
-    cfg.targets[1].target_id = 2;
-    cfg.targets[1].enabled = false;
-
-    /* Target 3: SII */
-    cfg.targets[2].target_id = 3;
-    cfg.targets[2].enabled = (mock_sii != NULL);
-    cfg.targets[2].max_payload_size = 4U * 1024U;
-    cfg.targets[2].write_unit = 2U;
-    cfg.targets[2].driver = (mock_sii != NULL) ? &mock_sii->driver : NULL;
-    cfg.targets[2].user_ctx = mock_sii;
-    if (mock_sii != NULL) {
-        mock_sii->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
-    }
-
-    /* Target 4: EEPROM */
-    cfg.targets[3].target_id = 4;
-    cfg.targets[3].enabled = (mock_eeprom != NULL);
-    cfg.targets[3].max_payload_size = 8U * 1024U;
-    cfg.targets[3].write_unit = 4U;
-    cfg.targets[3].driver = (mock_eeprom != NULL) ? &mock_eeprom->driver : NULL;
-    cfg.targets[3].user_ctx = mock_eeprom;
-    if (mock_eeprom != NULL) {
-        mock_eeprom->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
-    }
+    cfg.registry = reg;
 
     s_mock_get_floor_fail = false;
     s_mock_commit_fail = false;
@@ -383,6 +441,9 @@ static int feed_stream_chunks(
 static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
                                 mock_signature_verifier_t *verifier)
 {
+    ecat_target_registry_t *reg = alloc_test_core_reg();
+    add_mock_fw_target(reg, 1U, "mcu", true, (uint32_t)sizeof(mcu->mem), 8U, mcu);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -390,13 +451,7 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
     cfg.hardware_id = 1U;
     cfg.local_hw_ver = 1U;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    cfg.targets[0].target_id = 1U;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = sizeof(mcu->mem);
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &mcu->driver;
-    cfg.targets[0].user_ctx = mcu;
-    mcu->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+    cfg.registry = reg;
     cfg.signature_verify_enable = true;
     cfg.signature_verifier.begin = mock_signature_begin;
     cfg.signature_verifier.update = mock_signature_update;
@@ -409,18 +464,36 @@ static void setup_signature_core(ecat_foe_core_t *core, mock_driver_t *mcu,
 static int setup_test_transfer(ecat_transfer_t *transfer, ecat_target_registry_t *registry,
                                ecat_foe_core_t *core, mock_driver_t *mcu)
 {
-    ecat_target_desc_t target;
-    memset(&target, 0, sizeof(target));
-    target.target_id = 1U;
-    memcpy(target.name, "mcu", sizeof("mcu"));
-    target.type = ECAT_TARGET_TYPE_FIRMWARE;
-    target.max_size = sizeof(mcu->mem);
-    target.permissions = ECAT_PERM_WRITE;
-    target.enabled = true;
-    target.driver.io = mcu->driver;
-    target.user_ctx = mcu;
-    if (ecat_target_registry_init(registry) != 0 ||
-        ecat_target_registry_add(registry, &target) != 0) return -1;
+    if (registry == NULL || core == NULL || mcu == NULL) return -1;
+    if (core->registry != NULL) {
+        *registry = *core->registry;
+        for (size_t i = 0; i < registry->target_count; i++) {
+            if (registry->targets[i].target_id == 1U) {
+                registry->targets[i].max_size = (uint32_t)sizeof(mcu->mem);
+                registry->targets[i].write_unit = 8U;
+                registry->targets[i].permissions = ECAT_PERM_WRITE;
+                registry->targets[i].enabled = true;
+                registry->targets[i].driver.io = mcu->driver;
+                registry->targets[i].user_ctx = mcu;
+            }
+        }
+    } else {
+        ecat_target_desc_t target;
+        memset(&target, 0, sizeof(target));
+        target.target_id = 1U;
+        memcpy(target.name, "mcu", sizeof("mcu"));
+        target.type = ECAT_TARGET_TYPE_FIRMWARE;
+        target.max_size = (uint32_t)sizeof(mcu->mem);
+        target.write_unit = 8U;
+        target.permissions = ECAT_PERM_WRITE;
+        target.enabled = true;
+        target.driver.io = mcu->driver;
+        target.user_ctx = mcu;
+        if (ecat_target_registry_init(registry) != 0 ||
+            ecat_target_registry_add(registry, &target) != 0) return -1;
+    }
+    core->registry = registry;
+    core->cfg.registry = registry;
     return ecat_transfer_init(transfer, registry, core);
 }
 
@@ -637,14 +710,16 @@ static void test_owned_sync_upgrade_stream(void)
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_INVALID,
                        "stale manager cannot use a reinitialized core");
     ecat_transfer_t replacement;
-    TEST_ASSERT_EQ_INT(ecat_transfer_init(&replacement, &registry, &core), 0, "new manager binds reconstructed core");
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&replacement, &registry, &core), -1,
+                       "mismatched registry rejected by transfer_init");
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&replacement, (ecat_target_registry_t *)core.registry, &core), 0, "new manager binds reconstructed core");
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_INVALID,
                        "old manager cannot use the new manager's core");
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&replacement, &file, &request, &other), ECAT_TRANSFER_COMPLETE,
                        "new manager can start");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&replacement, &file, other), ECAT_TRANSFER_COMPLETE,
                        "new manager releases its session");
-    TEST_ASSERT_EQ_INT(ecat_transfer_init(&transfer, &registry, &core), 0, "manager explicitly rebinds");
+    TEST_ASSERT_EQ_INT(ecat_transfer_init(&transfer, (ecat_target_registry_t *)core.registry, &core), 0, "manager explicitly rebinds");
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &file, &request, &other), ECAT_TRANSFER_COMPLETE,
                        "rebound manager can start");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &file, other), ECAT_TRANSFER_COMPLETE, "rebound session cancels");
@@ -839,7 +914,7 @@ static void test_optional_signature_policy_and_readback(void)
     /* 签名与防回滚独立：防回滚开启且版本下限允许时，有效旧版本签名包仍可提交。 */
     memset(&verifier, 0, sizeof(verifier));
     mock_driver_reset(&mcu);
-    s_mock_version_floors[0] = 0U;
+    port_set_version_floor(1U, 0U);
     setup_signature_core(&core, &mcu, &verifier);
     core.cfg.anti_rollback_enable = true;
     n = build_signed_test_efw(efw, payload, sizeof(payload));
@@ -1329,7 +1404,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
 
-    core.cfg.targets[0].max_payload_size = 64U;
+    mock_core_target_mut(&core, 1U)->max_size = 64U;
     uint8_t payload[65];
     memset(payload, 0x77, sizeof(payload));
     uint8_t efw[256];
@@ -1343,7 +1418,7 @@ static void test_capacity_boundary_exact_and_plus_one(void)
     /* 超 1 字节 -> 拒绝 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    core.cfg.targets[0].max_payload_size = 64U;
+    mock_core_target_mut(&core, 1U)->max_size = 64U;
     build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 65);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     ret = ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN);
@@ -1360,7 +1435,7 @@ static void test_write_unit_8_and_256_residual_and_readback_crc_excludes_padding
 
     /* A. write_unit = 8, payload = 11 字节 (末尾补 5 个 0xFF 写入物理介质) */
     setup_default_core(&core, &mcu, NULL, NULL);
-    core.cfg.targets[0].write_unit = 8U;
+    mock_core_target_mut(&core, 1U)->write_unit = 8U;
     uint8_t payload11[11] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
     uint8_t efw[256];
     size_t efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload11, 11);
@@ -1378,7 +1453,7 @@ static void test_write_unit_8_and_256_residual_and_readback_crc_excludes_padding
     /* B. write_unit = 256, payload = 270 字节 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    core.cfg.targets[0].write_unit = 256U;
+    mock_core_target_mut(&core, 1U)->write_unit = 256U;
     uint8_t payload270[270];
     for (int i = 0; i < 270; i++) payload270[i] = (uint8_t)(i + 0x30);
     uint8_t efw_large[512];
@@ -1462,15 +1537,16 @@ static void test_anti_rollback_rejects_target_before_floor_callback(void)
 {
     static mock_driver_t mcu;
     static mock_driver_t sii;
-    const uint16_t header_targets[] = {0U, ECAT_FOE_TARGET_COUNT + 1U, 2U, 3U, 1U};
+    const uint16_t header_targets[] = {0U, 5U, 2U, 3U, 65535U, 1U};
     const uint32_t header_versions[] = {
-        0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U
+        0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U, 0x02000000U
     };
     const ecat_foe_core_err_t expected_errors[] = {
         ECAT_FOE_CORE_ERR_HDR_VERIFY,
         ECAT_FOE_CORE_ERR_HDR_VERIFY,
         ECAT_FOE_CORE_ERR_HDR_VERIFY,
         ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH,
+        ECAT_FOE_CORE_ERR_HDR_VERIFY,
         ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH
     };
     uint8_t payload[16] = {0};
@@ -1708,6 +1784,10 @@ static void test_config_validation_rules(void)
     static mock_driver_t mcu;
     mock_driver_init(&mcu);
 
+    ecat_target_registry_t cfg_reg;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_init(&cfg_reg), 0, "初始化注册表成功");
+    add_mock_fw_target(&cfg_reg, 1U, "mcu", true, 384U * 1024U, 8U, &mcu);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -1715,15 +1795,13 @@ static void test_config_validation_rules(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 384U * 1024U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &mcu.driver;
-    cfg.targets[0].user_ctx = &mcu;
+    cfg.registry = &cfg_reg;
 
-    /* A. 空指针配置 */
+    /* A. 空指针配置与 NULL 注册表 */
     TEST_ASSERT(ecat_foe_core_init(&core, NULL) != 0, "cfg 为 NULL 初始化必须报错");
+    cfg.registry = NULL;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "cfg.registry 为 NULL 必须报错");
+    cfg.registry = &cfg_reg;
 
     /* B. project_name 为空指针或空串或超长/无终止符 */
     cfg.project_name = NULL;
@@ -1800,55 +1878,55 @@ static void test_config_validation_rules(void)
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
 
     /* D. 启用目标的驱动及全部 7 个回调完整性逐一校验 */
-    cfg.targets[0].driver = NULL;
-    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "启用目标 driver 为 NULL 必须报错");
+    memset(&cfg_reg.targets[0].driver.io, 0, sizeof(cfg_reg.targets[0].driver.io));
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "启用目标驱动回调全空必须报错");
 
     ecat_foe_target_driver_t bad_drv = mcu.driver;
 
-    bad_drv = mcu.driver; bad_drv.init = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.init = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 init 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.invalidate = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.invalidate = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 invalidate 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.erase_to = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.erase_to = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 erase_to 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.write = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.write = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 write 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.read = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.read = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 read 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.finalize = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.finalize = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 finalize 回调必须报错");
 
-    bad_drv = mcu.driver; bad_drv.abort = NULL; cfg.targets[0].driver = &bad_drv;
+    bad_drv = mcu.driver; bad_drv.abort = NULL; cfg_reg.targets[0].driver.io = bad_drv;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "缺少 abort 回调必须报错");
 
     bad_drv = mcu.driver;
     bad_drv.finalize_with_version_floor = NULL;
-    cfg.targets[0].driver = &bad_drv;
+    cfg_reg.targets[0].driver.io = bad_drv;
     cfg.anti_rollback_enable = true;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0,
                 "启用防回滚但缺少原子提交回调必须拒绝配置");
     cfg.anti_rollback_enable = false;
 
-    cfg.targets[0].driver = &mcu.driver;
+    cfg_reg.targets[0].driver.io = mcu.driver;
 
     /* E. write_unit 边界 */
-    cfg.targets[0].write_unit = 0;
+    cfg_reg.targets[0].write_unit = 0;
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "write_unit == 0 必须报错");
-    cfg.targets[0].write_unit = 512; /* > ECAT_FOE_MAX_WRITE_UNIT */
+    cfg_reg.targets[0].write_unit = 512; /* > ECAT_FOE_MAX_WRITE_UNIT */
     TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "write_unit > 256 必须报错");
-    cfg.targets[0].write_unit = 8U;
+    cfg_reg.targets[0].write_unit = 8U;
 
     /* F. 分区容量非零且为 write_unit 整数倍 */
-    cfg.targets[0].max_payload_size = 0;
-    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_payload_size == 0 必须报错");
-    cfg.targets[0].max_payload_size = 100U; /* 不是 8 的倍数 */
-    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_payload_size 不是 write_unit 整数倍必须报错");
-    cfg.targets[0].max_payload_size = 384U * 1024U;
+    cfg_reg.targets[0].max_size = 0;
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_size == 0 必须报错");
+    cfg_reg.targets[0].max_size = 100U; /* 不是 8 的倍数 */
+    TEST_ASSERT(ecat_foe_core_init(&core, &cfg) != 0, "max_size 不是 write_unit 整数倍必须报错");
+    cfg_reg.targets[0].max_size = 384U * 1024U;
 
     /* G. 初始化成功与未配置核心拒绝 WRQ */
     TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), 0, "合规配置初始化必须成功");
@@ -2154,8 +2232,8 @@ static void test_padding_capacity_boundary(void)
     setup_default_core(&core, &mcu, NULL, NULL);
 
     /* 将 MCU 目标容量限制临时缩小为 16 字节，write_unit 为 8 */
-    core.cfg.targets[0].max_payload_size = 16U;
-    core.cfg.targets[0].write_unit = 8U;
+    mock_core_target_mut(&core, 1U)->max_size = 16U;
+    mock_core_target_mut(&core, 1U)->write_unit = 8U;
 
     /* A. 正例：payload_len = 15 (接近上限 16)，尾部补齐 1 字节到 16 字节，恰好等于 max_payload_size */
     uint8_t payload[15];
@@ -2175,13 +2253,13 @@ static void test_padding_capacity_boundary(void)
     /* B. 防御性分支验证：模拟运行时异常导致补齐后的 write_end 超出目标物理限额 */
     mock_driver_reset(&mcu);
     setup_default_core(&core, &mcu, NULL, NULL);
-    core.cfg.targets[0].write_unit = 8U;
+    mock_core_target_mut(&core, 1U)->write_unit = 8U;
     /* 发送 4 字节数据滞留于 residual_buf */
     efw_len = build_test_efw(efw, 0x10010001U, 0x00000001U, 1, 1, 1, 0, 0x01000000U, 0, payload, 4);
     test_wrq(&core, "SERVO_DRV_MCU_V1.0.0.0.efw");
     ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN + 4U);
     /* 此时在 on_end 执行前，若分区物理限额被异常收缩为 4 字节 (补齐需要写到第 8 字节) */
-    core.cfg.targets[0].max_payload_size = 4U;
+    mock_core_target_mut(&core, 1U)->max_size = 4U;
     ret = ecat_foe_core_on_end(&core);
     TEST_ASSERT(ret != 0, "补齐超出分区容量限制必须被拒绝");
     TEST_ASSERT_EQ_INT(core.last_error, ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED, "报 PAYLOAD_LIMIT_EXCEEDED");
@@ -2193,8 +2271,11 @@ static void test_padding_capacity_boundary(void)
 static void test_failed_session_new_wrq_full_upgrade_recovery(void)
 {
     static mock_driver_t mcu;
+    static ecat_target_registry_t temp_reg;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_init(&temp_reg), 0, "初始化注册表");
+    add_mock_fw_target(&temp_reg, 1U, "mcu", true, 0x00010000U, 8U, &mcu);
 
     /* 验证外部临时栈字符串内存契约: init 之后外部字符串被覆写为垃圾值，核心仍安全工作 */
     {
@@ -2209,12 +2290,7 @@ static void test_failed_session_new_wrq_full_upgrade_recovery(void)
         temp_cfg.hardware_id = 0x00000001U;
         temp_cfg.local_hw_ver = 1;
         temp_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-        temp_cfg.targets[0].target_id = 1;
-        temp_cfg.targets[0].enabled = true;
-        temp_cfg.targets[0].max_payload_size = 0x00010000U;
-        temp_cfg.targets[0].write_unit = 8;
-        temp_cfg.targets[0].driver = &mcu.driver;
-        temp_cfg.targets[0].user_ctx = &mcu;
+        temp_cfg.registry = &temp_reg;
 
         int init_ret = ecat_foe_core_init(&core, &temp_cfg);
         TEST_ASSERT_EQ_INT(init_ret, 0, "使用栈项目名初始化核心机成功");
@@ -2483,6 +2559,21 @@ static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
     caller_obj.magic = 0xCAFE1234U;
     mock_driver_init(&caller_obj.drv_impl);
 
+    ecat_target_registry_t caller_reg;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_init(&caller_reg), 0, "初始化 caller 注册表");
+    ecat_target_desc_t caller_desc;
+    memset(&caller_desc, 0, sizeof(caller_desc));
+    caller_desc.target_id = 1U;
+    strncpy(caller_desc.name, "mcu", sizeof(caller_desc.name) - 1U);
+    caller_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    caller_desc.permissions = ECAT_PERM_WRITE;
+    caller_desc.max_size = 384U * 1024U;
+    caller_desc.write_unit = 8U;
+    caller_desc.enabled = true;
+    caller_desc.driver.io = caller_obj.drv_impl.driver;
+    caller_desc.user_ctx = &caller_obj;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_add(&caller_reg, &caller_desc), 0, "注册 caller 目标");
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -2491,19 +2582,12 @@ static void test_idle_copy_erases_original_with_user_ctx_upgrade(void)
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    /* Target 1: MCU - user_ctx 明确指向调用方对象 caller_obj */
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 384U * 1024U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &caller_obj.drv_impl.driver;
-    cfg.targets[0].user_ctx = &caller_obj;
+    cfg.registry = &caller_reg;
 
     ecat_foe_core_t core;
     int ret_init = ecat_foe_core_init(&core, &cfg);
     TEST_ASSERT_EQ_INT(ret_init, 0, "初始化 core 成功");
-    TEST_ASSERT(core.cfg.targets[0].user_ctx == &caller_obj, "user_ctx 指向调用方对象");
+    TEST_ASSERT(ecat_target_registry_find_by_id(core.registry, 1U)->user_ctx == &caller_obj, "user_ctx 指向调用方对象");
 
     /* 在空闲态对 core 实施按值浅拷贝分发 */
     ecat_foe_core_t core_copy = core;
@@ -2613,6 +2697,10 @@ static void test_null_project_name_rejection(void)
     ecat_foe_core_t core;
 
     /* 1. 全新未初始化 core 传入 NULL 项目名 */
+    ecat_target_registry_t null_reg;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_init(&null_reg), 0, "初始化注册表");
+    add_mock_fw_target(&null_reg, 1U, "mcu", true, 384U * 1024U, 8U, &mcu);
+
     ecat_foe_core_cfg_t null_cfg;
     memset(&null_cfg, 0, sizeof(null_cfg));
     null_cfg.project_name = NULL; /* NULL 项目名 */
@@ -2620,12 +2708,7 @@ static void test_null_project_name_rejection(void)
     null_cfg.hardware_id = 0x00000001U;
     null_cfg.local_hw_ver = 1U;
     null_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    null_cfg.targets[0].target_id = 1;
-    null_cfg.targets[0].enabled = true;
-    null_cfg.targets[0].max_payload_size = 384U * 1024U;
-    null_cfg.targets[0].write_unit = 8U;
-    null_cfg.targets[0].driver = &mcu.driver;
-    null_cfg.targets[0].user_ctx = &mcu;
+    null_cfg.registry = &null_reg;
 
     int ret = ecat_foe_core_init(&core, &null_cfg);
     TEST_ASSERT_EQ_INT(ret, -1, "NULL 项目名配置必须返回 -1 拒绝");
@@ -3392,15 +3475,135 @@ static void test_query_functions_null_and_unconfigured_flag_preconditions(void)
     TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&zero_unconf_core, 1), "未配置 core 对象 target_incomplete 返回 false");
     TEST_ASSERT(ecat_foe_core_get_project_name(&zero_unconf_core) == NULL, "未配置 core 对象 get_project_name 返回 NULL");
 
-    /* 3. 正常配置初始化后，非法 target_id 边界检测 */
+    /* 3. 正常配置初始化后，非法与未注册 target_id 边界检测 */
     static mock_driver_t mcu;
     mock_driver_init(&mcu);
     ecat_foe_core_t core;
     setup_default_core(&core, &mcu, NULL, NULL);
     TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 0), "target_id == 0 越界返回 false");
-    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, ECAT_FOE_TARGET_COUNT + 1), "target_id 超过最大配额返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 999U), "未注册 target_id 返回 false");
+    TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 65535U), "未注册高编号 target_id 返回 false");
     TEST_ASSERT(ecat_foe_core_get_project_name(&core) != NULL, "初始化有效 core 获取项目名成功");
     TEST_ASSERT(strcmp(ecat_foe_core_get_project_name(&core), "SERVO_DRV") == 0, "获取项目名匹配期望值");
+}
+
+/* 稀疏高编号固件目标 (42 / 65535)、验签、防回滚、槽位位图与 DATA 目标隔离验证 */
+static void test_sparse_high_targets_and_data_target_rejection(void)
+{
+    static mock_driver_t drv_42;
+    static mock_driver_t drv_65535;
+    static mock_driver_t drv_data;
+    mock_driver_init(&drv_42);
+    mock_driver_init(&drv_65535);
+    mock_driver_init(&drv_data);
+
+    ecat_target_registry_t reg;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_init(&reg), 0, "初始化稀疏注册表");
+    add_mock_fw_target(&reg, 42U, "dsp_fw", true, (uint32_t)sizeof(drv_42.mem), 8U, &drv_42);
+    add_mock_fw_target(&reg, 65535U, "fpga_hi", true, (uint32_t)sizeof(drv_65535.mem), 16U, &drv_65535);
+
+    /* 同时注册一个可写 DATA 目标 7，验证固件核心严格拒绝 DATA 目标混入 */
+    ecat_target_desc_t data_desc;
+    memset(&data_desc, 0, sizeof(data_desc));
+    data_desc.target_id = 7U;
+    strncpy(data_desc.name, "cal_data", sizeof(data_desc.name) - 1U);
+    data_desc.type = ECAT_TARGET_TYPE_DATA;
+    data_desc.permissions = ECAT_PERM_RW;
+    data_desc.max_size = 256U;
+    data_desc.enabled = true;
+    data_desc.driver.io = drv_data.driver;
+    data_desc.user_ctx = &drv_data;
+    TEST_ASSERT_EQ_INT(ecat_target_registry_add(&reg, &data_desc), 0, "注册 DATA 目标 7");
+
+    mock_signature_verifier_t verifier;
+    memset(&verifier, 0, sizeof(verifier));
+
+    ecat_foe_core_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.project_id = 0x10010001U;
+    cfg.project_name = "SERVO_DRV";
+    cfg.hardware_id = 1U;
+    cfg.local_hw_ver = 1U;
+    cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+    cfg.anti_rollback_enable = true;
+    cfg.signature_verify_enable = true;
+    cfg.signature_verifier.begin = mock_signature_begin;
+    cfg.signature_verifier.update = mock_signature_update;
+    cfg.signature_verifier.finish = mock_signature_finish;
+    cfg.signature_verifier.abort = mock_signature_abort;
+    cfg.signature_verifier.user_ctx = &verifier;
+    cfg.registry = &reg;
+
+    ecat_foe_core_t core;
+    TEST_ASSERT_EQ_INT(ecat_foe_core_init(&core, &cfg), 0, "稀疏高编号配置初始化成功");
+
+    /* 1. DATA 目标 7 被固件 begin_request 严格拒绝 */
+    ecat_upgrade_request_t bad_req = { 7U, 0x01000000U };
+    TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &bad_req),
+                       ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN,
+                       "DATA 目标必须被固件核心作为未知固件目标拒绝");
+    TEST_ASSERT_EQ_INT(drv_data.count_init, 0, "拒绝 DATA 目标不得触发驱动 init");
+
+    /* 2. 对稀疏目标 42 发起升级、中途打断验证槽位位图隔离，再恢复完成 */
+    const uint16_t high_ids[2] = { 42U, 65535U };
+    mock_driver_t *high_drvs[2] = { &drv_42, &drv_65535 };
+
+    for (size_t idx = 0; idx < 2U; idx++) {
+        uint16_t tid = high_ids[idx];
+        mock_driver_t *drv = high_drvs[idx];
+        port_set_version_floor(tid, 0x01000000U);
+
+        uint8_t payload[24];
+        for (size_t b = 0; b < sizeof(payload); b++) {
+            payload[b] = (uint8_t)((tid & 0xFFU) ^ (uint8_t)(b + 0x21U));
+        }
+        uint8_t efw[256];
+        size_t efw_len = build_test_efw(efw, 0x10010001U, 1U, 1U, 1U, tid,
+                                        0U, 0x02000000U,
+                                        0x01050000U, payload, sizeof(payload));
+        efw[64] = 1U;
+        efw[66] = 1U;
+        efw[68] = ECAT_FOE_EFW_SIGNATURE_LEN;
+        efw[70] = ECAT_FOE_EFW_KEY_ID_LEN;
+        for (size_t k = 0; k < ECAT_FOE_EFW_KEY_ID_LEN; k++) efw[72U + k] = (uint8_t)(0x10U + k);
+        memset(efw + 80U, 0xA5, ECAT_FOE_EFW_SIGNATURE_LEN);
+        uint32_t hcrc = ecat_foe_crc32_calc(efw, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+        efw[144] = (uint8_t)hcrc; efw[145] = (uint8_t)(hcrc >> 8);
+        efw[146] = (uint8_t)(hcrc >> 16); efw[147] = (uint8_t)(hcrc >> 24);
+
+        memset(&verifier, 0, sizeof(verifier));
+        memcpy(verifier.expected, efw, efw_len);
+        verifier.expected_len = efw_len;
+
+        /* 先中断一次，验证槽位位图不会因高编号产生位移 UB，且与其他目标互不串扰 */
+        ecat_upgrade_request_t req = { tid, 0x02000000U };
+        TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &req), ECAT_FOE_CORE_OK, "高编号 begin_request 成功");
+        TEST_ASSERT_EQ_INT(ecat_foe_core_on_data(&core, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0, "头部通过并触发 invalidate");
+        TEST_ASSERT_EQ_INT(s_mock_last_floor_target_id, tid, "port_get_version_floor 收到真实高编号 target_id");
+        ecat_foe_core_on_abort(&core);
+        TEST_ASSERT(ecat_foe_core_upgrade_incomplete(&core), "中断后全局 incomplete 置位");
+        TEST_ASSERT(ecat_foe_core_target_upgrade_incomplete(&core, tid), "当前高编号目标 incomplete 置位");
+        TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, 7U), "DATA 目标不受污染");
+
+        /* 重新完整升级恢复 */
+        mock_driver_reset(drv);
+        drv->driver.finalize_with_version_floor = mock_finalize_with_version_floor;
+        memset(&verifier, 0, sizeof(verifier));
+        memcpy(verifier.expected, efw, efw_len);
+        verifier.expected_len = efw_len;
+
+        TEST_ASSERT_EQ_INT(ecat_foe_core_begin_request(&core, &req), ECAT_FOE_CORE_OK, "恢复 begin_request 成功");
+        TEST_ASSERT_EQ_INT(feed_stream_chunks(&core, efw, efw_len, 37U, false), 0, "分块流式写入成功");
+        TEST_ASSERT_EQ_INT(ecat_foe_core_on_end(&core), 0, "高编号验签与防回滚原子提交成功");
+        TEST_ASSERT(!ecat_foe_core_target_upgrade_incomplete(&core, tid), "升级完成后该目标 incomplete 清除");
+        TEST_ASSERT(memcmp(drv->mem, payload, sizeof(payload)) == 0, "高编号介质数据一致");
+
+        uint32_t updated_floor = 0U;
+        TEST_ASSERT_EQ_INT(port_get_version_floor(tid, &updated_floor), 0, "读取更新后版本下限");
+        TEST_ASSERT_EQ_INT(updated_floor, 0x01050000U, "高编号版本下限已原子提交更新");
+        ecat_foe_core_on_abort(&core); /* 重置核心状态机至 IDLE 以发起下一目标会话 */
+    }
+    TEST_ASSERT(!ecat_foe_core_upgrade_incomplete(&core), "全部高编号目标完成后全局 incomplete 清零");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3482,6 +3685,7 @@ int main(void)
     RUN_TEST(test_cross_target_init_fail_vs_invalidate_fail);
     RUN_TEST(test_cross_target_finalize_prevents_duplicate_abort);
     RUN_TEST(test_query_functions_null_and_unconfigured_flag_preconditions);
+    RUN_TEST(test_sparse_high_targets_and_data_target_rejection);
 
     printf("\n核心测试运行统计: 共执行断言 %d 项 | 通过: %d 项 | 失败: %d 项\n",
            g_core_tests_run, g_core_tests_passed, g_core_tests_failed);

@@ -17,7 +17,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "ecat_foe_efw.h"
-#include "../src/ecat_foe_efw_internal.h"
 
 static int g_tests_run = 0;
 static int g_tests_passed = 0;
@@ -119,8 +118,8 @@ static void build_legacy_v1_vector(uint8_t out[64U + 16U])
     out[63] = (uint8_t)(crc >> 24);
 }
 
-/* 辅助函数：构造默认正例从站本地配置 */
-static void get_default_valid_config(ecat_foe_efw_config_t *cfg)
+/* 辅助函数：构造默认正例从站本地配置与单目标配置 */
+static void get_default_valid_config(ecat_foe_efw_config_t *cfg, ecat_foe_efw_target_cfg_t *tcfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->project_id = 0x10010001U;
@@ -128,25 +127,11 @@ static void get_default_valid_config(ecat_foe_efw_config_t *cfg)
     cfg->local_hw_ver = 1U;
     cfg->anti_rollback_enable = false;
 
-    /* Target 1: MCU */
-    cfg->targets[0].enabled = true;
-    cfg->targets[0].max_payload_size = 1024U * 1024U;
-    cfg->targets[0].version_floor = 0x01000000U;
-
-    /* Target 2: FPGA */
-    cfg->targets[1].enabled = false;
-    cfg->targets[1].max_payload_size = 0U;
-    cfg->targets[1].version_floor = 0U;
-
-    /* Target 3: SII */
-    cfg->targets[2].enabled = false;
-    cfg->targets[2].max_payload_size = 0U;
-    cfg->targets[2].version_floor = 0U;
-
-    /* Target 4: EEPROM */
-    cfg->targets[3].enabled = false;
-    cfg->targets[3].max_payload_size = 0U;
-    cfg->targets[3].version_floor = 0U;
+    if (tcfg != NULL) {
+        tcfg->enabled = true;
+        tcfg->max_payload_size = 1024U * 1024U;
+        tcfg->version_floor = 0x01000000U;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -209,8 +194,9 @@ static void test_spec_section8_positive_example(void)
 
     /* 阶段 3: 全量元数据安全核验 */
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 3 元数据安全核验应当成功");
 }
 
@@ -219,57 +205,57 @@ static void test_selected_target_identity(void)
     ecat_foe_efw_header_t hdr;
     ecat_foe_efw_config_t cfg;
     ecat_foe_efw_target_cfg_t target = {true, 16U, 0U};
-    get_default_valid_config(&cfg);
+    get_default_valid_config(&cfg, NULL);
     TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(s_spec_valid_efw,
         ECAT_FOE_EFW_HEADER_MIN_LEN, &hdr), ECAT_FOE_EFW_OK, "解析有效头");
 
     /* 高编号与常规扩展编号目标 (65535 / 42) */
     hdr.target_id = 65535U;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 65535U, &target),
         ECAT_FOE_EFW_OK, "允许已解析的高编号目标 65535");
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_TARGET_MISMATCH, "拒绝包头 target_id 与选定目标不一致");
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 65535U, NULL),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 65535U, NULL),
         ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝本地未注册目标");
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 0U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 0U, &target),
         ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝零选定目标 ID");
 
     hdr.target_id = 0U;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 0U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 0U, &target),
         ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "拒绝包头零编号目标");
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_TARGET_UNKNOWN, "包头零编号即便选定目标非零也按未知目标拒绝");
 
     /* 禁用状态与零容量失败关闭 (Fail-Closed) */
     hdr.target_id = 42U;
     target.enabled = false;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED, "拒绝禁用目标");
     target.enabled = true;
     target.max_payload_size = 0U;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "零容量 max_payload_size == 0 必须失败关闭");
     target.max_payload_size = 15U;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "执行本地容量限制");
     target.max_payload_size = 16U;
 
     /* 扩展目标上的强制签名与防回滚策略 */
     cfg.signature_verify_enable = true;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_SIGNATURE_REQUIRED, "高编号目标强制验签时拒绝未签名包");
     hdr.signed_package = true;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_OK, "高编号目标已签名包通过元数据核验");
     cfg.signature_verify_enable = false;
     hdr.signed_package = false;
 
     cfg.anti_rollback_enable = true;
     target.version_floor = 0x02000000U;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_ERR_ANTI_ROLLBACK, "高编号目标执行独立防回滚下限拦截");
     target.version_floor = hdr.fw_version;
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_validate_selected(&hdr, &cfg, 42U, &target),
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, 42U, &target),
         ECAT_FOE_EFW_OK, "高编号目标版本达到下限时放行");
 }
 
@@ -347,8 +333,9 @@ static void test_negative_case3_bad_flags(void)
     TEST_ASSERT_EQ_INT(hdr.flags, 0x0001, "hdr.flags 应当为 0x0001");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_FLAGS_NONZERO, "反例 3 阶段 3 应当拒绝非零 flags");
 }
 
@@ -466,8 +453,9 @@ static void test_edge_case_reserved_nonzero(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应装配成功");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_RESERVED_NONZERO, "reserved 非零应当被阶段 3 检出");
 }
 
@@ -492,8 +480,9 @@ static void test_edge_case_hw_ver_min_gt_max(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HW_VER_RANGE_INVALID, "hw_ver_min > hw_ver_max 应当被检出");
 }
 
@@ -507,10 +496,11 @@ static void test_edge_case_local_hw_ver_not_supported(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
     cfg.local_hw_ver = 2U; /* 固件仅支持 [1, 1] */
 
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HW_VER_NOT_SUPPORTED, "本地硬件版本超出区间应当被拒绝");
 }
 
@@ -524,17 +514,18 @@ static void test_edge_case_id_mismatch(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
 
     /* project_id 不符 */
     cfg.project_id = 0x99999999U;
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_PROJECT_ID_MISMATCH, "project_id 不符应当被检出");
 
     /* 恢复 project_id，测试 hardware_id 不符 */
     cfg.project_id = 0x10010001U;
     cfg.hardware_id = 0x88888888U;
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_HARDWARE_ID_MISMATCH, "hardware_id 不符应当被检出");
 }
 
@@ -548,10 +539,11 @@ static void test_edge_case_target_not_enabled(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    cfg.targets[0].enabled = false; /* 目标 1 MCU 未开启 */
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    tcfg.enabled = false; /* 目标 1 MCU 未开启 */
 
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED, "target 未使能应当被阶段 3 拒绝");
 }
 
@@ -565,10 +557,11 @@ static void test_edge_case_payload_too_large(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    cfg.targets[0].max_payload_size = 8U; /* 限制上限为 8 字节，而 payload 为 16 字节 */
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    tcfg.max_payload_size = 8U; /* 限制上限为 8 字节，而 payload 为 16 字节 */
 
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE, "payload 超出分区限额应当被拒绝");
 }
 
@@ -587,8 +580,9 @@ static void test_zero_length_payload_rejected(void)
     TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage2(empty_efw, sizeof(empty_efw), &hdr),
                        ECAT_FOE_EFW_OK, "带有效头 CRC 的空载荷头部可被解析");
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
-    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg),
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
+    TEST_ASSERT_EQ_INT(ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg),
                        ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY,
                        "阶段 3 必须拒绝空载荷");
 }
@@ -615,9 +609,10 @@ static void test_edge_case_min_allow_version_invalid(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
 
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_MIN_ALLOW_VER_INVALID, "min_allow_version > fw_version 应当被拒绝");
 }
 
@@ -631,11 +626,12 @@ static void test_edge_case_anti_rollback(void)
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_OK, "阶段 2 应当通过");
 
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
     cfg.anti_rollback_enable = true;
-    cfg.targets[0].version_floor = 0x02000000U; /* 版本底线为 V2.0，而固件是 V1.2.3.4 */
+    tcfg.version_floor = 0x02000000U; /* 版本底线为 V2.0，而固件是 V1.2.3.4 */
 
-    err = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+    err = ecat_foe_efw_parse_stage3(&hdr, &cfg, hdr.target_id, &tcfg);
     TEST_ASSERT_EQ_INT(err, ECAT_FOE_EFW_ERR_ANTI_ROLLBACK, "防回滚生效时应当拦截低版本固件");
 }
 
@@ -660,7 +656,8 @@ static void test_property_512_bit_flips(void)
 {
     uint8_t buf[ECAT_FOE_EFW_HEADER_MIN_LEN];
     ecat_foe_efw_config_t cfg;
-    get_default_valid_config(&cfg);
+    ecat_foe_efw_target_cfg_t tcfg;
+    get_default_valid_config(&cfg, &tcfg);
 
     int failed_rejections = 0;
     for (size_t byte_idx = 0; byte_idx < 64; byte_idx++) {
@@ -680,7 +677,7 @@ static void test_property_512_bit_flips(void)
                 continue;
             }
 
-            ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(&hdr, &cfg);
+            ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(&hdr, &cfg, 1U, &tcfg);
             if (err3 != ECAT_FOE_EFW_OK) {
                 continue;
             }

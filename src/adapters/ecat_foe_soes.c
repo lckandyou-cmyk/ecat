@@ -36,11 +36,14 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
     adapter->staged_filename[0] = '\0';
     adapter->staged_target_id = 0;
     adapter->original_n_files = 0;
+    memset(adapter->synced_filenames, 0, sizeof(adapter->synced_filenames));
+    memset(adapter->file_map, 0, sizeof(adapter->file_map));
     memset(&adapter->mbx_ctx, 0, sizeof(adapter->mbx_ctx));
     adapter->mbx_ctx.newly_claimed_slot = -1;
-    adapter->target_to_file_map[0] = -1;
-    for (size_t i = 1; i <= ECAT_FOE_TARGET_COUNT; i++) {
-        adapter->target_to_file_map[i] = (int8_t)(i - 1);
+    size_t default_maps = (ECAT_FOE_SOES_MAX_FILES < 4U) ? ECAT_FOE_SOES_MAX_FILES : 4U;
+    for (size_t i = 0; i < default_maps; i++) {
+        adapter->file_map[i].target_id = (uint16_t)(i + 1U);
+        adapter->file_map[i].file_idx = (uint16_t)i;
     }
     s_active_adapter = adapter;
 }
@@ -61,17 +64,16 @@ int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_
 
 static bool soes_target_is_async(const ecat_foe_soes_adapter_t *adapter, uint16_t target_id)
 {
-    if (adapter == NULL) return false;
-    if (adapter->core != NULL && target_id >= 1U && target_id <= ECAT_FOE_TARGET_COUNT) {
-        if (adapter->core->cfg.targets[target_id - 1U].enabled &&
-            adapter->core->cfg.targets[target_id - 1U].asynchronous) {
-            return true;
-        }
-    }
+    if (adapter == NULL || target_id == 0U) return false;
+    const ecat_target_registry_t *reg = NULL;
     if (soes_has_transport(adapter) && adapter->transport.transfer != NULL &&
         adapter->transport.transfer->registry != NULL) {
-        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(
-            adapter->transport.transfer->registry, target_id);
+        reg = adapter->transport.transfer->registry;
+    } else if (adapter->core != NULL) {
+        reg = adapter->core->registry;
+    }
+    if (reg != NULL) {
+        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(reg, target_id);
         if (desc != NULL && desc->enabled && desc->asynchronous) {
             return true;
         }
@@ -90,33 +92,49 @@ void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter)
     if (adapter == NULL) {
         return;
     }
-    for (size_t i = 0; i <= ECAT_FOE_TARGET_COUNT; i++) {
-        adapter->target_to_file_map[i] = -1;
-    }
+    memset(adapter->file_map, 0, sizeof(adapter->file_map));
 }
 
 int ecat_foe_soes_set_target_file_map(ecat_foe_soes_adapter_t *adapter, uint16_t target_id, int32_t file_idx)
 {
-    if (adapter == NULL) {
-        return -1;
-    }
-    if (target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT) {
+    if (adapter == NULL || target_id == 0U) {
         return -1;
     }
     if (file_idx < 0) {
-        adapter->target_to_file_map[target_id] = -1;
+        for (size_t i = 0; i < ECAT_FOE_SOES_MAX_FILES; i++) {
+            if (adapter->file_map[i].target_id == target_id) {
+                adapter->file_map[i].target_id = 0U;
+                adapter->file_map[i].file_idx = 0U;
+            }
+        }
         return 0;
     }
     if ((uint32_t)file_idx >= ECAT_FOE_SOES_MAX_FILES) {
         return -1;
     }
     /* 防御重复目标映射：拒绝多个不同目标映射至相同文件表索引，防止名称与配置冲突 */
-    for (size_t t = 1; t <= ECAT_FOE_TARGET_COUNT; t++) {
-        if (t != target_id && adapter->target_to_file_map[t] == (int8_t)file_idx) {
+    size_t existing_slot = ECAT_FOE_SOES_MAX_FILES;
+    size_t free_slot = ECAT_FOE_SOES_MAX_FILES;
+    for (size_t i = 0; i < ECAT_FOE_SOES_MAX_FILES; i++) {
+        uint16_t mapped_tid = adapter->file_map[i].target_id;
+        if (mapped_tid == 0U) {
+            if (free_slot == ECAT_FOE_SOES_MAX_FILES) {
+                free_slot = i;
+            }
+            continue;
+        }
+        if (mapped_tid == target_id) {
+            existing_slot = i;
+        } else if (adapter->file_map[i].file_idx == (uint16_t)file_idx) {
             return -1;
         }
     }
-    adapter->target_to_file_map[target_id] = (int8_t)file_idx;
+    size_t dst_slot = (existing_slot < ECAT_FOE_SOES_MAX_FILES) ? existing_slot : free_slot;
+    if (dst_slot >= ECAT_FOE_SOES_MAX_FILES) {
+        return -1;
+    }
+    adapter->file_map[dst_slot].target_id = target_id;
+    adapter->file_map[dst_slot].file_idx = (uint16_t)file_idx;
     return 0;
 }
 
@@ -293,11 +311,6 @@ static void foe_neutralize_slot_if_ack(uint8_t *slot_buf, uint16_t buffer_size)
     }
 }
 
-#ifndef ECAT_FOE_SOES_MAX_FILES
-#define ECAT_FOE_SOES_MAX_FILES 4
-#endif
-static char s_synced_filenames[ECAT_FOE_SOES_MAX_FILES][FOE_FN_MAX + 1] = {{0}};
-
 int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
                                    foe_cfg_t *foe_cfg,
                                    const uint8_t *mbx_buf,
@@ -445,8 +458,14 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         return (vrc != 0) ? vrc : ECAT_FOE_ERRCODE_NOTDEFINED;
     }
 
-    /* 严格目标范围校验：通过目标映射表查找文件条目索引，支持稀疏与紧凑文件表 */
-    int8_t mapped_idx = (tid <= ECAT_FOE_TARGET_COUNT) ? adapter->target_to_file_map[tid] : -1;
+    /* 严格目标范围校验：通过实例内聚的显式目标映射表查找文件条目索引，支持任意 1..65535 稀疏目标与紧凑文件表 */
+    int32_t mapped_idx = -1;
+    for (size_t i = 0; i < ECAT_FOE_SOES_MAX_FILES; i++) {
+        if (adapter->file_map[i].target_id == tid) {
+            mapped_idx = (int32_t)adapter->file_map[i].file_idx;
+            break;
+        }
+    }
     if (mapped_idx < 0 || (uint32_t)mapped_idx >= foe_cfg->n_files || (uint32_t)mapped_idx >= ECAT_FOE_SOES_MAX_FILES) {
         foe_cfg->n_files = 0;
         adapter->has_staged_wrq = false;
@@ -455,9 +474,9 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
 
     uint32_t file_idx = (uint32_t)mapped_idx;
 
-    /* 同步动态文件名至对应条目独立的专属缓冲区 */
-    memcpy(s_synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
-    foe_cfg->files[file_idx].name = s_synced_filenames[file_idx];
+    /* 同步动态文件名至适配器实例私有的条目缓冲区，杜绝多实例静态缓冲互相踩踏 */
+    memcpy(adapter->synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
+    foe_cfg->files[file_idx].name = adapter->synced_filenames[file_idx];
 
     /* 暂存该合规 WRQ，等待原生 SOES 校验密码与 BOOT 状态接受后再行激活会话 */
     adapter->has_staged_wrq = true;

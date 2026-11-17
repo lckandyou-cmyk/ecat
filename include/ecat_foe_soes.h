@@ -93,6 +93,14 @@ typedef struct {
     int8_t         newly_claimed_slot; /**< 本轮由 SOES 新认领并置为 outreq 的槽位索引 (-1 表示未认领) */
 } ecat_foe_soes_mbx_ctx_t;
 
+/**
+ * @brief 显式目标 ID 到 SOES 文件表索引的映射条目 (支持任意 1..65535 稀疏目标)
+ */
+typedef struct {
+    uint16_t target_id; /**< 目标 ID (1..65535，0 表示空槽位) */
+    uint16_t file_idx;  /**< SOES foe_cfg->files[] 索引 (0 .. ECAT_FOE_SOES_MAX_FILES - 1) */
+} ecat_foe_soes_file_map_t;
+
 typedef struct {
     ecat_foe_core_t        *core;
     ecat_foe_transport_t    transport;
@@ -106,9 +114,10 @@ typedef struct {
     uint32_t                pending_data_packet; /**< 本轮 DATA 包号 */
     bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
     char                    staged_filename[FOE_FN_MAX + 1]; /**< 暂存的 WRQ 文件名 */
+    char                    synced_filenames[ECAT_FOE_SOES_MAX_FILES][FOE_FN_MAX + 1]; /**< 实例私有文件名同步缓冲 */
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
     uint32_t                original_n_files;   /**< 从站初始配置的真实文件条目数 */
-    int8_t                  target_to_file_map[ECAT_FOE_TARGET_COUNT + 1]; /**< 目标 ID (1..4) 到 files[] 索引映射 (-1 为未映射) */
+    ecat_foe_soes_file_map_t file_map[ECAT_FOE_SOES_MAX_FILES]; /**< 显式目标 ID 到 files[] 索引映射表 */
     ecat_foe_soes_mbx_ctx_t mbx_ctx;            /**< SOES 邮箱分配与状态观察上下文 (不篡改 SOES 内存所有权) */
 } ecat_foe_soes_adapter_t;
 
@@ -172,7 +181,7 @@ void ecat_foe_soes_reset_target_file_map(ecat_foe_soes_adapter_t *adapter);
  * 若传入 file_idx < 0 则将该目标置为未映射。
  *
  * @param adapter   适配层上下文指针
- * @param target_id 目标 ID (1..ECAT_FOE_TARGET_COUNT)
+ * @param target_id 目标 ID (1..65535)
  * @param file_idx  SOES foe_cfg->files[] 数组索引 (若为 -1 表示取消映射)
  * @return 0 成功；非 0 表示参数非法或发生重复映射冲突
  */

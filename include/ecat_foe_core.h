@@ -17,8 +17,7 @@
 #include <stdbool.h>
 #include "ecat_foe_efw.h"
 #include "ecat_upgrade_request.h"
-#include "ecat_foe_target.h"
-#include "ecat_foe_target_async.h"
+#include "ecat_target_registry.h"
 #ifdef ECAT_FOE_CONFIG_HEADER
 #include ECAT_FOE_CONFIG_HEADER
 #else
@@ -142,27 +141,11 @@ typedef enum {
 } ecat_foe_state_t;
 
 /* -------------------------------------------------------------------------- */
-/*                             核心配置与注册结构                             */
+/*                             核心配置与运行结构                             */
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief 目标驱动注册描述符
- */
-typedef struct {
-    uint16_t target_id;                        /**< 目标 ID (1..4) */
-    bool     enabled;                          /**< 是否启用 */
-    uint32_t max_payload_size;                 /**< 分区最大允许容量 (字节) */
-    uint32_t write_unit;                       /**< 驱动物理写入对齐单位 (如 8, 256) */
-    const ecat_foe_target_driver_t *driver;    /**< 驱动操作集 */
-    void    *user_ctx;                         /**< 驱动自定义上下文 */
-    const ecat_foe_target_async_ops_t *async_ops; /**< 可选非阻塞驱动操作集 */
-    void *async_user_ctx;                      /**< 异步驱动上下文 */
-    bool asynchronous;                         /**< 该目标只通过异步 API 接入 */
-    bool async_safe_session_abort;             /**< 显式声明该驱动的 abort_session 符合安全契约 (不破坏未失效镜像)；置位时，若 start(INIT) 立即失败框架将安全调用 abort_session 清理部分获取的资源；未置位时沿用旧驱动契约由驱动自行回滚，框架不调用 abort_session */
-} ecat_foe_target_desc_t;
-
-/**
- * @brief 核心机全局静态配置
+ * @brief 核心机全局静态配置 (目标描述统一由 ecat_target_registry_t 承载)
  */
 typedef struct {
     uint32_t project_id;                       /**< 本地工程 ID (0x10010001) */
@@ -182,7 +165,7 @@ typedef struct {
     bool     signature_verify_enable;          /**< 本地强制验签，默认关闭 */
     ecat_foe_signature_verifier_t signature_verifier; /**< 用户提供的 Ed25519ph 后端 */
     uint16_t max_header_size;                  /**< 允许的头部缓冲上限 (至少 148 字节且 4 字节对齐) */
-    ecat_foe_target_desc_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 */
+    const ecat_target_registry_t *registry;    /**< 唯一权威目标注册表 (生命周期须覆盖 core 绑定期) */
 } ecat_foe_core_cfg_t;
 
 /**
@@ -193,8 +176,7 @@ typedef struct {
  * - 【非活跃状态 (IDLE) 浅拷贝限制】：
  *   未绑定异步会话时，在尚未开启升级会话的状态下支持按值复制/赋值；异步核心初始化后，abort hook 指向绑定会话，
  *   在解除异步绑定或 deinit 前也不得复制或移动；
- *   【重要警告】：浅拷贝仅复制标量配置，targets[i].driver 与 targets[i].user_ctx 仍为共享指针！
- *   若多实例浅拷贝自同一模板，除非为各实例显式替换独立的 user_ctx 上下文，否则严禁并发操作！
+ *   【重要警告】：浅拷贝仅复制标量配置，registry 及其内部目标驱动上下文仍为共享指针，非互斥下严禁并发操作！
  * - 【活动会话状态 (WRQ_ACKED / DATA / 升级进行中)】：
  *   严禁浅拷贝或移动！由于底层驱动会话状态（物理扇区擦除水位、会话独占锁、增量 CRC）具有硬件唯一性，
  *   复制活动会话会导致多实例状态撕裂与物理硬件踩踏破坏。
@@ -205,8 +187,8 @@ typedef struct {
     ecat_foe_state_t    state;                 /**< 当前状态机状态 */
     ecat_foe_core_err_t last_error;            /**< 最近一次细分错误码 */
 
-    /* 会话生命周期与驱动调用保护标记 */
-    uint32_t            target_incomplete_mask; /**< 按目标跟踪的未闭环位掩码 (bit T-1 表示目标 T 驱动已 init 但未成功 finalize) */
+    /* 会话生命周期与驱动调用保护标记 (按注册表槽位保存未闭环状态，消除高编号目标整数位移未定义行为) */
+    uint8_t             target_incomplete_slots[(ECAT_TARGET_REGISTRY_MAX_BLOCKS + 7U) / 8U];
     bool                session_active;        /**< 会话是否已激活 (已调用过 init/invalidate) */
     bool                driver_abort_called;   /**< 底层驱动 abort() 是否已被调用过 (防重复 abort) */
     bool                driver_finalized;      /**< 底层驱动 finalize() 是否已成功执行 (防 finalize 后 abort) */
@@ -214,16 +196,16 @@ typedef struct {
     bool                signature_active;      /**< 验签会话已 begin，尚未 finish/abort */
     void              (*async_abort_hook)(void *ctx); /**< 异步会话清理钩子，由异步核心注册 */
     void               *async_abort_ctx;
-    void               *shared_session;       /**< 跨管理器共享会话仲裁器 (指向 ecat_upgrade_session_t) */
-    void               *registry;             /**< 关联目标注册表 (用于 ACL 统一拦截) */
-    bool              (*acl_check)(const void *registry, uint16_t transport_id, uint16_t target_id, uint8_t required_perm); /**< 统一 ACL 权限校验钩子 */
+    void               *shared_session;        /**< 跨管理器共享会话仲裁器 (指向 ecat_upgrade_session_t) */
+    const ecat_target_registry_t *registry;    /**< 唯一权威目标注册表 */
 
     /* 本地安全持久化拷贝 (解除对外部配置指针生命周期的依赖) */
     char                local_project_name[ECAT_FOE_MAX_FILENAME_LEN + 1];
 
-    /* WRQ 解析缓存 */
-    uint16_t            req_target_id;         /**< 从文件名解析出的 target_id */
-    uint32_t            req_fw_version;        /**< 从文件名解析出的 fw_version */
+    /* WRQ / 请求解析缓存 */
+    uint16_t            req_target_id;         /**< 当前会话请求的目标 ID (1..65535) */
+    uint32_t            req_fw_version;        /**< 当前会话请求的固件版本号 */
+    size_t              active_target_slot;    /**< 当前目标在注册表中的槽位下标 */
 
     /* 头部装配缓存 */
     uint8_t             header_buf[ECAT_FOE_HEADER_BUF_MAX];
@@ -232,7 +214,7 @@ typedef struct {
     bool                header_complete;       /**< 头部装配校验是否已闭环 */
     ecat_foe_efw_header_t hdr;                 /**< 解析装配后的头部元数据 */
 
-    /* 当前会话绑定的驱动指针 */
+    /* 当前会话绑定的同步驱动指针 */
     const ecat_foe_target_driver_t *active_drv;
     void               *active_user_ctx;
     uint32_t            active_write_unit;     /**< 当前目标的 write_unit */
@@ -324,9 +306,9 @@ bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core);
  *      不声称防御未经零初始化的任意脏内存。
  *
  * @param core 核心机指针
- * @param target_id 目标编号 (1 ~ ECAT_FOE_TARGET_COUNT)
- * @return true 该目标处于升级未闭环状态
- * @return false core 为 NULL、对象配置标记为 false、参数越界、该目标未启动升级或已成功 finalize 闭环
+ * @param target_id 目标编号 (1..65535)
+ * @return true 该固件目标处于升级未闭环状态
+ * @return false core 为 NULL、对象配置标记为 false、目标未注册为固件目标、未启动升级或已成功 finalize 闭环
  */
 bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id);
 

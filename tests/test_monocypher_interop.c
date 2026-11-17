@@ -62,6 +62,21 @@ static int receive(const uint8_t *package, size_t size,
     ecat_foe_monocypher_verifier_t verifier = {0};
     ecat_foe_signature_verifier_t callbacks = {0};
     ecat_foe_monocypher_verifier_init(&verifier, key, 1U, &callbacks);
+
+    ecat_target_registry_t reg;
+    ecat_target_desc_t target = {0};
+    assert(ecat_target_registry_init(&reg) == 0);
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.max_size = MOCK_DRIVER_MEM_SIZE;
+    target.write_unit = 8U;
+    target.enabled = true;
+    target.driver.io = driver->driver;
+    target.user_ctx = driver;
+    assert(ecat_target_registry_add(&reg, &target) == 0);
+
     ecat_foe_core_cfg_t cfg = {0};
     cfg.project_name = "INTEROP";
     cfg.project_id = 0x10010001U;
@@ -70,12 +85,7 @@ static int receive(const uint8_t *package, size_t size,
     cfg.max_header_size = HEADER_SIZE;
     cfg.signature_verify_enable = true;
     cfg.signature_verifier = callbacks;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].target_id = 1U;
-    cfg.targets[0].max_payload_size = MOCK_DRIVER_MEM_SIZE;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &driver->driver;
-    cfg.targets[0].user_ctx = driver;
+    cfg.registry = &reg;
     ecat_foe_core_t core;
     assert(ecat_foe_core_init(&core, &cfg) == 0);
     const char *name = "INTEROP_MCU_V1.2.3.4.efw";
@@ -289,30 +299,6 @@ static void test_one_cross_layer_alias_case(
     ecat_foe_signature_verifier_t callbacks = {0};
     counted_verifier_init(&verifier, key, 1U, &callbacks);
 
-    ecat_foe_core_cfg_t cfg = {0};
-    cfg.project_name = "INTEROP";
-    cfg.project_id = 0x10010001U;
-    cfg.hardware_id = 1U;
-    cfg.local_hw_ver = 1U;
-    cfg.max_header_size = HEADER_SIZE;
-    cfg.signature_verify_enable = true; /* 关键：真实开启密码学 Ed25519ph 验证 */
-    cfg.signature_verifier = callbacks;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].target_id = 1U;
-    cfg.targets[0].max_payload_size = sizeof(flash.flash);
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].asynchronous = true;
-    cfg.targets[0].async_ops = &s_async_mono_flash_ops;
-    cfg.targets[0].async_user_ctx = &flash;
-    cfg.targets[0].driver = &fallback_driver.driver;
-    cfg.targets[0].user_ctx = &fallback_driver;
-
-    static ecat_foe_core_t core;
-    ecat_foe_core_on_abort(&core);
-    core.shared_session = NULL;
-    assert(ecat_foe_core_init(&core, &cfg) == 0);
-    flash.core = &core; /* 供驱动在 abort 发生瞬间捕获核心细分诊断 */
-
     static ecat_target_registry_t reg;
     assert(ecat_target_registry_init(&reg) == 0);
     ecat_target_desc_t fw_target = {0};
@@ -322,10 +308,29 @@ static void test_one_cross_layer_alias_case(
     fw_target.type = ECAT_TARGET_TYPE_FIRMWARE;
     fw_target.permissions = ECAT_PERM_WRITE;
     fw_target.max_size = sizeof(flash.flash);
+    fw_target.write_unit = 8U;
     fw_target.asynchronous = true;
     fw_target.user_ctx = &fallback_driver;
     fw_target.driver.io = fallback_driver.driver;
+    fw_target.driver.fw_async_ops = &s_async_mono_flash_ops;
+    fw_target.driver.fw_async_user_ctx = &flash;
     assert(ecat_target_registry_add(&reg, &fw_target) == 0);
+
+    ecat_foe_core_cfg_t cfg = {0};
+    cfg.project_name = "INTEROP";
+    cfg.project_id = 0x10010001U;
+    cfg.hardware_id = 1U;
+    cfg.local_hw_ver = 1U;
+    cfg.max_header_size = HEADER_SIZE;
+    cfg.signature_verify_enable = true; /* 关键：真实开启密码学 Ed25519ph 验证 */
+    cfg.signature_verifier = callbacks;
+    cfg.registry = &reg;
+
+    static ecat_foe_core_t core;
+    ecat_foe_core_on_abort(&core);
+    core.shared_session = NULL;
+    assert(ecat_foe_core_init(&core, &cfg) == 0);
+    flash.core = &core; /* 供驱动在 abort 发生瞬间捕获核心细分诊断 */
 
     static ecat_transfer_t mgr;
     assert(ecat_transfer_init(&mgr, &reg, &core) == 0);
@@ -525,17 +530,28 @@ int main(int argc, char **argv)
     /* 6. 核心内部两缓冲自身重叠显式拒绝用例 (Core Internal Overlap Rejection) */
     {
         static ecat_foe_core_t reject_core;
+        static ecat_target_registry_t reject_reg;
+        static mock_driver_t rej_drv;
+        mock_driver_init(&rej_drv);
+        assert(ecat_target_registry_init(&reject_reg) == 0);
+        ecat_target_desc_t rej_target = {0};
+        rej_target.target_id = 1U;
+        memcpy(rej_target.name, "mcu", sizeof("mcu"));
+        rej_target.type = ECAT_TARGET_TYPE_FIRMWARE;
+        rej_target.permissions = ECAT_PERM_WRITE;
+        rej_target.max_size = 1024U;
+        rej_target.write_unit = 8U;
+        rej_target.enabled = true;
+        rej_target.driver.io = rej_drv.driver;
+        rej_target.user_ctx = &rej_drv;
+        assert(ecat_target_registry_add(&reject_reg, &rej_target) == 0);
+
         ecat_foe_core_cfg_t reject_cfg = {0};
         reject_cfg.project_name = "REJECT";
         reject_cfg.hardware_id = 1U;
         reject_cfg.local_hw_ver = 1U;
         reject_cfg.max_header_size = HEADER_SIZE;
-        reject_cfg.targets[0].enabled = true;
-        reject_cfg.targets[0].max_payload_size = 1024U;
-        reject_cfg.targets[0].write_unit = 8U;
-        static mock_driver_t rej_drv;
-        mock_driver_init(&rej_drv);
-        reject_cfg.targets[0].driver = &rej_drv.driver;
+        reject_cfg.registry = &reject_reg;
         assert(ecat_foe_core_init(&reject_core, &reject_cfg) == 0);
 
         static ecat_foe_core_async_t rej_sess;

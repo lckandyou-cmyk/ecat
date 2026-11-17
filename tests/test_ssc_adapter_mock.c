@@ -45,10 +45,31 @@ int port_set_version_floor(uint16_t target_id, uint32_t new_floor_ver)
     return 0;
 }
 
-static void setup_core_and_adapter(ecat_foe_core_t *core, ecat_foe_ssc_adapter_t *adapter, uint32_t packet_size)
+static ecat_foe_target_async_result_t dummy_fw_async_start(void *ctx, ecat_foe_target_async_op_t *op)
 {
-    mock_driver_init(&s_mock_drv);
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+static ecat_foe_target_async_result_t dummy_fw_async_poll(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+static void dummy_fw_async_abort(void *ctx) { (void)ctx; }
+static void dummy_fw_async_abort_session(void *ctx) { (void)ctx; }
 
+static const ecat_foe_target_async_ops_t s_dummy_fw_async_ops = {
+    dummy_fw_async_start,
+    dummy_fw_async_poll,
+    dummy_fw_async_abort,
+    dummy_fw_async_abort_session
+};
+
+static void setup_core_with_registry(ecat_foe_core_t *core,
+                                     const ecat_target_registry_t *registry,
+                                     ecat_foe_ssc_adapter_t *adapter,
+                                     uint32_t packet_size)
+{
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = TEST_PROJECT_ID;
@@ -57,13 +78,7 @@ static void setup_core_and_adapter(ecat_foe_core_t *core, ecat_foe_ssc_adapter_t
     cfg.local_hw_ver = TEST_HW_VER;
     cfg.anti_rollback_enable = false;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = TEST_MAX_SIZE;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &s_mock_drv.driver;
-    cfg.targets[0].user_ctx = &s_mock_drv;
+    cfg.registry = registry;
 
     assert(ecat_foe_core_init(core, &cfg) == 0);
     ecat_foe_ssc_init(adapter, core, packet_size);
@@ -77,17 +92,19 @@ static void setup_managed_core_and_adapter(ecat_foe_core_t *core,
     static ecat_target_registry_t registry;
     static ecat_transfer_t transfer;
     ecat_target_desc_t target = {0};
-    setup_core_and_adapter(core, adapter, packet_size);
+    mock_driver_init(&s_mock_drv);
     target.target_id = 1U;
     memcpy(target.name, "mcu", sizeof("mcu"));
     target.type = ECAT_TARGET_TYPE_FIRMWARE;
     target.permissions = ECAT_PERM_WRITE;
     target.max_size = TEST_MAX_SIZE;
+    target.write_unit = 8U;
     target.enabled = true;
     target.driver.io = s_mock_drv.driver;
     target.user_ctx = &s_mock_drv;
     assert(ecat_target_registry_init(&registry) == 0);
     assert(ecat_target_registry_add(&registry, &target) == 0);
+    setup_core_with_registry(core, &registry, adapter, packet_size);
     assert(ecat_transfer_init(&transfer, &registry, core) == 0);
     assert(ecat_foe_ssc_bind_transfer(adapter, &transfer) == 0);
 }
@@ -374,12 +391,12 @@ int main(void)
 
     {
         printf("[TEST 13] SSC shared upgrade ownership...");
-        setup_core_and_adapter(&core, &adapter, 0U);
+        mock_driver_init(&s_mock_drv);
         ecat_target_registry_t registry;
         ecat_transfer_t transfer;
         ecat_target_desc_t target = {
             .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
-            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
             .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
         };
         int other = 0;
@@ -388,6 +405,7 @@ int main(void)
         const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
         assert(ecat_target_registry_init(&registry) == 0);
         assert(ecat_target_registry_add(&registry, &target) == 0);
+        setup_core_with_registry(&core, &registry, &adapter, 0U);
         assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
         assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
         assert(ecat_transfer_begin(&transfer, &other, &request, &token) == ECAT_TRANSFER_COMPLETE);
@@ -412,10 +430,9 @@ int main(void)
     /* [TEST 14] 混合配置共存与无 gate SSC 适配器在 on_write 阶段精准拦截异步目标 */
     {
         printf("[TEST 14] 验证混合配置共存与无 gate SSC 在 on_write 阶段拒绝异步目标...");
-        setup_core_and_adapter(&core, &adapter, 0U);
-        assert(adapter.async_gate == NULL);
+        mock_driver_init(&s_mock_drv);
 
-        /* 1. 混合注册表：包含同步目标 1 (MCU) 与异步数据目标 2 (LOG) */
+        /* 1. 混合注册表：包含同步固件目标 1 (MCU)、异步固件目标 2 (FPGA) 与异步数据目标 3 (LOG) */
         ecat_target_registry_t reg;
         assert(ecat_target_registry_init(&reg) == 0);
         ecat_target_desc_t sync_desc = {
@@ -424,6 +441,7 @@ int main(void)
             .type = ECAT_TARGET_TYPE_FIRMWARE,
             .permissions = ECAT_PERM_WRITE,
             .max_size = TEST_MAX_SIZE,
+            .write_unit = 8U,
             .enabled = true,
             .asynchronous = false,
             .driver = { .io = s_mock_drv.driver },
@@ -431,8 +449,22 @@ int main(void)
         };
         assert(ecat_target_registry_add(&reg, &sync_desc) == 0);
 
-        ecat_target_desc_t async_desc = {
+        ecat_target_desc_t async_fw_desc = {
             .target_id = 2U,
+            .name = "fpga_async",
+            .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = 1024U,
+            .write_unit = 8U,
+            .enabled = true,
+            .asynchronous = true,
+            .driver = { .fw_async_ops = &s_dummy_fw_async_ops },
+            .user_ctx = &s_mock_drv
+        };
+        assert(ecat_target_registry_add(&reg, &async_fw_desc) == 0);
+
+        ecat_target_desc_t async_desc = {
+            .target_id = 3U,
             .name = "log",
             .type = ECAT_TARGET_TYPE_DATA,
             .permissions = ECAT_PERM_RW,
@@ -443,6 +475,9 @@ int main(void)
             .user_ctx = &s_mock_drv
         };
         assert(ecat_target_registry_add(&reg, &async_desc) == 0);
+
+        setup_core_with_registry(&core, &reg, &adapter, 0U);
+        assert(adapter.async_gate == NULL);
 
         ecat_transfer_t transfer;
         assert(ecat_transfer_init(&transfer, &reg, &core) == 0);
@@ -463,14 +498,15 @@ int main(void)
         assert(transfer.session.owner == NULL && !core.session_active);
         assert(s_mock_drv.count_abort == 1U);
 
-        /* 3. 请求异步目标 2: on_write 精准识别该实际目标为异步，直接返回 0x8004 拦截且绝不发 ACK！ */
-        core.cfg.targets[1].target_id = 2U;
-        core.cfg.targets[1].enabled = true;
-        core.cfg.targets[1].max_payload_size = 1024U;
-        core.cfg.targets[1].driver = &s_mock_drv.driver;
+        /* 3. 请求异步固件目标 2: on_write 精准识别该实际目标为异步，直接返回 0x8004 拦截且绝不发 ACK！ */
         const char *name_async = "SERVO_DRV_FPGA_V1.0.0.0.efw"; /* target_id 2 */
         uint16_t err = ecat_foe_ssc_on_write(&adapter, name_async, (uint16_t)strlen(name_async), 0U);
         assert(err == ECAT_FOE_SSC_ERR_ILLEGAL); /* 0x8004 */
+        assert(adapter.session_active == false);
+
+        /* 3b. 请求 DATA 目标 3 (伪装成 SII 固件): 严格按目标类型拦截，返回 0x8001 NOTFOUND */
+        const char *name_data = "SERVO_DRV_SII_V1.0.0.0.efw"; /* target_id 3 (DATA) */
+        assert(ecat_foe_ssc_on_write(&adapter, name_data, (uint16_t)strlen(name_data), 0U) == ECAT_FOE_SSC_ERR_NOTFOUND);
         assert(adapter.session_active == false);
 
         /* 4. 重复下发同步目标 1，会话自愈无状态残留 */
@@ -487,23 +523,13 @@ int main(void)
     /* [TEST 15] 验证统一管理器支持混合同步与异步固件目标 */
     {
         printf("[TEST 15] 验证统一管理器支持混合固件目标并按需拒绝异步目标...");
-        setup_core_and_adapter(&core, &adapter, 0U);
-        assert(adapter.async_gate == NULL);
-
-        /* 目标 1: 同步固件；目标 2: 异步数据/固件 */
-        core.cfg.targets[0].enabled = true;
-        core.cfg.targets[0].asynchronous = false;
-        core.cfg.targets[1].target_id = 2U;
-        core.cfg.targets[1].enabled = true;
-        core.cfg.targets[1].asynchronous = true;
-        core.cfg.targets[1].max_payload_size = 1024U;
-        core.cfg.targets[1].driver = &s_mock_drv.driver;
+        mock_driver_init(&s_mock_drv);
 
         ecat_target_registry_t registry;
         ecat_transfer_t transfer;
         ecat_target_desc_t target = {
             .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
-            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
             .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
         };
         assert(ecat_target_registry_init(&registry) == 0);
@@ -512,7 +538,10 @@ int main(void)
         memcpy(target.name, "fpga", sizeof("fpga"));
         target.max_size = 1024U;
         target.asynchronous = true;
+        target.driver.fw_async_ops = &s_dummy_fw_async_ops;
         assert(ecat_target_registry_add(&registry, &target) == 0);
+        setup_core_with_registry(&core, &registry, &adapter, 0U);
+        assert(adapter.async_gate == NULL);
         assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
         assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
 
@@ -539,22 +568,23 @@ int main(void)
 
     {
         printf("[TEST 16] 未绑定管理器时拒绝 SSC 请求...");
-        setup_core_and_adapter(&core, &adapter, 64U);
-        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
-        assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0U);
-        assert(core.state == ECAT_FOE_STATE_IDLE && s_mock_drv.count_init == 0U);
+        mock_driver_init(&s_mock_drv);
         ecat_target_registry_t registry;
         ecat_transfer_t transfer;
         ecat_target_desc_t target = {
             .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
-            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE,
+            .permissions = ECAT_PERM_WRITE, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
             .enabled = true, .driver = { .io = s_mock_drv.driver }, .user_ctx = &s_mock_drv
         };
+        assert(ecat_target_registry_init(&registry) == 0);
+        assert(ecat_target_registry_add(&registry, &target) == 0);
+        setup_core_with_registry(&core, &registry, &adapter, 64U);
+        const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        assert(ecat_foe_ssc_on_write(&adapter, name, (uint16_t)strlen(name), 0U) != 0U);
+        assert(core.state == ECAT_FOE_STATE_IDLE && s_mock_drv.count_init == 0U);
         ecat_transfer_request_t request = {2U, 1U, ECAT_TRANSFER_DIR_IMPORT, 0U, TEST_FW_VER};
         uint64_t token = 0;
         int owner = 0;
-        assert(ecat_target_registry_init(&registry) == 0);
-        assert(ecat_target_registry_add(&registry, &target) == 0);
         assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
         assert(ecat_transfer_begin(&transfer, &owner, &request, &token) == ECAT_TRANSFER_COMPLETE);
         ecat_foe_ssc_on_abort(&adapter, 0U);

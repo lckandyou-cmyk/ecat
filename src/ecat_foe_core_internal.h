@@ -57,6 +57,26 @@ void ecat_foe_core_on_abort(ecat_foe_core_t *core);
 /* Backend callbacks are private to the transfer manager. */
 const ecat_upgrade_async_ops_t *ecat_foe_core_async_ops(void);
 
+/* Shared single-registry firmware target resolution & validation helpers. */
+bool ecat_foe_core_validate_fw_target(
+    const ecat_target_desc_t *t, bool anti_rollback_enable);
+const ecat_target_desc_t *ecat_foe_core_find_fw_target(
+    const ecat_foe_core_t *core, uint16_t target_id, size_t *out_slot);
+
+static inline void ecat_foe_core_mark_slot_incomplete(ecat_foe_core_t *core, size_t slot)
+{
+    if (core != NULL && slot < ECAT_TARGET_REGISTRY_MAX_BLOCKS) {
+        core->target_incomplete_slots[slot / 8U] |= (uint8_t)(1U << (slot % 8U));
+    }
+}
+
+static inline void ecat_foe_core_clear_slot_incomplete(ecat_foe_core_t *core, size_t slot)
+{
+    if (core != NULL && slot < ECAT_TARGET_REGISTRY_MAX_BLOCKS) {
+        core->target_incomplete_slots[slot / 8U] &= (uint8_t)~(1U << (slot % 8U));
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

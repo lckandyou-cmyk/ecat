@@ -35,7 +35,24 @@ int bootloader_app_init(bootloader_app_t *app,
     /* 1. 初始化板级 Flash 目标存储驱动 (严格限定本地基地址) */
     bootloader_flash_driver_init_ctx(&app->flash_drv, storage_buf, storage_size);
 
-    /* 2. 组装核心升级状态机全局静态配置 */
+    /* 2. 在唯一权威注册表中注册 Target 1 (主 MCU 片内 Flash) */
+    ecat_target_desc_t target;
+    memset(&target, 0, sizeof(target));
+    target.target_id = BOOTLOADER_TARGET_MCU_ID;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.max_size = APP_FLASH_MAX_SIZE;
+    target.write_unit = APP_FLASH_WRITE_UNIT;
+    target.permissions = ECAT_PERM_WRITE;
+    target.enabled = true;
+    target.driver.io = *bootloader_flash_driver_get_ops();
+    target.user_ctx = &app->flash_drv;
+    if (ecat_target_registry_init(&app->registry) != 0 ||
+        ecat_target_registry_add(&app->registry, &target) != 0) {
+        return -1;
+    }
+
+    /* 3. 组装核心升级状态机全局静态配置并绑定注册表 */
     ecat_foe_core_cfg_t core_cfg;
     memset(&core_cfg, 0, sizeof(core_cfg));
     core_cfg.project_id = BOOTLOADER_PROJECT_ID;
@@ -45,35 +62,15 @@ int bootloader_app_init(bootloader_app_t *app,
     core_cfg.anti_rollback_enable = false;
     core_cfg.signature_verify_enable = (ECAT_FOE_SIGNATURE_VERIFY_ENABLE != 0);
     core_cfg.max_header_size = ECAT_FOE_HEADER_BUF_MAX;
+    core_cfg.registry = &app->registry;
 
-    /* 注册 Target 1 (主 MCU 片内 Flash) */
-    core_cfg.targets[0].target_id = BOOTLOADER_TARGET_MCU_ID;
-    core_cfg.targets[0].enabled = true;
-    core_cfg.targets[0].max_payload_size = APP_FLASH_MAX_SIZE;
-    core_cfg.targets[0].write_unit = APP_FLASH_WRITE_UNIT;
-    core_cfg.targets[0].driver = bootloader_flash_driver_get_ops();
-    core_cfg.targets[0].user_ctx = &app->flash_drv;
-
-    /* 3. 初始化通用 FoE 升级核心机 */
-    if (ecat_foe_core_init(&app->core, &core_cfg) != 0) {
+    if (ecat_foe_core_init(&app->core, &core_cfg) != 0 ||
+        ecat_transfer_init(&app->transfer, &app->registry, &app->core) != 0) {
         return -1;
     }
 
-    /* 4. 初始化 SOES 适配层并绑定信箱上下文 (传入 SOES 文件写缓冲容量 foe_cfg->buffer_size) */
+    /* 4. 初始化 SOES 适配层并绑定传输管理器与信箱上下文 */
     uint32_t foe_buf_size = (foe_cfg != NULL) ? foe_cfg->buffer_size : 0;
-    ecat_target_desc_t target;
-    memset(&target, 0, sizeof(target));
-    target.target_id = BOOTLOADER_TARGET_MCU_ID;
-    memcpy(target.name, "mcu", sizeof("mcu"));
-    target.type = ECAT_TARGET_TYPE_FIRMWARE;
-    target.max_size = APP_FLASH_MAX_SIZE;
-    target.permissions = ECAT_PERM_WRITE;
-    target.enabled = true;
-    target.driver.io = *bootloader_flash_driver_get_ops();
-    target.user_ctx = &app->flash_drv;
-    if (ecat_target_registry_init(&app->registry) != 0 ||
-        ecat_target_registry_add(&app->registry, &target) != 0 ||
-        ecat_transfer_init(&app->transfer, &app->registry, &app->core) != 0) return -1;
     ecat_foe_soes_init(&app->adapter, &app->core, foe_buf_size);
     if (ecat_foe_soes_bind_transfer(&app->adapter, &app->transfer) != 0) return -1;
     if (ecat_foe_soes_set_mbx_context(&app->adapter, mbxcontrol, mbx, num_slots, slot_size) != 0) {

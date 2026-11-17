@@ -868,21 +868,6 @@ int main(void)
     /* ---------------------------------------------------------------------- */
     /* 5. 固件区块核心升级联动测试 (Firmware Target + Core Integration)       */
     /* ---------------------------------------------------------------------- */
-    ecat_foe_core_t core;
-    ecat_foe_core_cfg_t core_cfg;
-    memset(&core_cfg, 0, sizeof(core_cfg));
-    core_cfg.project_name = "TEST_PROJ";
-    core_cfg.hardware_id = 0x1234U;
-    core_cfg.local_hw_ver = 0x0100U;
-    core_cfg.max_header_size = 148U;
-    core_cfg.targets[0].enabled = true;
-    core_cfg.targets[0].max_payload_size = 1024U * 1024U;
-    core_cfg.targets[0].write_unit = 8U;
-    core_cfg.targets[0].driver = &param_desc.driver.io;
-    core_cfg.targets[0].user_ctx = NULL;
-
-    assert(ecat_foe_core_init(&core, &core_cfg) == 0);
-
     /* 注册 Target 1: 固件区 (FIRMWARE 类型) */
     ecat_target_desc_t fw_desc;
     memset(&fw_desc, 0, sizeof(fw_desc));
@@ -891,10 +876,22 @@ int main(void)
     fw_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
     fw_desc.permissions = ECAT_PERM_WRITE;
     fw_desc.max_size = 1024U * 1024U;
+    fw_desc.write_unit = 8U;
     fw_desc.enabled = true;
     fw_desc.driver.io = param_desc.driver.io;
     assert(ecat_target_registry_add(&reg, &fw_desc) == 0);
     assert(ecat_target_registry_add_acl(&reg, 1U, 1U, ECAT_PERM_WRITE) == 0);
+
+    ecat_foe_core_t core;
+    ecat_foe_core_cfg_t core_cfg;
+    memset(&core_cfg, 0, sizeof(core_cfg));
+    core_cfg.project_name = "TEST_PROJ";
+    core_cfg.hardware_id = 0x1234U;
+    core_cfg.local_hw_ver = 0x0100U;
+    core_cfg.max_header_size = 148U;
+    core_cfg.registry = &reg;
+
+    assert(ecat_foe_core_init(&core, &core_cfg) == 0);
 
     ecat_transfer_t fw_manager;
     assert(ecat_transfer_init(&fw_manager, &reg, &core) == 0);
@@ -1167,14 +1164,13 @@ int main(void)
         out[146] = (uint8_t)(hcrc >> 16); out[147] = (uint8_t)(hcrc >> 24);
     }
 
-    /* 将 Target 1 (mcu_fw) 在注册表中的容量设为 16 字节，而 core.cfg 中为 1024 字节 */
+    /* 将 Target 1 (mcu_fw) 在唯一权威注册表中的容量设为 16 字节 */
     const ecat_target_desc_t *fw_reg_desc = ecat_target_registry_find_by_id(&reg, 1U);
     assert(fw_reg_desc != NULL);
     ((ecat_target_desc_t *)fw_reg_desc)->max_size = 16U;
     core.cfg.project_id = 0x10010001U;
     core.cfg.hardware_id = 1U;
     core.cfg.local_hw_ver = 1U;
-    core.cfg.targets[0].max_payload_size = 1024U;
 
     /* 3.1 未知长度下超限有效负载拦截 */
     ecat_transfer_request_t oversize_req = {
@@ -1237,35 +1233,56 @@ int main(void)
     assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.written_offset == 16U);
 
-    /* 3.6 驱动映射上下文与回调严格一致性校验: 两个目标实例共用驱动函数但 ctx 不同，严禁放行 */
-    int ctx_a = 0xA, ctx_b = 0xB;
-    core.cfg.targets[0].user_ctx = &ctx_a;
-    ((ecat_target_desc_t *)fw_reg_desc)->user_ctx = &ctx_b;
-    uint64_t ctx_mismatch_tok = 0;
-    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &ctx_mismatch_tok) == ECAT_TRANSFER_FAILED);
+    /* 3.6 单一权威注册表下驱动回调与对齐参数完整性校验: 缺失关键回调或非法 write_unit 必须在 begin 前拦截 */
+    uint64_t bad_drv_tok = 0;
+    ((ecat_target_desc_t *)fw_reg_desc)->driver.io.erase_to = NULL;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &bad_drv_tok) == ECAT_TRANSFER_FAILED);
     assert(fw_manager.last_error == ECAT_TRANSFER_ERR_DRIVER_WRITE);
     assert(fw_manager.session.owner == NULL);
-    /* 回调函数不一致拒绝 */
-    ((ecat_target_desc_t *)fw_reg_desc)->user_ctx = &ctx_a;
-    ecat_foe_target_driver_t modified_drv = param_desc.driver.io;
-    modified_drv.erase_to = NULL;
-    core.cfg.targets[0].driver = &modified_drv;
-    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &ctx_mismatch_tok) == ECAT_TRANSFER_FAILED);
-    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_DRIVER_WRITE);
-    core.cfg.targets[0].driver = &param_desc.driver.io;
+    ((ecat_target_desc_t *)fw_reg_desc)->driver.io.erase_to = param_desc.driver.io.erase_to;
 
-    /* 3.7 临时会话限额不可永久污染 core.cfg 原始配置 */
-    core.cfg.targets[0].max_payload_size = 1024U;
+    ((ecat_target_desc_t *)fw_reg_desc)->write_unit = 0U;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &bad_drv_tok) == ECAT_TRANSFER_FAILED);
+    assert(fw_manager.last_error == ECAT_TRANSFER_ERR_CORE_UPGRADE);
+    assert(fw_manager.session.owner == NULL);
+    ((ecat_target_desc_t *)fw_reg_desc)->write_unit = 8U;
+
+    /* 3.7 注册表容量为唯一真源: 调整与恢复 max_size 立即在核心与传输层一致生效 */
     ((ecat_target_desc_t *)fw_reg_desc)->max_size = 16U;
     uint64_t sess_tok = 0;
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &sess_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, sess_tok) == ECAT_TRANSFER_COMPLETE);
-    assert(core.cfg.targets[0].max_payload_size == 1024U);
 
     ((ecat_target_desc_t *)fw_reg_desc)->max_size = 1024U;
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &oversize_req, &sess_tok) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_cancel(&fw_manager, &channel_uart, sess_tok) == ECAT_TRANSFER_COMPLETE);
-    assert(core.cfg.targets[0].max_payload_size == 1024U);
+
+    /* 3.8 稀疏高编号固件目标 (42 / 65535) 端到端导入升级验证 */
+    ecat_target_desc_t high_fw_desc = fw_desc;
+    high_fw_desc.target_id = 42U;
+    strncpy(high_fw_desc.name, "ext_fw_42", sizeof(high_fw_desc.name));
+    high_fw_desc.max_size = 1024U;
+    high_fw_desc.write_unit = 8U;
+    assert(ecat_target_registry_add(&reg, &high_fw_desc) == 0);
+    assert(ecat_target_registry_add_acl(&reg, 1U, 42U, ECAT_PERM_WRITE) == 0);
+    {
+        uint8_t payload_42[16];
+        memset(payload_42, 0x42, sizeof(payload_42));
+        uint8_t efw_42[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
+        assert(make_test_efw(efw_42, payload_42, sizeof(payload_42), 42U) == sizeof(efw_42));
+        ecat_transfer_request_t req_42 = {
+            .transport_id = 1U,
+            .target_id = 42U,
+            .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = sizeof(efw_42),
+            .fw_version = 0x01000000U
+        };
+        uint64_t tok_42 = 0;
+        assert(ecat_transfer_begin(&fw_manager, &channel_uart, &req_42, &tok_42) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&fw_manager, &channel_uart, tok_42, efw_42, sizeof(efw_42)) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_finish(&fw_manager, &channel_uart, tok_42) == ECAT_TRANSFER_COMPLETE);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+    }
 
     /* 验证 Issue 4: 统一传输管理器的会话仲裁与 ACL */
     printf("--- 测试 Issue 4: 统一传输管理器的会话仲裁与 ACL ---\n");
@@ -1499,17 +1516,12 @@ int main(void)
     strncpy(near_max_desc.name, "near_max_fw", sizeof(near_max_desc.name));
     near_max_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
     near_max_desc.permissions = ECAT_PERM_WRITE;
-    near_max_desc.max_size = UINT32_MAX - 100U;
+    near_max_desc.max_size = UINT32_MAX - 103U; /* 8 字节整数倍且接近 UINT32_MAX */
+    near_max_desc.write_unit = 8U;
     near_max_desc.enabled = true;
     near_max_desc.driver.io = param_desc.driver.io;
     assert(ecat_target_registry_add(&reg, &near_max_desc) == 0);
     assert(ecat_target_registry_add_acl(&reg, 1U, 4U, ECAT_PERM_WRITE) == 0);
-
-    core.cfg.targets[3].enabled = true;
-    core.cfg.targets[3].max_payload_size = UINT32_MAX - 100U;
-    core.cfg.targets[3].write_unit = 8U;
-    core.cfg.targets[3].driver = &param_desc.driver.io;
-    core.cfg.targets[3].user_ctx = NULL;
 
     /* 发起合法请求: expected_size = 500U */
     /* 旧代码中: target->max_size + 148U + 7U 溢出回绕为 54U，导致 500U > 54U 被错误拒绝！ */
@@ -1535,12 +1547,11 @@ int main(void)
     core.cfg.project_id = 0x10010001U;
     core.cfg.hardware_id = 1U;
     core.cfg.local_hw_ver = 1U;
-    core.cfg.targets[0].max_payload_size = 16U;
-    core.cfg.targets[0].write_unit = 8U;
     ecat_target_desc_t *fw_t1 = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
     assert(fw_t1 != NULL);
     uint32_t orig_t1_max_size = fw_t1->max_size;
     fw_t1->max_size = 16U;
+    fw_t1->write_unit = 8U;
 
     /* 发起合法 16 字节固件升级 (总长度 148 + 16 = 164 字节 <= 16 + 148 + 7 = 171 字节物理上限) */
     ecat_transfer_request_t valid_fw_req = {
@@ -1595,9 +1606,8 @@ int main(void)
     assert(fw_manager.driver_initialized == false);
     assert(g_init_called == false && g_invalidate_called == false && g_abort_called == false); /* 无驱动副作用 */
 
-    /* 恢复 Target 1 与 core 配置 */
+    /* 恢复 Target 1 容量配置 */
     fw_t1->max_size = orig_t1_max_size;
-    core.cfg.targets[0].max_payload_size = 1024U * 1024U;
 
 #if __SIZEOF_SIZE_T__ > 4
     reset_mock_flags();
@@ -1856,22 +1866,20 @@ int main(void)
     core.cfg.hardware_id = 1U;
     core.cfg.local_hw_ver = 1U;
     core.cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    core.cfg.targets[0].target_id = 1U;
-    core.cfg.targets[0].enabled = true;
-    core.cfg.targets[0].asynchronous = true;
-    core.cfg.targets[0].async_ops = &s_fw_flash_ops;
-    core.cfg.targets[0].async_user_ctx = &s_fw_test_flash;
-    core.cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
+    /* 在唯一权威注册表上切换固件目标 1 为异步模式 */
+    ecat_target_desc_t *fw_t1_desc = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
+    assert(fw_t1_desc != NULL);
+    fw_t1_desc->asynchronous = true;
+    fw_t1_desc->max_size = sizeof(s_fw_test_flash.flash);
+    fw_t1_desc->write_unit = 8U;
+    fw_t1_desc->driver.fw_async_ops = &s_fw_flash_ops;
+    fw_t1_desc->driver.fw_async_user_ctx = &s_fw_test_flash;
+
     assert(ecat_foe_core_async_init(&s_fw10_session, &core, s_fw10_packet, sizeof(s_fw10_packet),
                                     s_fw10_op, sizeof(s_fw10_op)) == 0);
     assert(ecat_transfer_init_async_firmware(&mgr_first, &s_fw10_session) == 0);
     uint8_t fw_staging[256];
     assert(ecat_transfer_set_staging_buffer(&mgr_first, fw_staging, sizeof(fw_staging)) == 0);
-
-    /* 注册固件异步目标 */
-    ecat_target_desc_t *fw_t1_desc = (ecat_target_desc_t *)ecat_target_registry_find_by_id(&reg, 1U);
-    assert(fw_t1_desc != NULL);
-    fw_t1_desc->asynchronous = true;
 
     /* 构造真实合法的 200 字节固件包 (148 字节 EFW 头部 + 52 字节载荷) */
     uint8_t fw_payload[52];
@@ -2752,10 +2760,7 @@ int main(void)
         test_core_cfg.hardware_id = 0x0001U;
         test_core_cfg.local_hw_ver = 0x0100U;
         test_core_cfg.max_header_size = 148U;
-        test_core_cfg.targets[0].enabled = true;
-        test_core_cfg.targets[0].max_payload_size = 1024U * 1024U;
-        test_core_cfg.targets[0].write_unit = 8U;
-        test_core_cfg.targets[0].driver = &param_desc.driver.io;
+        test_core_cfg.registry = &test_reg;
         assert(ecat_foe_core_init(&test_core, &test_core_cfg) == 0);
 
         ecat_transfer_t test_mgr;
@@ -2853,19 +2858,6 @@ int main(void)
     {
         printf("--- 测试 10.16: FoE 适配桥首包暂存重叠内存防御与安全拷贝 ---\n");
 
-        ecat_foe_core_t local_core;
-        ecat_foe_core_cfg_t local_cfg;
-        memset(&local_cfg, 0, sizeof(local_cfg));
-        local_cfg.project_name = "DRIVE_SERVO";
-        local_cfg.hardware_id = 0x0001U;
-        local_cfg.local_hw_ver = 0x0100U;
-        local_cfg.max_header_size = 148U;
-        local_cfg.targets[0].enabled = true;
-        local_cfg.targets[0].max_payload_size = 1024U * 1024U;
-        local_cfg.targets[0].write_unit = 8U;
-        local_cfg.targets[0].driver = &param_desc.driver.io;
-        assert(ecat_foe_core_init(&local_core, &local_cfg) == 0);
-
         /* 1. Transfer 模式下的重叠/相同/独立缓冲区测试 */
         {
             memset(&s_mock_staged_ctx, 0, sizeof(s_mock_staged_ctx));
@@ -2887,6 +2879,16 @@ int main(void)
                 }
             };
             assert(ecat_target_registry_add(&reg, &target_desc) == 0);
+
+            ecat_foe_core_t local_core;
+            ecat_foe_core_cfg_t local_cfg;
+            memset(&local_cfg, 0, sizeof(local_cfg));
+            local_cfg.project_name = "DRIVE_SERVO";
+            local_cfg.hardware_id = 0x0001U;
+            local_cfg.local_hw_ver = 0x0100U;
+            local_cfg.max_header_size = 148U;
+            local_cfg.registry = &reg;
+            assert(ecat_foe_core_init(&local_core, &local_cfg) == 0);
 
             ecat_transfer_t mgr;
             assert(ecat_transfer_init(&mgr, &reg, &local_core) == 0);
@@ -2989,19 +2991,6 @@ int main(void)
     {
         printf("--- 测试 10.17: 统一传输核心暂存区重叠内存防御与单次稳定捕获验证 (5 大全路径覆盖) ---\n");
 
-        ecat_foe_core_t core_dummy;
-        ecat_foe_core_cfg_t core_cfg;
-        memset(&core_cfg, 0, sizeof(core_cfg));
-        core_cfg.project_name = "OVERLAP_DEV";
-        core_cfg.hardware_id = 0x0001U;
-        core_cfg.local_hw_ver = 0x0100U;
-        core_cfg.max_header_size = 148U;
-        core_cfg.targets[0].enabled = true;
-        core_cfg.targets[0].max_payload_size = 1024U * 1024U;
-        core_cfg.targets[0].write_unit = 8U;
-        core_cfg.targets[0].driver = &param_desc.driver.io;
-        assert(ecat_foe_core_init(&core_dummy, &core_cfg) == 0);
-
         ecat_target_registry_t reg;
         assert(ecat_target_registry_init(&reg) == 0);
 
@@ -3026,14 +3015,27 @@ int main(void)
             .type = ECAT_TARGET_TYPE_FIRMWARE,
             .permissions = ECAT_PERM_WRITE,
             .max_size = 4096U,
+            .write_unit = 8U,
             .enabled = true,
             .asynchronous = true,
             .user_ctx = NULL,
             .driver = {
-                .io = param_desc.driver.io
+                .io = param_desc.driver.io,
+                .fw_async_ops = &s_fw_flash_ops,
+                .fw_async_user_ctx = &s_fw_test_flash
             }
         };
         assert(ecat_target_registry_add(&reg, &fw_desc) == 0);
+
+        ecat_foe_core_t core_dummy;
+        ecat_foe_core_cfg_t core_cfg;
+        memset(&core_cfg, 0, sizeof(core_cfg));
+        core_cfg.project_name = "OVERLAP_DEV";
+        core_cfg.hardware_id = 0x0001U;
+        core_cfg.local_hw_ver = 0x0100U;
+        core_cfg.max_header_size = 148U;
+        core_cfg.registry = &reg;
+        assert(ecat_foe_core_init(&core_dummy, &core_cfg) == 0);
 
         uint8_t backing_buf[256];
         uint8_t separate_buf[64];
@@ -3317,24 +3319,6 @@ int main(void)
         /* 覆盖 Case 4A(前向重叠), 4B(后向重叠), 4C(相同地址), 4D(独立缓冲)   */
         /* ================================================================== */
         {
-            ecat_foe_core_t fw_core;
-            ecat_foe_core_cfg_t fw_cfg;
-            memset(&fw_cfg, 0, sizeof(fw_cfg));
-            fw_cfg.project_name = "DRIVE_SERVO";
-            fw_cfg.project_id = 0x10010001U;
-            fw_cfg.hardware_id = 1U;
-            fw_cfg.local_hw_ver = 1U;
-            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-            fw_cfg.targets[0].target_id = 1U;
-            fw_cfg.targets[0].enabled = true;
-            fw_cfg.targets[0].asynchronous = true;
-            fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
-            fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
-            fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
-            fw_cfg.targets[0].write_unit = 8U;
-            fw_cfg.targets[0].driver = &param_desc.driver.io;
-            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
-
             static uint8_t s_fw_pkt[512];
             static uint8_t s_fw_op[256];
             static ecat_foe_core_async_t s_fw_sess;
@@ -3346,14 +3330,28 @@ int main(void)
                 .name = "firmware_mcu",
                 .type = ECAT_TARGET_TYPE_FIRMWARE,
                 .permissions = ECAT_PERM_WRITE,
-                .max_size = 1024U * 1024U,
+                .max_size = sizeof(s_fw_test_flash.flash),
+                .write_unit = 8U,
                 .enabled = true,
                 .asynchronous = true,
                 .driver = {
-                    .io = param_desc.driver.io
+                    .io = param_desc.driver.io,
+                    .fw_async_ops = &s_fw_flash_ops,
+                    .fw_async_user_ctx = &s_fw_test_flash
                 }
             };
             assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
+
+            ecat_foe_core_t fw_core;
+            ecat_foe_core_cfg_t fw_cfg;
+            memset(&fw_cfg, 0, sizeof(fw_cfg));
+            fw_cfg.project_name = "DRIVE_SERVO";
+            fw_cfg.project_id = 0x10010001U;
+            fw_cfg.hardware_id = 1U;
+            fw_cfg.local_hw_ver = 1U;
+            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+            fw_cfg.registry = &fw_reg;
+            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
 
             uint8_t fw_payload[52];
             memset(fw_payload, 0xAA, sizeof(fw_payload));
@@ -3445,24 +3443,6 @@ int main(void)
         /* 覆盖 Case 5A(前向重叠), 5B(后向重叠), 5C(相同地址), 5D(独立缓冲)   */
         /* ================================================================== */
         {
-            ecat_foe_core_t fw_core;
-            ecat_foe_core_cfg_t fw_cfg;
-            memset(&fw_cfg, 0, sizeof(fw_cfg));
-            fw_cfg.project_name = "DRIVE_SERVO";
-            fw_cfg.project_id = 0x10010001U;
-            fw_cfg.hardware_id = 1U;
-            fw_cfg.local_hw_ver = 1U;
-            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-            fw_cfg.targets[0].target_id = 1U;
-            fw_cfg.targets[0].enabled = true;
-            fw_cfg.targets[0].asynchronous = true;
-            fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
-            fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
-            fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
-            fw_cfg.targets[0].write_unit = 8U;
-            fw_cfg.targets[0].driver = &param_desc.driver.io;
-            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
-
             static uint8_t s_fw_pkt[512];
             static uint8_t s_fw_op[256];
             static ecat_foe_core_async_t s_fw_sess;
@@ -3474,14 +3454,28 @@ int main(void)
                 .name = "firmware_mcu",
                 .type = ECAT_TARGET_TYPE_FIRMWARE,
                 .permissions = ECAT_PERM_WRITE,
-                .max_size = 1024U * 1024U,
+                .max_size = sizeof(s_fw_test_flash.flash),
+                .write_unit = 8U,
                 .enabled = true,
                 .asynchronous = true,
                 .driver = {
-                    .io = param_desc.driver.io
+                    .io = param_desc.driver.io,
+                    .fw_async_ops = &s_fw_flash_ops,
+                    .fw_async_user_ctx = &s_fw_test_flash
                 }
             };
             assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
+
+            ecat_foe_core_t fw_core;
+            ecat_foe_core_cfg_t fw_cfg;
+            memset(&fw_cfg, 0, sizeof(fw_cfg));
+            fw_cfg.project_name = "DRIVE_SERVO";
+            fw_cfg.project_id = 0x10010001U;
+            fw_cfg.hardware_id = 1U;
+            fw_cfg.local_hw_ver = 1U;
+            fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+            fw_cfg.registry = &fw_reg;
+            assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
 
             uint8_t fw_payload[52];
             memset(fw_payload, 0xBB, sizeof(fw_payload));
@@ -3617,8 +3611,11 @@ int main(void)
         fw_target.type = ECAT_TARGET_TYPE_FIRMWARE;
         fw_target.permissions = ECAT_PERM_WRITE;
         fw_target.max_size = sizeof(s_fw_test_flash.flash);
+        fw_target.write_unit = 16U;
         fw_target.asynchronous = true;
         fw_target.driver.io = param_desc.driver.io;
+        fw_target.driver.fw_async_ops = &s_fw_flash_ops;
+        fw_target.driver.fw_async_user_ctx = &s_fw_test_flash;
         assert(ecat_target_registry_add(&fw_reg, &fw_target) == 0);
 
         ecat_foe_core_cfg_t fw_cfg;
@@ -3628,14 +3625,7 @@ int main(void)
         fw_cfg.hardware_id = 1U;
         fw_cfg.local_hw_ver = 1U;
         fw_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-        fw_cfg.targets[0].target_id = 1U;
-        fw_cfg.targets[0].enabled = true;
-        fw_cfg.targets[0].asynchronous = true;
-        fw_cfg.targets[0].async_ops = &s_fw_flash_ops;
-        fw_cfg.targets[0].async_user_ctx = &s_fw_test_flash;
-        fw_cfg.targets[0].max_payload_size = sizeof(s_fw_test_flash.flash);
-        fw_cfg.targets[0].write_unit = 16U;
-        fw_cfg.targets[0].driver = &param_desc.driver.io;
+        fw_cfg.registry = &fw_reg;
         assert(ecat_foe_core_init(&fw_core, &fw_cfg) == 0);
 
         uint8_t fw_payload[32];

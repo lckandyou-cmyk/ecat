@@ -3,7 +3,7 @@
  * @brief EtherCAT .efw 固件容器格式解析与核验实现
  */
 
-#include "ecat_foe_efw_internal.h"
+#include "ecat_foe_efw.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -256,7 +256,7 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
     return ECAT_FOE_EFW_OK;
 }
 
-ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
+ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
     const ecat_foe_efw_header_t *hdr,
     const ecat_foe_efw_config_t *cfg,
     uint16_t selected_id,
@@ -282,8 +282,7 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         }
     }
 
-    uint16_t expected_header_length =
-        ECAT_FOE_EFW_HEADER_MIN_LEN;
+    uint16_t expected_header_length = ECAT_FOE_EFW_HEADER_MIN_LEN;
     if (hdr->header_length != expected_header_length || (hdr->header_length % 4U) != 0U) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_ALIGN;
     }
@@ -300,12 +299,12 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         }
     }
 
-    /* 6. project_id 与本地硬编码配置完全一致 */
+    /* 6. project_id 与本地配置完全一致 */
     if (hdr->project_id != cfg->project_id) {
         return ECAT_FOE_EFW_ERR_PROJECT_ID_MISMATCH;
     }
 
-    /* 7. hardware_id 与本地硬编码配置完全一致 */
+    /* 7. hardware_id 与本地配置完全一致 */
     if (hdr->hardware_id != cfg->hardware_id) {
         return ECAT_FOE_EFW_ERR_HARDWARE_ID_MISMATCH;
     }
@@ -318,15 +317,15 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         return ECAT_FOE_EFW_ERR_HW_VER_NOT_SUPPORTED;
     }
 
-    /* The locally resolved ID must exist, be non-zero, and match the signed package identity. */
+    /* 9. 目标存在、已启用，且与会话选定目标严格一致 */
     if (hdr->target_id == 0U || selected_id == 0U || tcfg == NULL) {
         return ECAT_FOE_EFW_ERR_TARGET_UNKNOWN;
     }
-    if (hdr->target_id != selected_id) {
-        return ECAT_FOE_EFW_ERR_TARGET_MISMATCH;
-    }
     if (!tcfg->enabled) {
         return ECAT_FOE_EFW_ERR_TARGET_NOT_ENABLED;
+    }
+    if (hdr->target_id != selected_id) {
+        return ECAT_FOE_EFW_ERR_TARGET_MISMATCH;
     }
 
     /* 空载荷不能代表可启动固件；在任何目标驱动副作用前拒绝。 */
@@ -334,7 +333,7 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
         return ECAT_FOE_EFW_ERR_PAYLOAD_EMPTY;
     }
 
-    /* 10. payload_length 未超过本地硬编码配置中分配的分区容量上限 (0 表示零容量，失败关闭) */
+    /* 10. payload_length 未超过本地分配的分区容量上限 (0 表示零容量，失败关闭) */
     if (tcfg->max_payload_size == 0U || hdr->payload_length > tcfg->max_payload_size) {
         return ECAT_FOE_EFW_ERR_PAYLOAD_TOO_LARGE;
     }
@@ -352,17 +351,6 @@ ecat_foe_efw_err_t ecat_foe_efw_validate_selected(
     }
 
     return ECAT_FOE_EFW_OK;
-}
-
-ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
-    const ecat_foe_efw_header_t *hdr, const ecat_foe_efw_config_t *cfg)
-{
-    const ecat_foe_efw_target_cfg_t *target = NULL;
-    uint16_t id = hdr != NULL ? hdr->target_id : 0U;
-    if (cfg != NULL && id >= 1U && id <= ECAT_FOE_TARGET_COUNT) {
-        target = &cfg->targets[id - 1U];
-    }
-    return ecat_foe_efw_validate_selected(hdr, cfg, id, target);
 }
 
 const char *ecat_foe_efw_err_to_str(ecat_foe_efw_err_t err)

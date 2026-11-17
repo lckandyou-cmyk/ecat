@@ -63,19 +63,28 @@ int main(void)
     ecat_foe_ssc_adapter_t adapter;
     async_mock_t async = {0};
 
+    ecat_target_registry_t registry;
+    ecat_target_desc_t target = {0};
     mock_driver_init(&driver);
+    CHECK(ecat_target_registry_init(&registry) == 0);
+    target.target_id = 1U;
+    memcpy(target.name, "mcu", sizeof("mcu"));
+    target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    target.permissions = ECAT_PERM_WRITE;
+    target.max_size = 4096U;
+    target.write_unit = 8U;
+    target.enabled = true;
+    target.driver.io = driver.driver;
+    target.user_ctx = &driver;
+    CHECK(ecat_target_registry_add(&registry, &target) == 0);
+
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
     cfg.project_name = "SERVO_DRV";
     cfg.hardware_id = 1U;
     cfg.local_hw_ver = 1U;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    cfg.targets[0].target_id = 1U;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 4096U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &driver.driver;
-    cfg.targets[0].user_ctx = &driver;
+    cfg.registry = &registry;
     CHECK(ecat_foe_core_init(&core, &cfg) == 0);
     CHECK(ecat_foe_ssc_async_init(&gate, &ops, &async, packet_storage,
                                   sizeof(packet_storage), 100U,
@@ -94,9 +103,7 @@ int main(void)
     CHECK(async.starts == 0U && async.polls == 0U && async.aborts == 0U);
     CHECK(core.state == ECAT_FOE_STATE_IDLE && driver.count_init == 0U);
 
-    ecat_target_registry_t registry;
     ecat_transfer_t transfer;
-    CHECK(ecat_target_registry_init(&registry) == 0);
     CHECK(ecat_transfer_init(&transfer, &registry, &core) == 0);
     CHECK(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == -1);
     CHECK(ecat_foe_ssc_on_write(&adapter, filename, (uint16_t)(sizeof(filename) - 1U), 0U) == ECAT_FOE_SSC_ERR_ILLEGAL);

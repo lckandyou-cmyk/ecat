@@ -418,7 +418,7 @@ static size_t build_efw_buffer(
     return ECAT_FOE_EFW_HEADER_MIN_LEN + payload_len;
 }
 
-static void setup_core_config(ecat_foe_core_cfg_t *cfg, host_flash_driver_t *drv)
+static void setup_core_config(ecat_foe_core_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->project_id = 0x10010001U;
@@ -428,41 +428,47 @@ static void setup_core_config(ecat_foe_core_cfg_t *cfg, host_flash_driver_t *drv
     cfg->anti_rollback_enable = false;
     cfg->signature_verify_enable = (ECAT_FOE_SIGNATURE_VERIFY_ENABLE != 0);
     cfg->max_header_size = ECAT_FOE_HEADER_BUF_MAX;
-
-    /* Target 1: 板载主 MCU Flash (使能) */
-    cfg->targets[0].target_id = 1;
-    cfg->targets[0].enabled = true;
-    cfg->targets[0].max_payload_size = 65536U;
-    cfg->targets[0].write_unit = 8U;
-    cfg->targets[0].driver = &s_target_ops;
-    cfg->targets[0].user_ctx = drv;
-
-    /* Target 2: 外部 SPI Flash (可选目标演示，当前配置为未使能) */
-    cfg->targets[1].target_id = 2;
-    cfg->targets[1].enabled = false;
-    cfg->targets[1].max_payload_size = 131072U;
-    cfg->targets[1].write_unit = 16U;
-    cfg->targets[1].driver = &s_target_ops;
-    cfg->targets[1].user_ctx = drv;
 }
 
-static int init_demo_bridge(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg,
+static int init_demo_bridge(ecat_foe_core_t *core, ecat_foe_core_cfg_t *cfg,
+                            host_flash_driver_t *drv,
                             ecat_target_registry_t *registry, ecat_transfer_t *transfer,
                             ecat_foe_transport_t *bridge)
 {
-    ecat_target_desc_t target = {0};
-    target.target_id = 1U;
-    memcpy(target.name, "mcu", sizeof("mcu"));
-    target.type = ECAT_TARGET_TYPE_FIRMWARE;
-    target.permissions = ECAT_PERM_WRITE;
-    target.max_size = cfg->targets[0].max_payload_size;
-    target.enabled = true;
-    target.driver.io = *cfg->targets[0].driver;
-    target.user_ctx = cfg->targets[0].user_ctx;
+    ecat_target_desc_t mcu_target = {0};
+    ecat_target_desc_t fpga_target = {0};
+
+    mcu_target.target_id = 1U;
+    memcpy(mcu_target.name, "mcu", sizeof("mcu"));
+    mcu_target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    mcu_target.permissions = ECAT_PERM_WRITE;
+    mcu_target.max_size = 65536U;
+    mcu_target.write_unit = 8U;
+    mcu_target.enabled = true;
+    mcu_target.driver.io = s_target_ops;
+    mcu_target.user_ctx = drv;
+
+    /* Target 2: 外部 SPI Flash (可选目标演示，当前配置为未使能) */
+    fpga_target.target_id = 2U;
+    memcpy(fpga_target.name, "fpga", sizeof("fpga"));
+    fpga_target.type = ECAT_TARGET_TYPE_FIRMWARE;
+    fpga_target.permissions = ECAT_PERM_WRITE;
+    fpga_target.max_size = 131072U;
+    fpga_target.write_unit = 16U;
+    fpga_target.enabled = false;
+    fpga_target.driver.io = s_target_ops;
+    fpga_target.user_ctx = drv;
+
+    if (ecat_target_registry_init(registry) != 0 ||
+        ecat_target_registry_add(registry, &mcu_target) != 0 ||
+        ecat_target_registry_add(registry, &fpga_target) != 0) {
+        return -1;
+    }
+    cfg->registry = registry;
     if (ecat_foe_core_init(core, cfg) != 0 ||
-        ecat_target_registry_init(registry) != 0 ||
-        ecat_target_registry_add(registry, &target) != 0 ||
-        ecat_transfer_init(transfer, registry, core) != 0) return -1;
+        ecat_transfer_init(transfer, registry, core) != 0) {
+        return -1;
+    }
     return ecat_foe_transport_init_transfer(bridge, transfer);
 }
 
@@ -519,8 +525,8 @@ static void run_scenario_success(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     int wrq_st = ecat_foe_transport_begin(&bridge, fn, strlen(fn));
@@ -570,8 +576,8 @@ static void run_scenario_header_crc_mismatch(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);
@@ -603,8 +609,8 @@ static void run_scenario_project_id_mismatch(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     /* 3a. WRQ 阶段项目名称不匹配 */
     const char *fn_wrong_name = "OTHER_PRJ_MCU_V1.0.0.0.efw";
@@ -614,7 +620,8 @@ static void run_scenario_project_id_mismatch(void)
     printf("[CORE] 3a. on_wrq: %s -> REJECT (WRQ_PROJECT_MISMATCH)\n", fn_wrong_name);
 
     /* 3b. WRQ 文件名合法通过，但头部 project_id 不符 */
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
     const char *fn_ok = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn_ok, strlen(fn_ok)) == 0);
     printf("[CORE] 3b. on_wrq: %s -> OK\n", fn_ok);
@@ -646,8 +653,8 @@ static void run_scenario_stream_under_receive(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);
@@ -680,8 +687,8 @@ static void run_scenario_stream_over_receive(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);
@@ -716,8 +723,8 @@ static void run_scenario_abort_retry_same_core(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);
@@ -759,8 +766,8 @@ static void run_scenario_padded_efw(const char *external_efw_file)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);
@@ -810,8 +817,8 @@ static void run_scenario_finalize_defense_demo(void)
     ecat_target_registry_t registry;
     ecat_transfer_t transfer;
     ecat_foe_transport_t bridge;
-    setup_core_config(&cfg, &s_host_drv);
-    assert(init_demo_bridge(&core, &cfg, &registry, &transfer, &bridge) == 0);
+    setup_core_config(&cfg);
+    assert(init_demo_bridge(&core, &cfg, &s_host_drv, &registry, &transfer, &bridge) == 0);
 
     const char *fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
     assert(ecat_foe_transport_begin(&bridge, fn, strlen(fn)) == 0);

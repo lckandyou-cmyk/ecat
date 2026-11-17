@@ -193,6 +193,7 @@ static void core_reset_session(ecat_foe_core_t *core)
 
     core->req_target_id = 0;
     core->req_fw_version = 0;
+    core->active_target_slot = 0U;
 
     memset(core->header_buf, 0, sizeof(core->header_buf));
     core->header_rx_len = 0;
@@ -215,6 +216,57 @@ static void core_reset_session(ecat_foe_core_t *core)
 
     core->state = ECAT_FOE_STATE_IDLE;
     core->last_error = ECAT_FOE_CORE_OK;
+}
+
+bool ecat_foe_core_validate_fw_target(
+    const ecat_target_desc_t *t, bool anti_rollback_enable)
+{
+    if (t == NULL || t->type != ECAT_TARGET_TYPE_FIRMWARE ||
+        t->target_id == 0U || t->max_size == 0U ||
+        t->write_unit < 1U || t->write_unit > ECAT_FOE_MAX_WRITE_UNIT ||
+        (t->max_size % t->write_unit) != 0U) {
+        return false;
+    }
+    if (t->asynchronous) {
+        if (t->driver.fw_async_ops == NULL ||
+            t->driver.fw_async_ops->start == NULL ||
+            t->driver.fw_async_ops->poll == NULL ||
+            t->driver.fw_async_ops->abort == NULL ||
+            t->driver.fw_async_ops->abort_session == NULL) {
+            return false;
+        }
+    } else {
+        if (t->driver.io.init == NULL ||
+            t->driver.io.invalidate == NULL ||
+            t->driver.io.erase_to == NULL ||
+            t->driver.io.write == NULL ||
+            t->driver.io.read == NULL ||
+            t->driver.io.finalize == NULL ||
+            t->driver.io.abort == NULL ||
+            (anti_rollback_enable && t->driver.io.finalize_with_version_floor == NULL)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const ecat_target_desc_t *ecat_foe_core_find_fw_target(
+    const ecat_foe_core_t *core, uint16_t target_id, size_t *out_slot)
+{
+    if (core == NULL || core->registry == NULL || target_id == 0U) {
+        return NULL;
+    }
+    size_t slot = 0U;
+    const ecat_target_desc_t *t =
+        ecat_target_registry_find_slot_by_id(core->registry, target_id, &slot);
+    if (t == NULL || t->type != ECAT_TARGET_TYPE_FIRMWARE ||
+        slot >= ECAT_TARGET_REGISTRY_MAX_BLOCKS) {
+        return NULL;
+    }
+    if (out_slot != NULL) {
+        *out_slot = slot;
+    }
+    return t;
 }
 
 int ecat_foe_core_deinit(ecat_foe_core_t *core)
@@ -309,44 +361,21 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         return -1;
     }
 
-    /* 3. 校验必需驱动回调；防回滚模式另需镜像/下限联合提交回调 */
-    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-        const ecat_foe_target_desc_t *t = &local_cfg.targets[i];
-        if (t->enabled) {
-            if (t->asynchronous) {
-                if (t->async_ops == NULL || t->async_ops->start == NULL ||
-                    t->async_ops->poll == NULL || t->async_ops->abort == NULL ||
-                    t->async_ops->abort_session == NULL) {
-                    memset(core, 0, sizeof(*core));
-                    core->state = ECAT_FOE_STATE_ERROR;
-                    core->is_configured = false;
-                    core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
-                    return -1;
-                }
-            } else if (t->driver == NULL ||
-                t->driver->init == NULL ||
-                t->driver->invalidate == NULL ||
-                t->driver->erase_to == NULL ||
-                t->driver->write == NULL ||
-                t->driver->read == NULL ||
-                t->driver->finalize == NULL ||
-                t->driver->abort == NULL ||
-                (local_cfg.anti_rollback_enable &&
-                 t->driver->finalize_with_version_floor == NULL)) {
-                memset(core, 0, sizeof(*core));
-                core->state = ECAT_FOE_STATE_ERROR;
-                core->is_configured = false;
-                core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
-                return -1;
-            }
-            if (t->write_unit < 1U || t->write_unit > ECAT_FOE_MAX_WRITE_UNIT) {
-                memset(core, 0, sizeof(*core));
-                core->state = ECAT_FOE_STATE_ERROR;
-                core->is_configured = false;
-                core->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
-                return -1;
-            }
-            if (t->max_payload_size == 0 || (t->max_payload_size % t->write_unit) != 0) {
+    /* 3. 校验权威目标注册表及其内所有已启用可写固件目标的驱动契约 */
+    if (local_cfg.registry == NULL ||
+        local_cfg.registry->target_count > ECAT_TARGET_REGISTRY_MAX_BLOCKS) {
+        memset(core, 0, sizeof(*core));
+        core->state = ECAT_FOE_STATE_ERROR;
+        core->is_configured = false;
+        core->last_error = ECAT_FOE_CORE_ERR_CFG_INVALID;
+        return -1;
+    }
+
+    for (size_t i = 0; i < local_cfg.registry->target_count; i++) {
+        const ecat_target_desc_t *t = &local_cfg.registry->targets[i];
+        if (t->type == ECAT_TARGET_TYPE_FIRMWARE && t->enabled &&
+            (t->permissions & ECAT_PERM_WRITE) != 0U) {
+            if (!ecat_foe_core_validate_fw_target(t, local_cfg.anti_rollback_enable)) {
                 memset(core, 0, sizeof(*core));
                 core->state = ECAT_FOE_STATE_ERROR;
                 core->is_configured = false;
@@ -359,6 +388,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
     /* 全部校验通过后，清空核心机并装载已校验配置 */
     memset(core, 0, sizeof(*core));
     core->cfg = local_cfg;
+    core->registry = local_cfg.registry;
     memcpy(core->local_project_name, temp_pname, plen);
     core->local_project_name[plen] = '\0';
     /* 消除自身指针与外部悬垂指针: 内部以 local_project_name 数组作为唯一持久化真相源，cfg.project_name 置为 NULL */
@@ -378,7 +408,7 @@ int ecat_foe_core_validate_wrq(const ecat_foe_core_t *core,
     if (core == NULL || filename == NULL) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
-    if (!core->is_configured) {
+    if (!core->is_configured || core->registry == NULL) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
     if (filename_len == 0 || filename_len > ECAT_FOE_MAX_FILENAME_LEN) {
@@ -393,9 +423,12 @@ int ecat_foe_core_validate_wrq(const ecat_foe_core_t *core,
         return ecat_foe_core_err_to_foe(err, true, false);
     }
 
-    if (parsed_tid < 1 || parsed_tid > ECAT_FOE_TARGET_COUNT ||
-        !core->cfg.targets[parsed_tid - 1].enabled) {
+    const ecat_target_desc_t *t = ecat_foe_core_find_fw_target(core, parsed_tid, NULL);
+    if (t == NULL || !t->enabled || (t->permissions & ECAT_PERM_WRITE) == 0U) {
         return ECAT_FOE_ERRCODE_NOTFOUND;
+    }
+    if (!ecat_foe_core_validate_fw_target(t, core->cfg.anti_rollback_enable)) {
+        return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
 
     if (out_target_id != NULL) {
@@ -413,16 +446,26 @@ ecat_foe_core_err_t ecat_foe_core_begin_request(
     if (core == NULL || request == NULL) {
         return ECAT_FOE_CORE_ERR_INVALID_ARG;
     }
-    if (!core->is_configured || core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
+    if (!core->is_configured || core->registry == NULL ||
+        core->state != ECAT_FOE_STATE_IDLE || core->session_active) {
         return ECAT_FOE_CORE_ERR_INVALID_STATE;
     }
-    if (request->target_id < 1U || request->target_id > ECAT_FOE_TARGET_COUNT ||
-        !core->cfg.targets[request->target_id - 1U].enabled) {
+    size_t slot = 0U;
+    const ecat_target_desc_t *t =
+        ecat_foe_core_find_fw_target(core, request->target_id, &slot);
+    if (t == NULL) {
+        return ECAT_FOE_CORE_ERR_WRQ_TARGET_UNKNOWN;
+    }
+    if (!t->enabled || (t->permissions & ECAT_PERM_WRITE) == 0U) {
         return ECAT_FOE_CORE_ERR_WRQ_TARGET_DISABLED;
+    }
+    if (!ecat_foe_core_validate_fw_target(t, core->cfg.anti_rollback_enable)) {
+        return ECAT_FOE_CORE_ERR_CFG_TARGET;
     }
     core_reset_session(core);
     core->req_target_id = request->target_id;
     core->req_fw_version = request->fw_version;
+    core->active_target_slot = slot;
     core->state = ECAT_FOE_STATE_WRQ_ACKED;
     return ECAT_FOE_CORE_OK;
 }
@@ -623,7 +666,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             return -1;
         }
 
-        /* 转换为阶段 3 本地配置结构 */
+        /* 转换为阶段 3 全局策略与单目标配置结构 */
         ecat_foe_efw_config_t efw_cfg;
         memset(&efw_cfg, 0, sizeof(efw_cfg));
         efw_cfg.project_id = core->cfg.project_id;
@@ -632,21 +675,22 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
         efw_cfg.anti_rollback_enable = core->cfg.anti_rollback_enable;
         efw_cfg.signature_verify_enable = core->cfg.signature_verify_enable;
 
-        for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-            efw_cfg.targets[i].enabled = core->cfg.targets[i].enabled;
-            efw_cfg.targets[i].max_payload_size = core->cfg.targets[i].max_payload_size;
+        size_t hdr_slot = 0U;
+        const ecat_target_desc_t *hdr_target =
+            ecat_foe_core_find_fw_target(core, core->hdr.target_id, &hdr_slot);
+        ecat_foe_efw_target_cfg_t efw_target;
+        const ecat_foe_efw_target_cfg_t *efw_target_ptr = NULL;
+        memset(&efw_target, 0, sizeof(efw_target));
+        if (hdr_target != NULL) {
+            efw_target.enabled = hdr_target->enabled &&
+                                 ((hdr_target->permissions & ECAT_PERM_WRITE) != 0U);
+            efw_target.max_payload_size = hdr_target->max_size;
+            efw_target_ptr = &efw_target;
         }
 
-        /* 在调用板级防回滚接口之前，先验证包头目标可索引、已启用且与 WRQ 一致。 */
+        /* 在调用板级防回滚接口之前，先验证包头目标已注册、已启用且与会话请求一致。 */
         if (core->cfg.anti_rollback_enable) {
-            if (core->hdr.target_id < 1U || core->hdr.target_id > ECAT_FOE_TARGET_COUNT) {
-                core->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
-                core->state = ECAT_FOE_STATE_ERROR;
-                return -1;
-            }
-            const ecat_foe_target_desc_t *requested_target =
-                &core->cfg.targets[core->hdr.target_id - 1U];
-            if (!requested_target->enabled) {
+            if (efw_target_ptr == NULL || !efw_target.enabled) {
                 core->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
@@ -657,24 +701,21 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
             }
-        }
-
-        /* 防回滚：仅读取当前待升级目标的版本下限 */
-        if (core->cfg.anti_rollback_enable) {
-            uint32_t floor_ver = 0;
+            uint32_t floor_ver = 0U;
             if (port_get_version_floor(core->hdr.target_id, &floor_ver) != 0) {
                 core->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET;
                 core->state = ECAT_FOE_STATE_ERROR;
                 return -1;
             }
-            if (core->hdr.target_id >= 1 && core->hdr.target_id <= ECAT_FOE_TARGET_COUNT) {
-                efw_cfg.targets[core->hdr.target_id - 1].version_floor = floor_ver;
-            }
+            efw_target.version_floor = floor_ver;
         }
 
-        ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(&core->hdr, &efw_cfg);
+        ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(
+            &core->hdr, &efw_cfg, core->req_target_id, efw_target_ptr);
         if (err3 != ECAT_FOE_EFW_OK) {
-            core->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
+            core->last_error = (err3 == ECAT_FOE_EFW_ERR_TARGET_MISMATCH)
+                ? ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH
+                : ECAT_FOE_CORE_ERR_HDR_VERIFY;
             core->state = ECAT_FOE_STATE_ERROR;
             return -1;
         }
@@ -687,14 +728,15 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             return -1;
         }
 
-        /* 目标驱动绑定与容量检查 */
-        const ecat_foe_target_desc_t *tdesc = &core->cfg.targets[core->hdr.target_id - 1];
-        if (tdesc->driver == NULL) {
+        /* 同步核心路径目标驱动与容量检查 (拒绝异步目标直接进入同步 on_data) */
+        const ecat_target_desc_t *tdesc = hdr_target;
+        if (tdesc == NULL || tdesc->asynchronous ||
+            !ecat_foe_core_validate_fw_target(tdesc, core->cfg.anti_rollback_enable)) {
             core->last_error = ECAT_FOE_CORE_ERR_DRV_NOT_REGISTERED;
             core->state = ECAT_FOE_STATE_ERROR;
             return -1;
         }
-        if (core->hdr.payload_length > tdesc->max_payload_size) {
+        if (core->hdr.payload_length > tdesc->max_size) {
             core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
             core->state = ECAT_FOE_STATE_ERROR;
             return -1;
@@ -735,7 +777,8 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             return -1; /* 拒绝且不调用 invalidate */
         }
 
-        core->active_drv = tdesc->driver;
+        core->active_target_slot = hdr_slot;
+        core->active_drv = &tdesc->driver.io;
         core->active_user_ctx = tdesc->user_ctx;
         core->active_write_unit = (tdesc->write_unit > 0) ? tdesc->write_unit : 1;
 
@@ -749,10 +792,8 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
             }
         }
 
-        /* 驱动 init 成功后，生命周期会话正式激活；按目标记录升级未闭环状态 */
-        if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
-            core->target_incomplete_mask |= (1U << (core->req_target_id - 1));
-        }
+        /* 驱动 init 成功后，生命周期会话正式激活；按注册表槽位记录升级未闭环状态 */
+        ecat_foe_core_mark_slot_incomplete(core, core->active_target_slot);
         core->session_active = true;
         core->driver_abort_called = false;
         core->driver_finalized = false;
@@ -837,8 +878,8 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         memset(core->residual_buf + core->residual_len, 0xFF, pad);
 
         uint32_t write_end = core->written_offset + wunit;
-        const ecat_foe_target_desc_t *tdesc = &core->cfg.targets[core->hdr.target_id - 1];
-        if (write_end > tdesc->max_payload_size) {
+        const ecat_target_desc_t *tdesc = ecat_foe_core_find_fw_target(core, core->hdr.target_id, NULL);
+        if (tdesc == NULL || write_end > tdesc->max_size) {
             core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
@@ -947,10 +988,8 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
     }
 
     /* 提交成功后，同一会话内不再调用 abort；新的 WRQ 开始新会话。 */
-    /* 仅清除当前目标自身的未完成标志，其余目标的未完成状态严格保留 */
-    if (core->req_target_id >= 1 && core->req_target_id <= ECAT_FOE_TARGET_COUNT) {
-        core->target_incomplete_mask &= ~(1U << (core->req_target_id - 1));
-    }
+    /* 仅清除当前目标槽位自身的未完成标志，其余目标的未完成状态严格保留 */
+    ecat_foe_core_clear_slot_incomplete(core, core->active_target_slot);
     core->driver_finalized = true;
     core->driver_invalidated = false;
     core->session_active = false;
@@ -978,15 +1017,25 @@ bool ecat_foe_core_upgrade_incomplete(const ecat_foe_core_t *core)
     if (core == NULL || !core->is_configured) {
         return false;
     }
-    return (core->target_incomplete_mask != 0);
+    for (size_t i = 0; i < sizeof(core->target_incomplete_slots); i++) {
+        if (core->target_incomplete_slots[i] != 0U) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ecat_foe_core_target_upgrade_incomplete(const ecat_foe_core_t *core, uint16_t target_id)
 {
-    if (core == NULL || !core->is_configured || target_id < 1 || target_id > ECAT_FOE_TARGET_COUNT) {
+    if (core == NULL || !core->is_configured || core->registry == NULL || target_id == 0U) {
         return false;
     }
-    return (core->target_incomplete_mask & (1U << (target_id - 1))) != 0;
+    size_t slot = 0U;
+    const ecat_target_desc_t *t = ecat_foe_core_find_fw_target(core, target_id, &slot);
+    if (t == NULL) {
+        return false;
+    }
+    return (core->target_incomplete_slots[slot / 8U] & (uint8_t)(1U << (slot % 8U))) != 0U;
 }
 
 ecat_foe_core_err_t ecat_foe_core_get_last_error(const ecat_foe_core_t *core)

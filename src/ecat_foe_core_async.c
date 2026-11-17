@@ -134,7 +134,12 @@ static ecat_upgrade_async_result_t async_poll(void *ctx)
             return ECAT_UPGRADE_ASYNC_PENDING;
         }
         if (r == ECAT_FOE_TARGET_ASYNC_FAILED) {
-            return fail_session(s, phase_error(s->phase));
+            ecat_foe_core_err_t err =
+                (s->phase == ECAT_FOE_CORE_ASYNC_PHASE_FINALIZE &&
+                 s->core->cfg.anti_rollback_enable)
+                    ? ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE
+                    : phase_error(s->phase);
+            return fail_session(s, err);
         }
         int done = complete_operation(s);
         if (done < 0) {
@@ -208,11 +213,8 @@ static int begin_operation(ecat_foe_core_async_t *s,
     }
     s->phase = phase;
 
-    const ecat_foe_target_desc_t *target = NULL;
-    if (s->core != NULL && s->core->hdr.target_id >= 1U &&
-        s->core->hdr.target_id <= ECAT_FOE_TARGET_COUNT) {
-        target = &s->core->cfg.targets[s->core->hdr.target_id - 1U];
-    }
+    const ecat_target_desc_t *target =
+        (s->core != NULL) ? ecat_foe_core_find_fw_target(s->core, s->core->hdr.target_id, NULL) : NULL;
     bool safe_abort = (target != NULL && target->async_safe_session_abort);
 
     if (kind == ECAT_FOE_TARGET_OP_INIT && safe_abort) {
@@ -251,50 +253,67 @@ static int validate_header(ecat_foe_core_async_t *s)
     cfg.local_hw_ver = c->cfg.local_hw_ver;
     cfg.anti_rollback_enable = c->cfg.anti_rollback_enable;
     cfg.signature_verify_enable = c->cfg.signature_verify_enable;
-    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; i++) {
-        cfg.targets[i].enabled = c->cfg.targets[i].enabled;
-        cfg.targets[i].max_payload_size = c->cfg.targets[i].max_payload_size;
+
+    size_t hdr_slot = 0U;
+    const ecat_target_desc_t *target =
+        ecat_foe_core_find_fw_target(c, c->hdr.target_id, &hdr_slot);
+    ecat_foe_efw_target_cfg_t efw_target;
+    const ecat_foe_efw_target_cfg_t *efw_target_ptr = NULL;
+    memset(&efw_target, 0, sizeof(efw_target));
+    if (target != NULL) {
+        efw_target.enabled = target->enabled &&
+                             ((target->permissions & ECAT_PERM_WRITE) != 0U);
+        efw_target.max_payload_size = target->max_size;
+        efw_target_ptr = &efw_target;
     }
-    if (c->hdr.target_id < 1U || c->hdr.target_id > ECAT_FOE_TARGET_COUNT) {
-        c->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
-        return -1;
-    }
-    if (!c->cfg.targets[c->hdr.target_id - 1U].enabled ||
-        c->hdr.target_id != c->req_target_id || c->hdr.fw_version != c->req_fw_version) {
-        c->last_error = ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH;
-        return -1;
-    }
+
     if (c->cfg.anti_rollback_enable) {
+        if (efw_target_ptr == NULL || !efw_target.enabled) {
+            c->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
+            return -1;
+        }
+        if (c->hdr.target_id != c->req_target_id || c->hdr.fw_version != c->req_fw_version) {
+            c->last_error = ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH;
+            return -1;
+        }
         uint32_t floor = 0U;
         if (port_get_version_floor(c->hdr.target_id, &floor) != 0) {
             c->last_error = ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_GET;
             return -1;
         }
-        cfg.targets[c->hdr.target_id - 1U].version_floor = floor;
+        efw_target.version_floor = floor;
     }
-    if (ecat_foe_efw_parse_stage3(&c->hdr, &cfg) != ECAT_FOE_EFW_OK) {
-        c->last_error = ECAT_FOE_CORE_ERR_HDR_VERIFY;
+
+    ecat_foe_efw_err_t err3 = ecat_foe_efw_parse_stage3(
+        &c->hdr, &cfg, c->req_target_id, efw_target_ptr);
+    if (err3 != ECAT_FOE_EFW_OK) {
+        c->last_error = (err3 == ECAT_FOE_EFW_ERR_TARGET_MISMATCH)
+            ? ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH
+            : ECAT_FOE_CORE_ERR_HDR_VERIFY;
         return -1;
     }
     if (c->hdr.target_id != c->req_target_id || c->hdr.fw_version != c->req_fw_version) {
         c->last_error = ECAT_FOE_CORE_ERR_HDR_CROSS_MISMATCH;
         return -1;
     }
-    const ecat_foe_target_desc_t *target = &c->cfg.targets[c->hdr.target_id - 1U];
-    if (!target->enabled || c->hdr.payload_length > target->max_payload_size) {
+    if (target == NULL || !efw_target.enabled || c->hdr.payload_length > target->max_size) {
         c->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
         return -1;
     }
-    if (!target->asynchronous || target->async_ops == NULL) {
+    if (!target->asynchronous || target->driver.fw_async_ops == NULL) {
         c->last_error = ECAT_FOE_CORE_ERR_DRV_NOT_REGISTERED;
         return -1;
     }
-    if (target->write_unit > s->operation_capacity) {
+    if (!ecat_foe_core_validate_fw_target(target, c->cfg.anti_rollback_enable) ||
+        target->write_unit > s->operation_capacity) {
         c->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
         return -1;
     }
-    if (ecat_foe_target_async_init(&s->runner, target->async_ops,
-            target->async_user_ctx, s->operation_storage,
+    void *async_ctx = (target->driver.fw_async_user_ctx != NULL)
+        ? target->driver.fw_async_user_ctx
+        : target->user_ctx;
+    if (ecat_foe_target_async_init(&s->runner, target->driver.fw_async_ops,
+            async_ctx, s->operation_storage,
             s->operation_capacity) != 0) {
         c->last_error = ECAT_FOE_CORE_ERR_CFG_TARGET;
         return -1;
@@ -318,8 +337,9 @@ static int validate_header(ecat_foe_core_async_t *s)
             return -1;
         }
     }
+    c->active_target_slot = hdr_slot;
     c->active_drv = NULL;
-    c->active_user_ctx = target->async_user_ctx;
+    c->active_user_ctx = async_ctx;
     c->active_write_unit = target->write_unit;
     c->header_complete = true;
     c->state = ECAT_FOE_STATE_DATA;
@@ -343,16 +363,17 @@ static int complete_operation(ecat_foe_core_async_t *s)
         c->session_active = true;
         c->driver_abort_called = false;
         c->driver_finalized = false;
-        c->target_incomplete_mask |= (1U << (c->hdr.target_id - 1U));
+        ecat_foe_core_mark_slot_incomplete(c, c->active_target_slot);
         return begin_operation(s, ECAT_FOE_TARGET_OP_INVALIDATE, 0U, 0U,
                                NULL, 0U, NULL, NULL);
     case ECAT_FOE_CORE_ASYNC_PHASE_INVALIDATE:
         c->driver_invalidated = true;
         return 0;
-    case ECAT_FOE_CORE_ASYNC_PHASE_ERASE:
+    case ECAT_FOE_CORE_ASYNC_PHASE_ERASE: {
+        const ecat_target_desc_t *tdesc =
+            ecat_foe_core_find_fw_target(c, c->hdr.target_id, NULL);
         if (c->erased_watermark < s->operation_need_end ||
-            c->erased_watermark >
-                c->cfg.targets[c->hdr.target_id - 1U].max_payload_size) {
+            tdesc == NULL || c->erased_watermark > tdesc->max_size) {
             c->last_error = ECAT_FOE_CORE_ERR_DRV_ERASE;
             return -1;
         }
@@ -360,6 +381,7 @@ static int complete_operation(ecat_foe_core_async_t *s)
                                s->operation_offset, 0U,
                                s->operation_storage, s->operation_length,
                                NULL, NULL);
+    }
     case ECAT_FOE_CORE_ASYNC_PHASE_WRITE:
         c->written_offset += s->operation_length;
         return 0;
@@ -375,7 +397,7 @@ static int complete_operation(ecat_foe_core_async_t *s)
         s->readback_remaining -= s->readback_chunk;
         return 0;
     case ECAT_FOE_CORE_ASYNC_PHASE_FINALIZE:
-        c->target_incomplete_mask &= ~(1U << (c->req_target_id - 1U));
+        ecat_foe_core_clear_slot_incomplete(c, c->active_target_slot);
         c->driver_finalized = true;
         c->driver_invalidated = false;
         c->session_active = false;
@@ -404,7 +426,8 @@ static int start_aligned_write(ecat_foe_core_async_t *s,
     s->operation_offset = c->written_offset;
     s->operation_length = length;
     s->operation_need_end = c->written_offset + length;
-    if (s->operation_need_end > c->cfg.targets[c->hdr.target_id - 1U].max_payload_size) {
+    const ecat_target_desc_t *tdesc = ecat_foe_core_find_fw_target(c, c->hdr.target_id, NULL);
+    if (tdesc == NULL || s->operation_need_end > tdesc->max_size) {
         c->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
         return -1;
     }
@@ -534,7 +557,9 @@ static int pump_end(ecat_foe_core_async_t *s)
     s->phase = ECAT_FOE_CORE_ASYNC_PHASE_FINALIZE;
     if (final_result == ECAT_FOE_TARGET_ASYNC_PENDING) return 1;
     if (final_result == ECAT_FOE_TARGET_ASYNC_FAILED) {
-        c->last_error = ECAT_FOE_CORE_ERR_DRV_FINALIZE;
+        c->last_error = c->cfg.anti_rollback_enable
+            ? ECAT_FOE_CORE_ERR_ANTI_ROLLBACK_UPDATE
+            : ECAT_FOE_CORE_ERR_DRV_FINALIZE;
         return -1;
     }
     return complete_operation(s);
@@ -602,7 +627,7 @@ static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s)
         if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
         c->driver_invalidated = true;
         c->session_active = true;
-        c->target_incomplete_mask |= (1U << (c->hdr.target_id - 1U));
+        ecat_foe_core_mark_slot_incomplete(c, c->active_target_slot);
     }
 
     int r = pump_payload(s);

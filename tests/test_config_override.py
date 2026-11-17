@@ -37,25 +37,27 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
     for name, source_path, extra in [
             ('caller', caller, []),
             ('core', root / 'src/ecat_foe_core.c', ['-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"']),
-            ('efw', root / 'src/ecat_foe_efw.c', [])]:
+            ('efw', root / 'src/ecat_foe_efw.c', []),
+            ('reg', root / 'src/ecat_target_registry.c', [])]:
         subprocess.run(flags + extra + ['-c', str(source_path), '-o', str(tmp_path / (name + '.o'))], check=True)
-    mismatch = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('caller', 'core', 'efw')),
+    mismatch = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('caller', 'core', 'efw', 'reg')),
                                '-o', str(tmp_path / 'mismatch')], capture_output=True, text=True)
     assert mismatch.returncode != 0, 'mismatched core and caller configurations must fail to link'
     assert 'ecat_foe_config_abi_' in mismatch.stderr, mismatch.stderr
     subprocess.run(flags + ['-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(caller),
                             '-o', str(tmp_path / 'custom_caller.o')], check=True)
-    subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw')),
+    subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw', 'reg')),
                     '-o', str(tmp_path / 'matching')], check=True)
     # A caller compiled against the prior public-layout ABI must not link.
     old_include = tmp_path / 'old_include'
     shutil.copytree(root / 'include', old_include)
     old_abi = old_include / 'ecat_foe_config_abi.h'
-    old_abi.write_text(old_abi.read_text().replace('ecat_foe_config_abi_v2_h', 'ecat_foe_config_abi_h'))
+    assert 'ecat_foe_config_abi_v3_h' in old_abi.read_text()
+    old_abi.write_text(old_abi.read_text().replace('ecat_foe_config_abi_v3_h', 'ecat_foe_config_abi_v2_h'))
     subprocess.run([cc, '-std=c99', '-I' + str(old_include), '-I' + str(tmp_path),
                     '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(caller),
                     '-o', str(tmp_path / 'old_caller.o')], check=True)
-    old_link = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('old_caller', 'core', 'efw')),
+    old_link = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('old_caller', 'core', 'efw', 'reg')),
                                '-o', str(tmp_path / 'old_link')], capture_output=True, text=True)
     assert old_link.returncode != 0 and 'ecat_foe_config_abi_' in old_link.stderr, old_link.stderr
     # A TU need not call init: accessing the public layout must still carry the ABI reference.
@@ -63,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
     observer.write_text('#include "ecat_foe_core.h"\n'
                         'int observe(ecat_foe_core_t *core) { return (int)core->residual_len; }\n')
     subprocess.run(flags + ['-c', str(observer), '-o', str(tmp_path / 'observer.o')], check=True)
-    mixed = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw', 'observer')),
+    mixed = subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('custom_caller', 'core', 'efw', 'reg', 'observer')),
                             '-o', str(tmp_path / 'mixed')], capture_output=True, text=True)
     assert mixed.returncode != 0 and 'ecat_foe_config_abi_' in mixed.stderr, mixed.stderr
     # Equivalent preprocessor expressions must link to the literal-built core.
@@ -75,6 +77,6 @@ with tempfile.TemporaryDirectory(prefix='ecat-config-') as tmp:
         (tmp_path / 'ecat_foe_conf.h').write_text(expression_config)
         subprocess.run(flags + ['-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"', '-c', str(caller),
                                 '-o', str(tmp_path / 'expression.o')], check=True)
-        subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('expression', 'core', 'efw')),
+        subprocess.run([cc, *(str(tmp_path / (name + '.o')) for name in ('expression', 'core', 'efw', 'reg')),
                         '-o', str(tmp_path / 'expression')], check=True)
 print('PASS: custom core configuration controls public buffer size')

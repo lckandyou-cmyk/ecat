@@ -68,17 +68,16 @@ int ecat_foe_ssc_bind_transfer(ecat_foe_ssc_adapter_t *a, ecat_transfer_t *trans
 
 static bool ssc_target_is_async(const ecat_foe_ssc_adapter_t *a, uint16_t target_id)
 {
-    if (a == NULL) return false;
-    if (a->core != NULL && target_id >= 1U && target_id <= ECAT_FOE_TARGET_COUNT) {
-        if (a->core->cfg.targets[target_id - 1U].enabled &&
-            a->core->cfg.targets[target_id - 1U].asynchronous) {
-            return true;
-        }
-    }
+    if (a == NULL || target_id == 0U) return false;
+    const ecat_target_registry_t *reg = NULL;
     if (ssc_has_transport(a) && a->transport.transfer != NULL &&
         a->transport.transfer->registry != NULL) {
-        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(
-            a->transport.transfer->registry, target_id);
+        reg = a->transport.transfer->registry;
+    } else if (a->core != NULL) {
+        reg = a->core->registry;
+    }
+    if (reg != NULL) {
+        const ecat_target_desc_t *desc = ecat_target_registry_find_by_id(reg, target_id);
         if (desc != NULL && desc->enabled && desc->asynchronous) {
             return true;
         }

@@ -276,28 +276,43 @@ static void reset_soes_environment(void)
 }
 
 /* Test 1: WRQ 阶段首块回调时机核查 */
+static ecat_target_registry_t s_harness_regs[4];
+static unsigned s_harness_reg_cursor = 0U;
+
+static ecat_target_registry_t *alloc_harness_reg(void)
+{
+    ecat_target_registry_t *reg = &s_harness_regs[(s_harness_reg_cursor++) & 3U];
+    assert(ecat_target_registry_init(reg) == 0);
+    return reg;
+}
+
+static void harness_add_fw_target(ecat_target_registry_t *reg,
+                                  uint16_t target_id,
+                                  const char *name,
+                                  mock_driver_t *drv)
+{
+    ecat_target_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.target_id = target_id;
+    strncpy(desc.name, name, sizeof(desc.name) - 1U);
+    desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    desc.permissions = ECAT_PERM_WRITE;
+    desc.max_size = 4096U;
+    desc.write_unit = 8U;
+    desc.enabled = true;
+    drv->driver.finalize_with_version_floor = harness_finalize_with_version_floor;
+    desc.driver.io = drv->driver;
+    desc.user_ctx = drv;
+    assert(ecat_target_registry_add(reg, &desc) == 0);
+}
+
 /* Protocol exercises use a registered manager, matching production wiring. */
 static void init_managed_soes(ecat_foe_soes_adapter_t *adapter,
                               ecat_foe_core_t *core, uint32_t buffer_size)
 {
-    static ecat_target_registry_t registry;
     static ecat_transfer_t transfer;
-    assert(ecat_target_registry_init(&registry) == 0);
-    for (size_t i = 0; i < ECAT_FOE_TARGET_COUNT; ++i) {
-        if (!core->cfg.targets[i].enabled) continue;
-        ecat_target_desc_t target = {0};
-        target.target_id = (uint16_t)(i + 1U);
-        (void)snprintf(target.name, sizeof(target.name), "target%u", (unsigned)target.target_id);
-        target.type = ECAT_TARGET_TYPE_FIRMWARE;
-        target.permissions = ECAT_PERM_WRITE;
-        target.max_size = core->cfg.targets[i].max_payload_size;
-        target.enabled = true;
-        target.asynchronous = core->cfg.targets[i].asynchronous;
-        if (core->cfg.targets[i].driver != NULL) target.driver.io = *core->cfg.targets[i].driver;
-        target.user_ctx = core->cfg.targets[i].user_ctx;
-        assert(ecat_target_registry_add(&registry, &target) == 0);
-    }
-    assert(ecat_transfer_init(&transfer, &registry, core) == 0);
+    assert(core != NULL && core->registry != NULL);
+    assert(ecat_transfer_init(&transfer, (ecat_target_registry_t *)core->registry, core) == 0);
     ecat_foe_soes_init(adapter, core, buffer_size);
     assert(ecat_foe_soes_bind_transfer(adapter, &transfer) == 0);
 }
@@ -556,6 +571,9 @@ static void test_direct_api_calls_defense_without_wrq(void)
     ecat_foe_core_t core;
     memset(&core, 0, sizeof(core));
 
+    ecat_target_registry_t *reg = alloc_harness_reg();
+    harness_add_fw_target(reg, 1U, "mcu", &s_harness_drv);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -564,13 +582,7 @@ static void test_direct_api_calls_defense_without_wrq(void)
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 4096U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &s_harness_drv.driver;
-    cfg.targets[0].user_ctx = &s_harness_drv;
+    cfg.registry = reg;
 
     int ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
@@ -613,6 +625,9 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     ecat_foe_core_t core;
     memset(&core, 0, sizeof(core));
 
+    ecat_target_registry_t *reg = alloc_harness_reg();
+    harness_add_fw_target(reg, 1U, "mcu", &s_harness_drv);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -621,13 +636,7 @@ static void test_real_soes_driven_adapter_e2e_flow(void)
     cfg.local_hw_ver = 1U;
     cfg.anti_rollback_enable = false;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 4096U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &s_harness_drv.driver;
-    cfg.targets[0].user_ctx = &s_harness_drv;
+    cfg.registry = reg;
 
     int ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
@@ -781,6 +790,9 @@ static void test_real_soes_without_on_wrq_production_reality(void)
     ecat_foe_core_t core;
     memset(&core, 0, sizeof(core));
 
+    ecat_target_registry_t *reg = alloc_harness_reg();
+    harness_add_fw_target(reg, 1U, "mcu", &s_harness_drv);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -788,12 +800,7 @@ static void test_real_soes_without_on_wrq_production_reality(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 4096U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &s_harness_drv.driver;
-    cfg.targets[0].user_ctx = &s_harness_drv;
+    cfg.registry = reg;
 
     int ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
@@ -1084,6 +1091,9 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     ecat_foe_core_t core;
     memset(&core, 0, sizeof(core));
 
+    ecat_target_registry_t *reg = alloc_harness_reg();
+    harness_add_fw_target(reg, 1U, "mcu", &s_harness_drv);
+
     ecat_foe_core_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.project_id = 0x10010001U;
@@ -1091,12 +1101,7 @@ static void test_real_soes_padded_efw_avoids_zero_len(void)
     cfg.hardware_id = 0x00000001U;
     cfg.local_hw_ver = 1U;
     cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
-    cfg.targets[0].target_id = 1;
-    cfg.targets[0].enabled = true;
-    cfg.targets[0].max_payload_size = 4096U;
-    cfg.targets[0].write_unit = 8U;
-    cfg.targets[0].driver = &s_harness_drv.driver;
-    cfg.targets[0].user_ctx = &s_harness_drv;
+    cfg.registry = reg;
 
     int ret_init = ecat_foe_core_init(&core, &cfg);
     assert(ret_init == 0);
@@ -1279,6 +1284,10 @@ static void test_real_soes_session_boundary_cases(void)
 /* ========================================================================== */
 static void init_harness_cfg(ecat_foe_core_cfg_t *cfg, mock_driver_t *drv)
 {
+    ecat_target_registry_t *reg = alloc_harness_reg();
+    harness_add_fw_target(reg, 1U, "mcu", drv);
+    harness_add_fw_target(reg, 2U, "fpga", drv);
+
     memset(cfg, 0, sizeof(*cfg));
     cfg->project_id = 0x10010001U;
     cfg->hardware_id = 0x00000001U;
@@ -1286,19 +1295,7 @@ static void init_harness_cfg(ecat_foe_core_cfg_t *cfg, mock_driver_t *drv)
     cfg->anti_rollback_enable = false;
     cfg->max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
     cfg->project_name = "SERVO_DRV";
-    cfg->targets[0].target_id = 1;
-    cfg->targets[0].enabled = true;
-    cfg->targets[0].max_payload_size = 4096U;
-    cfg->targets[0].write_unit = 8U;
-    cfg->targets[0].driver = &drv->driver;
-    cfg->targets[0].user_ctx = drv;
-    drv->driver.finalize_with_version_floor = harness_finalize_with_version_floor;
-    cfg->targets[1].target_id = 2;
-    cfg->targets[1].enabled = true;
-    cfg->targets[1].max_payload_size = 4096U;
-    cfg->targets[1].write_unit = 8U;
-    cfg->targets[1].driver = &drv->driver;
-    cfg->targets[1].user_ctx = drv;
+    cfg->registry = reg;
 }
 
 static void test_real_soes_pre_hook_validation_suite(void)
@@ -2013,16 +2010,12 @@ int main(void)
             ecat_foe_core_t core;
             ecat_foe_core_cfg_t cfg;
             init_harness_cfg(&cfg, &s_harness_drv);
-            /* 配置稀疏目标: 仅使能 Target 2 (FPGA) 与 Target 4 (EEPROM)，禁用 Target 1 与 3 */
-            cfg.targets[0].enabled = false;
-            cfg.targets[1].enabled = true;  /* Target 2 */
-            cfg.targets[2].enabled = false;
-            cfg.targets[3].target_id = 4;
-            cfg.targets[3].enabled = true;  /* Target 4 */
-            cfg.targets[3].max_payload_size = 4096U;
-            cfg.targets[3].write_unit = 8U;
-            cfg.targets[3].driver = &s_harness_drv.driver;
-            cfg.targets[3].user_ctx = &s_harness_drv;
+            /* 配置稀疏目标: 仅注册并使能 Target 2 (FPGA) 与 Target 4 (EEPROM) */
+            ecat_target_registry_t sparse_reg;
+            assert(ecat_target_registry_init(&sparse_reg) == 0);
+            harness_add_fw_target(&sparse_reg, 2U, "fpga", &s_harness_drv);
+            harness_add_fw_target(&sparse_reg, 4U, "eeprom", &s_harness_drv);
+            cfg.registry = &sparse_reg;
             assert(ecat_foe_core_init(&core, &cfg) == 0);
 
             ecat_foe_soes_adapter_t adapter;
@@ -2812,20 +2805,7 @@ int main(void)
         {
             reset_soes_environment();
             mock_driver_reset(&s_harness_drv);
-            ecat_foe_core_t core;
-            ecat_foe_core_cfg_t cfg;
-            init_harness_cfg(&cfg, &s_harness_drv);
-            assert(ecat_foe_core_init(&core, &cfg) == 0);
-            ecat_foe_soes_adapter_t adapter;
-            ecat_foe_soes_init(&adapter, &core, 128);
-            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
-
-            s_foe_files[0].filepass = 0;
-            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
-            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
-            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
-
-            /* 1. 混合配置共存：注册表中包含同步目标 1 (MCU) 与异步目标 2 (LOG)，
+            /* 1. 混合配置共存：注册表中包含同步固件目标 1 (MCU)、异步固件目标 2 (FPGA) 与异步数据目标 5 (LOG)，
              *    ecat_foe_soes_bind_transfer 必须成功返回 0，无关异步目标不得阻断整个适配器绑定！ */
             ecat_target_registry_t reg;
             assert(ecat_target_registry_init(&reg) == 0);
@@ -2835,6 +2815,7 @@ int main(void)
                 .type = ECAT_TARGET_TYPE_FIRMWARE,
                 .permissions = ECAT_PERM_WRITE,
                 .max_size = 1024U * 1024U,
+                .write_unit = 8U,
                 .enabled = true,
                 .asynchronous = false,
                 .driver = { .io = s_harness_drv.driver },
@@ -2842,8 +2823,22 @@ int main(void)
             };
             assert(ecat_target_registry_add(&reg, &sync_mcu) == 0);
 
-            ecat_target_desc_t async_log = {
+            ecat_target_desc_t async_fpga = {
                 .target_id = 2U,
+                .name = "fpga_async",
+                .type = ECAT_TARGET_TYPE_FIRMWARE,
+                .permissions = ECAT_PERM_WRITE,
+                .max_size = 1024U,
+                .write_unit = 8U,
+                .enabled = true,
+                .asynchronous = true,
+                .driver = { .io = s_harness_drv.driver, .fw_async_ops = &s_harness_dummy_async_ops },
+                .user_ctx = &s_harness_drv
+            };
+            assert(ecat_target_registry_add(&reg, &async_fpga) == 0);
+
+            ecat_target_desc_t async_log = {
+                .target_id = 5U,
                 .name = "log",
                 .type = ECAT_TARGET_TYPE_DATA,
                 .permissions = ECAT_PERM_RW,
@@ -2854,6 +2849,20 @@ int main(void)
                 .user_ctx = &s_harness_drv
             };
             assert(ecat_target_registry_add(&reg, &async_log) == 0);
+
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            cfg.registry = &reg;
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+            ecat_foe_soes_adapter_t adapter;
+            ecat_foe_soes_init(&adapter, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&adapter, MBXcontrol, MBX, 4, 128) == 0);
+
+            s_foe_files[0].filepass = 0;
+            s_foe_files[0].name = "SERVO_DRV_MCU.efw";
+            s_foe_files[0].write_function = ecat_foe_soes_write_cb;
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
 
             ecat_transfer_t transfer;
             assert(ecat_transfer_init(&transfer, &reg, &core) == 0);
@@ -2940,24 +2949,6 @@ int main(void)
         /* 深度风险 11: 验证统一管理器支持混合固件目标共存与逐目标按需拦截 */
         {
             reset_soes_environment();
-            ecat_foe_core_t core;
-            ecat_foe_core_cfg_t cfg;
-            init_harness_cfg(&cfg, &s_harness_drv);
-            cfg.targets[0].enabled = true;
-            cfg.targets[0].asynchronous = false;
-            cfg.targets[1].enabled = true;
-            cfg.targets[1].asynchronous = true;
-            cfg.targets[1].max_payload_size = 1024U;
-            cfg.targets[1].driver = &s_harness_drv.driver;
-            cfg.targets[1].async_ops = &s_harness_dummy_async_ops;
-            assert(ecat_foe_core_init(&core, &cfg) == 0);
-
-            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
-
-            ecat_foe_soes_adapter_t mixed_adp;
-            ecat_foe_soes_init(&mixed_adp, &core, 128);
-            assert(ecat_foe_soes_set_mbx_context(&mixed_adp, MBXcontrol, MBX, 4, 128) == 0);
-
             ecat_target_registry_t registry;
             ecat_transfer_t transfer;
             ecat_target_desc_t target;
@@ -2966,7 +2957,8 @@ int main(void)
             memcpy(target.name, "mcu", sizeof("mcu"));
             target.type = ECAT_TARGET_TYPE_FIRMWARE;
             target.permissions = ECAT_PERM_WRITE;
-            target.max_size = cfg.targets[0].max_payload_size;
+            target.max_size = 4096U;
+            target.write_unit = 8U;
             target.enabled = true;
             target.driver.io = s_harness_drv.driver;
             target.user_ctx = &s_harness_drv;
@@ -2974,9 +2966,23 @@ int main(void)
             assert(ecat_target_registry_add(&registry, &target) == 0);
             target.target_id = 2U;
             memcpy(target.name, "fpga", sizeof("fpga"));
-            target.max_size = cfg.targets[1].max_payload_size;
+            target.max_size = 1024U;
             target.asynchronous = true;
+            target.driver.fw_async_ops = &s_harness_dummy_async_ops;
             assert(ecat_target_registry_add(&registry, &target) == 0);
+
+            ecat_foe_core_t core;
+            ecat_foe_core_cfg_t cfg;
+            init_harness_cfg(&cfg, &s_harness_drv);
+            cfg.registry = &registry;
+            assert(ecat_foe_core_init(&core, &cfg) == 0);
+
+            const char *fn_mcu = "SERVO_DRV_MCU_V1.0.0.0.efw";
+
+            ecat_foe_soes_adapter_t mixed_adp;
+            ecat_foe_soes_init(&mixed_adp, &core, 128);
+            assert(ecat_foe_soes_set_mbx_context(&mixed_adp, MBXcontrol, MBX, 4, 128) == 0);
+
             assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
             assert(ecat_foe_soes_bind_transfer(&mixed_adp, &transfer) == 0);
 

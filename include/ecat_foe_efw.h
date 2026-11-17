@@ -41,12 +41,11 @@ extern "C" {
 /** @brief 阶段 1 探测所需最小字节数 */
 #define ECAT_FOE_EFW_STAGE1_PROBE_LEN       8U
 
-/* 升级目标定义 (efw-format 第 5 节) */
+/* 常见升级目标约定标识 (efw-format 第 5 节；允许任意非零 uint16_t 1..65535) */
 #define ECAT_FOE_TARGET_MCU                 0x0001U  /**< MCU 固件 (字样: MCU) */
 #define ECAT_FOE_TARGET_FPGA                0x0002U  /**< FPGA 镜像 (字样: FPGA) */
 #define ECAT_FOE_TARGET_SII                 0x0003U  /**< ESC SII EEPROM (字样: SII) */
 #define ECAT_FOE_TARGET_EEPROM              0x0004U  /**< 外部用户数据 EEPROM (字样: EEPROM) */
-#define ECAT_FOE_TARGET_COUNT               4U
 
 /* -------------------------------------------------------------------------- */
 /*                               错误码枚举                                   */
@@ -126,15 +125,14 @@ typedef struct {
 } ecat_foe_efw_target_cfg_t;
 
 /**
- * @brief 从站本地静态配置结构体 (阶段 3 校验入参)
+ * @brief 从站全局静态策略配置结构体 (阶段 3 校验入参)
  */
 typedef struct {
     uint32_t project_id;                         /**< 本地工程 ID */
     uint32_t hardware_id;                        /**< 本地硬件 ID */
     uint16_t local_hw_ver;                       /**< 本地硬件版本号 (uint16) */
     bool     anti_rollback_enable;               /**< 是否启用防版本回滚校验 */
-    bool     signature_verify_enable;             /**< 本地强制验签；默认 false */
-    ecat_foe_efw_target_cfg_t targets[ECAT_FOE_TARGET_COUNT]; /**< 目标 1..4 配置 (索引 target_id - 1) */
+    bool     signature_verify_enable;            /**< 本地强制验签；默认 false */
 } ecat_foe_efw_config_t;
 
 /* -------------------------------------------------------------------------- */
@@ -214,29 +212,31 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
 );
 
 /**
- * @brief 阶段 3：全量元数据安全核验 ("擦除前必须全过"清单)
+ * @brief 阶段 3：单目标全量元数据安全核验 ("擦除前必须全过"清单)
  *
  * 按当前 efw-format-v0.2.md 规范执行核验：
  * 1. magic 严格等于 0x57464345
  * 2. format_version 严格等于当前格式版本
- * 3. header_length 等于当前格式固定长度 148
- * 4. flags 严格等于 0
- * 5. reserved 区域 (20 字节) 全为 0x00
- * 6. project_id 与本地配置一致
- * 7. hardware_id 与本地配置一致
- * 8. hw_ver_min <= hw_ver_max 且 local_hw_ver 落在 [hw_ver_min, hw_ver_max] 内
- * 9. target_id 为已知目标 (1..4) 且在本地配置中已开启使能
- * 10. payload_length 未超过本地分配的分区容量上限
- * 11. min_allow_version <= fw_version
- * 12. 若开启防回滚，fw_version >= version_floor
+ * 3. 若启用强制验签，signed_package 必须为 true
+ * 4. header_length 等于当前格式固定长度 148 且 4 字节对齐
+ * 5. flags 严格等于 0，reserved 区域 (20 字节) 全为 0x00
+ * 6. project_id、hardware_id 与本地配置一致
+ * 7. hw_ver_min <= hw_ver_max 且 local_hw_ver 落在 [hw_ver_min, hw_ver_max] 内
+ * 8. hdr->target_id 与 selected_id 皆非 0，target 非 NULL、已启用且 hdr->target_id == selected_id
+ * 9. payload_length > 0，target->max_payload_size > 0 且 payload_length <= target->max_payload_size
+ * 10. min_allow_version <= fw_version；若开启防回滚，fw_version >= target->version_floor
  *
- * @param hdr 阶段 2 装配成功的头部结构体指针
- * @param cfg 本地配置参数指针
+ * @param hdr         阶段 2 装配成功的头部结构体指针
+ * @param cfg         本地全局策略参数指针
+ * @param selected_id 当前会话选定的本地目标 ID (1..65535)
+ * @param target      本地已解析的目标限额配置指针 (若包头目标在本地未注册则传 NULL)
  * @return ECAT_FOE_EFW_OK 全部通过，允许进入擦除与写入；否则返回对应细分错误码
  */
 ecat_foe_efw_err_t ecat_foe_efw_parse_stage3(
     const ecat_foe_efw_header_t *hdr,
-    const ecat_foe_efw_config_t *cfg
+    const ecat_foe_efw_config_t *cfg,
+    uint16_t selected_id,
+    const ecat_foe_efw_target_cfg_t *target
 );
 
 /**

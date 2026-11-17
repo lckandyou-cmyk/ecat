@@ -9,19 +9,6 @@
 #include "ecat_foe_core_async.h"
 #include <string.h>
 
-static bool target_registry_acl_adapter(
-    const void *registry,
-    uint16_t transport_id,
-    uint16_t target_id,
-    uint8_t required_perm)
-{
-    return ecat_target_registry_check_permission(
-        (const ecat_target_registry_t *)registry,
-        transport_id,
-        target_id,
-        required_perm);
-}
-
 /**
  * @brief 动态计算固件容器物理上限 (header + payload)
  *
@@ -29,27 +16,12 @@ static bool target_registry_acl_adapter(
  * 空包规避填充若存在亦计入 payload_length，容器传输流中绝不存在独立的尾部未覆盖填充区，
  * 传输流总字节数恒定有界于 header_length + payload_length。
  * 核心驱动层对物理介质不足 write_unit 的尾部对齐填充仅发生在设备内部缓冲写入阶段，不属于传输流容器尺寸。
- * 因此容器流物理总上限精确为: eff_payload + 148U。
+ * 因此容器流物理总上限精确为: target->max_size + 148U。
  * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕。
  */
-static uint32_t calc_firmware_container_limit(
-    const ecat_target_desc_t *target,
-    const ecat_foe_core_t *core)
+static uint32_t calc_firmware_container_limit(const ecat_target_desc_t *target)
 {
-    uint32_t eff_payload = target->max_size;
-    uint32_t max_hdr = ECAT_FOE_EFW_HEADER_MIN_LEN;
-
-    if (core != NULL) {
-        if (target->target_id >= 1U && target->target_id <= ECAT_FOE_TARGET_COUNT) {
-            uint32_t target_idx = (uint32_t)target->target_id - 1U;
-            if (core->cfg.targets[target_idx].max_payload_size > 0U &&
-                core->cfg.targets[target_idx].max_payload_size < eff_payload) {
-                eff_payload = core->cfg.targets[target_idx].max_payload_size;
-            }
-        }
-    }
-
-    uint64_t wide_cap = (uint64_t)eff_payload + (uint64_t)max_hdr;
+    uint64_t wide_cap = (uint64_t)target->max_size + (uint64_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
     return (wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap;
 }
 
@@ -61,12 +33,12 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
     }
 
     if (core != NULL) {
-        if (core->shared_session != NULL &&
-            ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL) {
+        if (!core->is_configured || core->registry != reg) {
+            /* 严禁冲突或未配置绑定: 核心状态机必须已初始化且绑定同一个唯一权威注册表 */
             return -1;
         }
-        if (core->registry != NULL && core->registry != reg) {
-            /* 严禁冲突绑定: 核心状态机已绑定不同的权威注册表，杜绝 last-writer-wins 劫持 */
+        if (core->shared_session != NULL &&
+            ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL) {
             return -1;
         }
         if (core->shared_session == &t->session) {
@@ -82,8 +54,6 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe
     t->last_error = ECAT_TRANSFER_ERR_NONE;
 
     if (core != NULL) {
-        core->registry = reg;
-        core->acl_check = target_registry_acl_adapter;
         if (core->shared_session == NULL) {
             core->shared_session = &t->session;
         }
@@ -142,10 +112,6 @@ static inline const ecat_upgrade_session_t *get_transfer_session_const(const eca
 static void release_session(ecat_transfer_t *t, const void *owner, uint64_t token)
 {
     if (t != NULL) {
-        if (t->core_cap_overridden && t->core != NULL) {
-            t->core->cfg.targets[t->saved_core_target_idx].max_payload_size = t->saved_core_max_payload;
-            t->core_cap_overridden = false;
-        }
         ecat_upgrade_session_t *s = get_transfer_session(t);
         if (s != NULL) {
             (void)ecat_upgrade_session_release_mgr(s, t, owner, token);
@@ -291,7 +257,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     if (request->direction == ECAT_TRANSFER_DIR_IMPORT &&
         target->type == ECAT_TARGET_TYPE_FIRMWARE) {
         if (request->expected_size > 0U) {
-            uint32_t limit = calc_firmware_container_limit(target, t->core);
+            uint32_t limit = calc_firmware_container_limit(target);
             if (request->expected_size < ECAT_FOE_EFW_HEADER_MIN_LEN ||
                 request->expected_size > limit) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
@@ -438,76 +404,24 @@ ecat_transfer_result_t ecat_transfer_begin(
                 return ECAT_TRANSFER_FAILED;
             }
 
-            if (request->target_id < 1U || request->target_id > ECAT_FOE_TARGET_COUNT) {
-                t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
+            if (!ecat_foe_core_validate_fw_target(target, t->core->cfg.anti_rollback_enable)) {
+                t->last_error = (!target->asynchronous &&
+                                 (target->driver.io.init == NULL ||
+                                  target->driver.io.invalidate == NULL ||
+                                  target->driver.io.erase_to == NULL ||
+                                  target->driver.io.write == NULL ||
+                                  target->driver.io.read == NULL ||
+                                  target->driver.io.finalize == NULL ||
+                                  target->driver.io.abort == NULL ||
+                                  (t->core->cfg.anti_rollback_enable &&
+                                   target->driver.io.finalize_with_version_floor == NULL)))
+                    ? ECAT_TRANSFER_ERR_DRIVER_WRITE
+                    : ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 t->driver_initialized = false;
                 release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
             }
-
-            uint32_t target_idx = (uint32_t)request->target_id - 1U;
-            if (!t->core->cfg.targets[target_idx].enabled) {
-                t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
-                t->active = false;
-                t->driver_initialized = false;
-                release_session(t, owner, acquired_token);
-                return ECAT_TRANSFER_FAILED;
-            }
-
-            if (target->asynchronous != t->core->cfg.targets[target_idx].asynchronous) {
-                t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                t->active = false;
-                release_session(t, owner, acquired_token);
-                return ECAT_TRANSFER_FAILED;
-            }
-
-            /* 校验并绑定底层驱动映射: 验证上下文与所有非空驱动回调一致性 */
-            const ecat_foe_target_driver_t *cdrv = t->core->cfg.targets[target_idx].driver;
-            const ecat_foe_target_driver_t *rdrv = &target->driver.io;
-
-            if (target->asynchronous) {
-                /* The firmware core owns the async driver and its context. */
-            } else if (cdrv == NULL) {
-                if (rdrv->write == NULL) {
-                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
-                    t->active = false;
-                    t->driver_initialized = false;
-                    release_session(t, owner, acquired_token);
-                    return ECAT_TRANSFER_FAILED;
-                }
-                t->core->cfg.targets[target_idx].driver = rdrv;
-                t->core->cfg.targets[target_idx].user_ctx = target->user_ctx;
-            } else {
-                if (target->user_ctx != t->core->cfg.targets[target_idx].user_ctx ||
-                    rdrv->write == NULL ||
-                    cdrv->write != rdrv->write ||
-                    cdrv->init != rdrv->init ||
-                    cdrv->invalidate != rdrv->invalidate ||
-                    cdrv->erase_to != rdrv->erase_to ||
-                    cdrv->read != rdrv->read ||
-                    cdrv->finalize != rdrv->finalize ||
-                    cdrv->abort != rdrv->abort ||
-                    cdrv->finalize_with_version_floor != rdrv->finalize_with_version_floor) {
-                    t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
-                    t->active = false;
-                    t->driver_initialized = false;
-                    release_session(t, owner, acquired_token);
-                    return ECAT_TRANSFER_FAILED;
-                }
-            }
-
-            /* 统一容量约束: 物理上限以 registry 与 core 中的更严格者为准，暂存原容量防止永久污染 */
-            uint32_t effective_cap = target->max_size;
-            if (t->core->cfg.targets[target_idx].max_payload_size > 0U &&
-                t->core->cfg.targets[target_idx].max_payload_size < effective_cap) {
-                effective_cap = t->core->cfg.targets[target_idx].max_payload_size;
-            }
-
-            t->saved_core_max_payload = t->core->cfg.targets[target_idx].max_payload_size;
-            t->saved_core_target_idx = target_idx;
-            t->core_cap_overridden = true;
-            t->core->cfg.targets[target_idx].max_payload_size = effective_cap;
 
             t->total_size = request->expected_size;
 
@@ -759,7 +673,7 @@ ecat_transfer_result_t ecat_transfer_write(
         }
 
         /* 固件容器物理上限有界推导: 统一调用 calc_firmware_container_limit，防止加法溢出与扩展头拒绝 */
-        uint32_t limit = calc_firmware_container_limit(t->target, t->core);
+        uint32_t limit = calc_firmware_container_limit(t->target);
         uint32_t fw_cap = (t->total_size > 0U) ? t->total_size : limit;
 
         /* 先用 size_t 与减法防环绕拒绝超界长度，保证 32 位与 64 位平台均绝不溢出 */

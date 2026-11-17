@@ -103,9 +103,6 @@ typedef struct {
     bool driver_initialized;            /* 驱动是否成功初始化 (用于保证 abort 契约) */
     bool driver_invalidated;            /* 驱动是否成功执行过使能失效 (用于保证擦写前失效契约) */
     bool core_started;                  /* 是否已向底层 core 发起请求 */
-    uint32_t saved_core_max_payload;    /* 会话期间暂存的 core 原始容量，防止永久污染配置 */
-    uint32_t saved_core_target_idx;     /* 暂存容量对应的目标索引 */
-    bool core_cap_overridden;           /* 是否暂存并临时重写了 core 容量限额 */
 
     /* 异步操作与固定暂存控制 */
     bool is_async;                          /* 当前会话是否由异步驱动执行 */
