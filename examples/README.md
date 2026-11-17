@@ -47,7 +47,10 @@ make test-sentinels
 或者手动编译运行：
 ```bash
 TMP_DIR=$(mktemp -d /tmp/foe_demo_build_XXXXXX)
-clang -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -o "$TMP_DIR/host_demo" examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c
+clang -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -o "$TMP_DIR/host_demo" \
+  examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c \
+  src/ecat_foe_core_async.c src/ecat_foe_target_async.c src/ecat_target_registry.c \
+  src/ecat_upgrade_session.c src/ecat_transfer.c src/adapters/ecat_foe_transport.c
 "$TMP_DIR/host_demo"
 rm -rf "$TMP_DIR"
 ```
