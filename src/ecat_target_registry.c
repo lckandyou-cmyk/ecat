@@ -25,7 +25,19 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
         return -1;
     }
 
-    if (desc->name[0] == '\0') {
+    if (desc->type != ECAT_TARGET_TYPE_FIRMWARE && desc->type != ECAT_TARGET_TYPE_DATA) {
+        return -1;
+    }
+
+    if ((desc->permissions & ~ECAT_PERM_RW) != 0U || (desc->permissions & ECAT_PERM_RW) == 0U) {
+        return -1;
+    }
+
+    if (desc->write_unit != 0U && (desc->max_size % desc->write_unit) != 0U) {
+        return -1;
+    }
+
+    if (desc->name[0] == '\0' || memchr(desc->name, '\0', ECAT_TARGET_NAME_MAX_LEN) == NULL) {
         return -2;
     }
 
@@ -33,46 +45,54 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
         return -3;
     }
 
-    /* 检查 target_id 是否已被注册 */
-    if (ecat_target_registry_find_by_id(reg, desc->target_id) != NULL) {
+    /* 检查 target_id 与 name 是否已被注册 (严格保持双键唯一) */
+    if (ecat_target_registry_find_by_id(reg, desc->target_id) != NULL ||
+        ecat_target_registry_find_by_name(reg, desc->name) != NULL) {
         return -4;
     }
 
-    if ((desc->permissions & ECAT_PERM_RW) == 0U) {
-        return -1;
-    }
-
-    /* 检查驱动基本有效性 */
-    if (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous &&
-        (desc->permissions & ECAT_PERM_READ) == 0U && desc->driver.async_ops == NULL) {
-        /* Firmware import uses the async firmware core, not the data driver. */
-    } else if (desc->asynchronous && desc->driver.async_ops != NULL) {
-        if (desc->driver.async_ops->start == NULL || desc->driver.async_ops->poll == NULL) {
+    /* 若显式提供异步数据驱动或异步固件驱动，所有核心回调 (含 abort) 必须完整 */
+    if (desc->driver.async_ops != NULL) {
+        if (desc->driver.async_ops->start == NULL ||
+            desc->driver.async_ops->poll == NULL ||
+            desc->driver.async_ops->abort == NULL) {
             return -5;
         }
-    } else {
-        if ((desc->permissions & ECAT_PERM_WRITE) != 0U) {
+    }
+    if (desc->driver.fw_async_ops != NULL) {
+        if (desc->driver.fw_async_ops->start == NULL ||
+            desc->driver.fw_async_ops->poll == NULL ||
+            desc->driver.fw_async_ops->abort == NULL ||
+            desc->driver.fw_async_ops->abort_session == NULL) {
+            return -5;
+        }
+    }
+
+    /* 检查读写权限对应的驱动基本有效性 */
+    if ((desc->permissions & ECAT_PERM_WRITE) != 0U) {
+        bool async_fw_write = (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous);
+        bool async_data_write = (desc->asynchronous && desc->driver.async_ops != NULL);
+        if (!async_fw_write && !async_data_write) {
             if (desc->driver.io.write == NULL || desc->driver.io.erase_to == NULL) {
                 return -5;
             }
         }
-        if ((desc->permissions & ECAT_PERM_READ) != 0U) {
-            if (desc->driver.io.read == NULL) {
-                return -6;
-            }
+    }
+    if ((desc->permissions & ECAT_PERM_READ) != 0U) {
+        bool async_read = (desc->asynchronous && desc->driver.async_ops != NULL);
+        if (!async_read && desc->driver.io.read == NULL) {
+            return -6;
         }
     }
 
     reg->targets[reg->target_count] = *desc;
-    /* 确保名称字符串以 NULL 结尾 */
-    reg->targets[reg->target_count].name[ECAT_TARGET_NAME_MAX_LEN - 1U] = '\0';
     reg->target_count++;
 
     return 0;
 }
 
-const ecat_target_desc_t *ecat_target_registry_find_by_id(
-    const ecat_target_registry_t *reg, uint16_t target_id)
+const ecat_target_desc_t *ecat_target_registry_find_slot_by_id(
+    const ecat_target_registry_t *reg, uint16_t target_id, size_t *out_slot)
 {
     if (reg == NULL || target_id == 0U) {
         return NULL;
@@ -80,11 +100,20 @@ const ecat_target_desc_t *ecat_target_registry_find_by_id(
 
     for (size_t i = 0; i < reg->target_count; i++) {
         if (reg->targets[i].target_id == target_id) {
+            if (out_slot != NULL) {
+                *out_slot = i;
+            }
             return &reg->targets[i];
         }
     }
 
     return NULL;
+}
+
+const ecat_target_desc_t *ecat_target_registry_find_by_id(
+    const ecat_target_registry_t *reg, uint16_t target_id)
+{
+    return ecat_target_registry_find_slot_by_id(reg, target_id, NULL);
 }
 
 const ecat_target_desc_t *ecat_target_registry_find_by_name(

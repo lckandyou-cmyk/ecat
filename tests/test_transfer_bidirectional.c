@@ -1974,7 +1974,7 @@ int main(void)
     ecat_target_desc_t async_full_desc;
     memset(&async_full_desc, 0, sizeof(async_full_desc));
     async_full_desc.target_id = 12U;
-    strncpy(async_full_desc.name, "async_full_lifecycle", sizeof(async_full_desc.name));
+    strncpy(async_full_desc.name, "async_lifecycle", sizeof(async_full_desc.name));
     async_full_desc.type = ECAT_TARGET_TYPE_DATA;
     async_full_desc.permissions = ECAT_PERM_RW;
     async_full_desc.max_size = 1024U;

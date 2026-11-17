@@ -40,6 +40,18 @@ static int mock_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
 }
 static int mock_finalize(void *ctx) { (void)ctx; return 0; }
 static void mock_abort(void *ctx) { (void)ctx; }
+static ecat_foe_target_async_result_t mock_fw_async_start(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+static ecat_foe_target_async_result_t mock_fw_async_poll(void *ctx, ecat_foe_target_async_op_t *op)
+{
+    (void)ctx; (void)op;
+    return ECAT_FOE_TARGET_ASYNC_COMPLETE;
+}
+static void mock_fw_async_abort(void *ctx) { (void)ctx; }
+static void mock_fw_async_abort_session(void *ctx) { (void)ctx; }
 
 int main(void)
 {
@@ -58,10 +70,26 @@ int main(void)
 
     desc.target_id = 1U;
     desc.max_size = 1024U * 1024U;
+    assert(ecat_target_registry_add(&reg, &desc) == -1); /* permissions == 0 */
+
+    desc.permissions = 0x80U; /* 未定义权限位必须拒绝 */
+    assert(ecat_target_registry_add(&reg, &desc) == -1);
+    desc.permissions = ECAT_PERM_WRITE;
     assert(ecat_target_registry_add(&reg, &desc) == -2); /* name empty */
 
+    /* 非 NUL 结尾的超长名称必须拒绝，不允许静默截断造成重名歧义 */
+    memset(desc.name, 'x', sizeof(desc.name));
+    assert(ecat_target_registry_add(&reg, &desc) == -2);
+
     strncpy(desc.name, "mcu_app", sizeof(desc.name));
-    desc.permissions = ECAT_PERM_WRITE;
+    desc.type = (ecat_target_type_t)99;
+    assert(ecat_target_registry_add(&reg, &desc) == -1); /* 非法枚举值必须拒绝 */
+    desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+
+    desc.write_unit = 7U; /* max_size 不能被 write_unit 整除 */
+    assert(ecat_target_registry_add(&reg, &desc) == -1);
+    desc.write_unit = 8U;
+
     assert(ecat_target_registry_add(&reg, &desc) == -5); /* missing write/erase callbacks */
 
     desc.driver.io.write = mock_write;
@@ -80,6 +108,11 @@ int main(void)
 
     /* 重复 target_id 注册被拦截 */
     assert(ecat_target_registry_add(&reg, &desc) == -4);
+
+    /* 不同 target_id 但重复 name 注册也必须被拦截 */
+    ecat_target_desc_t dup_name_desc = desc;
+    dup_name_desc.target_id = 99U;
+    assert(ecat_target_registry_add(&reg, &dup_name_desc) == -4);
 
     /* 注册第二个区块 (参数区: 读写 RW) */
     ecat_target_desc_t param_desc = desc;
@@ -102,10 +135,17 @@ int main(void)
     log_desc.driver.io.erase_to = NULL;
     assert(ecat_target_registry_add(&reg, &log_desc) == 0);
 
-    /* 2. 查找功能验证 */
-    const ecat_target_desc_t *found = ecat_target_registry_find_by_id(&reg, 1U);
-    assert(found != NULL && strcmp(found->name, "mcu_app") == 0);
-    assert(found->type == ECAT_TARGET_TYPE_FIRMWARE);
+    /* 2. 查找功能与槽位解析验证 */
+    size_t slot = 999U;
+    const ecat_target_desc_t *found = ecat_target_registry_find_slot_by_id(&reg, 1U, &slot);
+    assert(found != NULL && slot == 0U && strcmp(found->name, "mcu_app") == 0);
+    assert(found->type == ECAT_TARGET_TYPE_FIRMWARE && found->write_unit == 8U);
+
+    found = ecat_target_registry_find_slot_by_id(&reg, 3U, &slot);
+    assert(found != NULL && slot == 2U && strcmp(found->name, "sys_log") == 0);
+
+    assert(ecat_target_registry_find_slot_by_id(&reg, 0U, &slot) == NULL);
+    assert(ecat_target_registry_find_slot_by_id(&reg, 999U, &slot) == NULL);
 
     found = ecat_target_registry_find_by_name(&reg, "params");
     assert(found != NULL && found->target_id == 2U);
@@ -161,9 +201,17 @@ int main(void)
     /* 声明为异步目标，但未提供任何同步驱动且 async_ops 为 NULL 时必须拦截拒绝 (-5) */
     assert(ecat_target_registry_add(&reg, &async_desc) == -5);
 
-    /* async_ops 缺少 start 或 poll 必须拦截拒绝 (-5) */
+    /* async_ops 缺少 start/poll 或缺少 abort 必须拦截拒绝 (-5) */
     ecat_async_data_ops_t bad_ops = {0};
     async_desc.driver.async_ops = &bad_ops;
+    assert(ecat_target_registry_add(&reg, &async_desc) == -5);
+
+    ecat_async_data_ops_t missing_abort_ops = {
+        .start = mock_async_start,
+        .poll = mock_async_poll,
+        .abort = NULL
+    };
+    async_desc.driver.async_ops = &missing_abort_ops;
     assert(ecat_target_registry_add(&reg, &async_desc) == -5);
 
     /* 提供合法的真正异步驱动 ops */
@@ -179,6 +227,46 @@ int main(void)
     const ecat_target_desc_t *found_async = ecat_target_registry_find_by_id(&reg, 4U);
     assert(found_async != NULL && found_async->asynchronous == true);
     assert(found_async->driver.async_ops == &good_ops);
+
+    /* 6. 稀疏高编号异步固件目标 (42 / 65535) 与 fw_async_ops 完整性校验 */
+    ecat_target_desc_t fw_async_desc;
+    memset(&fw_async_desc, 0, sizeof(fw_async_desc));
+    fw_async_desc.target_id = 65535U;
+    strncpy(fw_async_desc.name, "ext_fw_max", sizeof(fw_async_desc.name));
+    fw_async_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+    fw_async_desc.permissions = ECAT_PERM_WRITE;
+    fw_async_desc.max_size = 64U * 1024U;
+    fw_async_desc.write_unit = 16U;
+    fw_async_desc.enabled = true;
+    fw_async_desc.asynchronous = true;
+    fw_async_desc.async_safe_session_abort = true;
+
+    ecat_foe_target_async_ops_t bad_fw_async_ops = {
+        .start = mock_fw_async_start,
+        .poll = mock_fw_async_poll,
+        .abort = mock_fw_async_abort,
+        .abort_session = NULL
+    };
+    fw_async_desc.driver.fw_async_ops = &bad_fw_async_ops;
+    assert(ecat_target_registry_add(&reg, &fw_async_desc) == -5);
+
+    static const ecat_foe_target_async_ops_t good_fw_async_ops = {
+        .start = mock_fw_async_start,
+        .poll = mock_fw_async_poll,
+        .abort = mock_fw_async_abort,
+        .abort_session = mock_fw_async_abort_session
+    };
+    int dummy_async_ctx = 42;
+    fw_async_desc.driver.fw_async_ops = &good_fw_async_ops;
+    fw_async_desc.driver.fw_async_user_ctx = &dummy_async_ctx;
+    assert(ecat_target_registry_add(&reg, &fw_async_desc) == 0);
+
+    size_t high_slot = 0U;
+    const ecat_target_desc_t *found_high = ecat_target_registry_find_slot_by_id(&reg, 65535U, &high_slot);
+    assert(found_high != NULL && high_slot == 4U);
+    assert(found_high->driver.fw_async_ops == &good_fw_async_ops);
+    assert(found_high->driver.fw_async_user_ctx == &dummy_async_ctx);
+    assert(found_high->async_safe_session_abort == true);
 
     printf(">>> 目标注册表与权限控制单元测试全部通过！<<<\n");
     return 0;

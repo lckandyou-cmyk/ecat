@@ -172,7 +172,7 @@
 #endif
 
 #define ECAT_TARGET_REGISTRY_ABI_JOIN_IMPL(b15, b14, b13, b12, b11, b10, b9, b8, b7, b6, b5, b4, b3, b2, b1, b0, a15, a14, a13, a12, a11, a10, a9, a8, a7, a6, a5, a4, a3, a2, a1, a0) \
-    ecat_target_registry_abi_b##b15##b14##b13##b12##b11##b10##b9##b8##b7##b6##b5##b4##b3##b2##b1##b0##_a##a15##a14##a13##a12##a11##a10##a9##a8##a7##a6##a5##a4##a3##a2##a1##a0
+    ecat_target_registry_abi_v2_b##b15##b14##b13##b12##b11##b10##b9##b8##b7##b6##b5##b4##b3##b2##b1##b0##_a##a15##a14##a13##a12##a11##a10##a9##a8##a7##a6##a5##a4##a3##a2##a1##a0
 
 #define ECAT_TARGET_REGISTRY_ABI_JOIN(b15, b14, b13, b12, b11, b10, b9, b8, b7, b6, b5, b4, b3, b2, b1, b0, a15, a14, a13, a12, a11, a10, a9, a8, a7, a6, a5, a4, a3, a2, a1, a0) \
     ECAT_TARGET_REGISTRY_ABI_JOIN_IMPL(b15, b14, b13, b12, b11, b10, b9, b8, b7, b6, b5, b4, b3, b2, b1, b0, a15, a14, a13, a12, a11, a10, a9, a8, a7, a6, a5, a4, a3, a2, a1, a0)

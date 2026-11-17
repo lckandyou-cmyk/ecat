@@ -51,6 +51,26 @@ with tempfile.TemporaryDirectory(prefix='ecat-reg-abi-') as tmp:
     assert mismatch_acl.returncode != 0, f"Mismatched ACL rules configuration must fail to link, got returncode 0. stderr: {mismatch_acl.stderr}"
     assert 'ecat_target_registry_abi_' in mismatch_acl.stderr, f"Linker error must cite ecat_target_registry_abi_, got: {mismatch_acl.stderr}"
 
+    # Stale v1 ABI object must fail to link against v2 registry layout
+    import shutil
+    old_abi_dir = tmp_path / 'old_abi_include'
+    shutil.copytree(root / 'include', old_abi_dir)
+    abi_src = (old_abi_dir / 'ecat_target_registry_abi.h').read_text(encoding='utf-8')
+    assert 'ecat_target_registry_abi_v2_b' in abi_src
+    (old_abi_dir / 'ecat_target_registry_abi.h').write_text(
+        abi_src.replace('ecat_target_registry_abi_v2_b', 'ecat_target_registry_abi_b'),
+        encoding='utf-8',
+    )
+    stale_caller_obj = tmp_path / 'caller_stale_v1.o'
+    subprocess.run([cc, '-std=c99', '-I' + str(old_abi_dir),
+                    '-c', str(caller),
+                    '-o', str(stale_caller_obj)], check=True)
+    stale_link = subprocess.run([cc, str(stale_caller_obj), str(reg_obj),
+                                 '-o', str(tmp_path / 'stale_v1')],
+                                capture_output=True, text=True)
+    assert stale_link.returncode != 0, f"Stale v1 registry ABI object must fail to link, got returncode 0"
+    assert 'ecat_target_registry_abi_' in stale_link.stderr, f"Linker error must cite ecat_target_registry_abi_, got: {stale_link.stderr}"
+
     # Optimization and linker dead-stripping scenarios (-O2 and link-time stripping)
     import sys
     compile_strip = ['-ffunction-sections', '-fdata-sections'] if sys.platform != 'darwin' else []

@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "ecat_foe_target.h"
+#include "ecat_foe_target_async.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -143,20 +144,32 @@ typedef struct {
     void (*read_close)(void *user_ctx);
 
     /**
-     * @brief 可选真正非阻塞异步数据驱动接口 (针对 DATA 类型的异步操作)
+     * @brief 可选真正非阻塞异步数据驱动接口 (针对 DATA 操作或异步 FIRMWARE 导出)
      */
     const ecat_async_data_ops_t *async_ops;
+
+    /**
+     * @brief 可选非阻塞异步固件升级驱动接口 (针对异步 FIRMWARE 导入升级)
+     */
+    const ecat_foe_target_async_ops_t *fw_async_ops;
+
+    /**
+     * @brief 异步固件升级驱动专用上下文指针；若为 NULL 则回退使用外层 user_ctx
+     */
+    void *fw_async_user_ctx;
 } ecat_target_driver_t;
 
 /* 单个目标区块描述符 */
 typedef struct {
-    uint16_t target_id;                             /* 目标唯一标识符 (非 0) */
-    char name[ECAT_TARGET_NAME_MAX_LEN];            /* 字符标识 (如 "mcu", "fpga", "param", "log") */
+    uint16_t target_id;                             /* 目标唯一标识符 (1..65535，0 非法) */
+    char name[ECAT_TARGET_NAME_MAX_LEN];            /* 唯一字符标识 (必须非空且含 '\0' 结尾) */
     ecat_target_type_t type;                        /* 区块类型 (固件 / 数据) */
-    uint32_t max_size;                              /* 本地物理容量上限 (字节，硬编码边界) */
+    uint32_t max_size;                              /* 本地物理容量上限 (字节，必须 > 0) */
+    uint32_t write_unit;                            /* 固件物理写入对齐粒度 (字节，FIRMWARE 可写目标必填) */
     uint8_t permissions;                            /* 目标自身允许的权限位 (ECAT_PERM_READ/WRITE) */
     bool enabled;                                   /* 是否启用 */
     bool asynchronous;                              /* 是否为异步处理目标 */
+    bool async_safe_session_abort;                  /* 异步固件驱动声明 start(INIT) 立即失败时可无破坏调用 abort_session */
     ecat_target_driver_t driver;                    /* 驱动函数指针集合 */
     void *user_ctx;                                 /* 驱动用户上下文指针 */
 } ecat_target_desc_t;
@@ -196,6 +209,16 @@ int ecat_target_registry_init(ecat_target_registry_t *reg);
  * @return 0 成功，负数表示失败 (如 ID 重复、参数非法或容量已满)
  */
 int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc_t *desc);
+
+/**
+ * @brief 按 target_id 查找目标描述符并返回其注册槽位下标
+ * @param reg 注册表指针
+ * @param target_id 目标 ID (1..65535)
+ * @param out_slot 可选输出槽位下标指针 (0 .. target_count - 1)，可为 NULL
+ * @return 指向已注册描述符的只读指针，未找到返回 NULL
+ */
+const ecat_target_desc_t *ecat_target_registry_find_slot_by_id(
+    const ecat_target_registry_t *reg, uint16_t target_id, size_t *out_slot);
 
 /**
  * @brief 按 target_id 查找目标描述符
