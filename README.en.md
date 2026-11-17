@@ -15,7 +15,7 @@
   <a href="#reporting-issues">Report an issue</a>
 </p>
 
-> **Under development.** The core and SOES integration example pass host tests. Integration with a physical MCU board, protocol stack, and EtherCAT master has not been completed. This README distinguishes host-test evidence from work that still requires hardware validation.
+> **Project status.** The unified transfer manager, single target registry (`1..65535`), synchronous/asynchronous bidirectional streaming, `.efw` validation and Ed25519ph verification, pinned upstream SOES baseline, and SSC sync/async contract stubs pass the full host test suite. Target 32-bit MCU Flash power-loss recovery, commercial Beckhoff SSC source integration, and physical EtherCAT master testing still require board-level validation. This README strictly distinguishes host-verified scope from hardware validation work.
 
 ECAT provides a unified transfer manager, target registry and access control, bidirectional data transfer, and `.efw` firmware upgrades. FoE is the default built-in transport; integrators can disable built-in transports and add their own. Integrators provide the protocol stack, board-level storage drivers, and local partition configuration.
 
@@ -54,7 +54,7 @@ Run `ecat-efw` with Python 3 from the repository root:
 ./ecat-efw --version
 ```
 
-`pack` wraps an existing `.bin` in an `.efw` package; it does not compile firmware. `inspect` prints detailed validation results, while `info` concisely shows the embedded firmware version, project and hardware IDs, target, payload size, and CRC results. Both identify packages by content, regardless of filename extension. The EFW format does not record a package build date; `--version` shows the CLI version and build date. Package validation does not establish device compatibility or bootability. Existing output files are not overwritten by default. Run `./ecat-efw --help` for all commands and options. CLI messages are currently in Chinese.
+`pack` wraps an existing `.bin` in an `.efw` package; it does not compile firmware. `-t` accepts `1..4` (`MCU`/`FPGA`/`SII`/`EEPROM`) and `5..65535` (canonical uppercase hex `T0005`–`TFFFF` or positive integer ID). `inspect` prints detailed validation results, while `info` concisely shows the embedded firmware version, project and hardware IDs, target, signature status, Key ID, payload size, and CRC results. Both identify packages by content, regardless of filename extension. The EFW format does not record a package build date; `--version` shows the CLI version and build date. Package validation does not establish device compatibility or bootability. Existing output files are not overwritten by default. Run `./ecat-efw --help` for all commands and options. CLI messages are currently in Chinese.
 
 ### Optional firmware signatures
 
@@ -89,6 +89,16 @@ The executable is unsigned and does not support `--overwrite`; specify an output
 
 Start with the [SOES bootloader example](examples/bootloader_soes/README.md) for interfaces, configuration, and integration steps. Its driver is an interface example, not a production-ready board implementation.
 
+To customize static buffer or registry capacities, copy `include/ecat_foe_conf_template.h` to `ecat_foe_conf.h` in your project's include path and pass the same configuration header to the core and every translation unit including public headers:
+
+```sh
+cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c src/ecat_foe_core.c
+```
+
+`ECAT_FOE_HEADER_BUF_MAX`, `ECAT_FOE_MAX_WRITE_UNIT`, `ECAT_TARGET_REGISTRY_MAX_BLOCKS`, and `ECAT_TARGET_REGISTRY_MAX_ACL_RULES` accept preprocessor integer constant expressions; every translation unit must evaluate to the exact same values. Mismatched values or stale object files fail at link time with undefined `ecat_foe_config_abi_v3_...` or `ecat_target_registry_abi_v2_...` symbols (requires compiler support for `used` and `retain` attributes).
+
+This release consolidates all firmware and data targets onto a single `ecat_target_registry_t` and bumps the core and registry ABI guards (`v3` / `v2`). Rebuild all application and library object files together when upgrading.
+
 ## Optional upgrade transports
 
 `ecat_transfer_t` manages sessions, import, export and asynchronous polling. FoE is enabled by default; SOES/SSC must bind to the manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; firmware imports share EFW validation, signature verification and storage drivers.
@@ -99,20 +109,21 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgra
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
-The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified architecture](docs/architecture/transport-independent-upgrade.md), [file stream integration](examples/file_stream/README.md), [multichannel guide](docs/multichannel-bidirectional-framework.md), and [custom firmware targets](docs/architecture/custom-firmware-targets.md) for synchronous and asynchronous import/export and custom endpoints. Both firmware and data targets are configured in a single `ecat_target_registry_t` supporting nonzero target IDs `1–65535` (`MCU`/`FPGA`/`SII`/`EEPROM` for `1–4` and `T0005`–`TFFFF` for `5–65535`), bounded statically by `ECAT_TARGET_REGISTRY_MAX_BLOCKS`. ACL enforcement and signature verification require explicit local configuration.
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified transfer architecture](docs/architecture/unified-transfer-architecture.md), [file stream integration](examples/file_stream/README.md), [multichannel guide](docs/multichannel-bidirectional-framework.md), and [custom firmware targets](docs/architecture/custom-firmware-targets.md) for synchronous and asynchronous import/export and custom endpoints. Both firmware and data targets are configured in a single `ecat_target_registry_t` supporting nonzero target IDs `1..65535` (`MCU`/`FPGA`/`SII`/`EEPROM` for `1..4` and `T0005`–`TFFFF` for `5..65535`), bounded statically by `ECAT_TARGET_REGISTRY_MAX_BLOCKS`. ACL enforcement and signature verification require explicit local configuration.
 
-The old upgrade manager, compatibility entry points, and duplicate four-slot core target array have been removed, with registry ABI bumped to v2 and core ABI bumped to v3. Existing integrations must migrate to `ecat_transfer_t` + `ecat_target_registry_t` and rebuild all translation units.
+The old upgrade manager, compatibility entry points, and duplicate four-slot core target array have been removed. Existing integrations must migrate to `ecat_transfer_t` + `ecat_target_registry_t` and rebuild all translation units; internal core session events are no longer application transport entry points.
 
 ## Verification status
 
-| Area | Verified | Not yet verified |
+| Area | Verified (host automation) | Not yet verified (target hardware) |
 | --- | --- | --- |
-| Upgrade core and `.efw` | Host unit tests with a simulated storage driver | Timing, Flash behavior, and power-loss recovery on a target MCU |
-| SOES integration | Host tests using pinned upstream source files and hardware-port stubs | Full stack deployment and physical board/master integration |
-| Beckhoff SSC | Synchronous adapter Mock contract tests; async gate tests | Real SSC integration and the complete asynchronous upgrade path |
-| Windows CLI | Windows x64 workflow build and packaged CLI tests | Executable signing and coverage across target environments |
+| Unified transfer and single target registry | Sync/async bidirectional import & export, sparse IDs `1..65535`, ACL rules, exclusive session leases, and ABI link guards | Target 32-bit MCU peripheral ISR/DMA drivers and cross-instance storage exclusion |
+| Upgrade core, `.efw`, and signatures | Sync/async full-lifecycle simulated storage tests; real Monocypher 4.0.3 Ed25519ph interoperability tests | Target MCU Flash erase/write timing, secure boot, anti-rollback power-fail transactions, and power-loss recovery |
+| SOES integration | Host integration tests using pinned four-file upstream source baseline and hardware-port stubs | Full stack board deployment, physical ESC controller, and EtherCAT master field testing |
+| Beckhoff SSC integration | Sync adapter, single-flight BUSY/retry gate, and end-to-end async firmware upgrade host contract tests | Commercial Beckhoff SSC source integration and TwinCAT master timing validation |
+| `ecat-efw` CLI | macOS/Linux Python regression suite and standalone Windows x64 executable tests | Executable code signing and broader target host environment coverage |
 
-Passing host tests does not establish hardware or full protocol-stack validation. See the [SOES integration analysis](docs/architecture/soes-integration-options.md) for the test baseline, source hashes, and limitations.
+Passing host tests does not establish hardware or commercial protocol-stack validation. See the [SOES integration analysis](docs/architecture/soes-integration-options.md) for the test baseline, source hashes, and limitations.
 
 ## Security boundaries
 
@@ -127,11 +138,12 @@ Passing host tests does not establish hardware or full protocol-stack validation
 
 - [ECAT Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/lckandyou-cmyk/ecat/wiki)
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
-- [Historical EFW v1 specification](docs/spec/efw-format-v0.1.md)
+- [Multichannel bidirectional transfer and target registry guide](docs/multichannel-bidirectional-framework.md)
 - [Unified transfer architecture](docs/architecture/unified-transfer-architecture.md)
 - [Custom firmware targets](docs/architecture/custom-firmware-targets.md)
+- [Optional Monocypher device-side signature verifier](examples/crypto/README.md)
 - [SOES integration analysis](docs/architecture/soes-integration-options.md)
-- [SSC asynchronous stage note](docs/architecture/ssc-async-stage1.md)
+- Historical & stage notes: [EFW v1 specification](docs/spec/efw-format-v0.1.md) · [Transport-independent migration note](docs/architecture/transport-independent-upgrade.md) · [SSC asynchronous stage 1 note](docs/architecture/ssc-async-stage1.md)
 
 Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md) or [feature request template](.github/ISSUE_TEMPLATE/feature_request.md). Include the repository revision, MCU/board, stack version, master, compiler, and reproduction steps. Do not publish passwords, keys, credentials, or proprietary firmware.
 

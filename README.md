@@ -15,7 +15,7 @@
   <a href="#反馈问题">反馈问题</a>
 </p>
 
-> **研发阶段。** 核心和 SOES 接入示例已通过宿主测试；尚未在真实 MCU 板卡、协议栈和 EtherCAT 主站上完成联调。本文档区分已验证内容与待实机验证内容。
+> **项目状态。** 统一传输管理、单一目标注册表（`1..65535`）、同步/异步双向流、`.efw` 校验与 Ed25519ph 验签、固定上游 SOES 基线及 SSC 同步/异步契约桩均已通过宿主机全量测试；目标 32 位 MCU Flash 掉电恢复、商业 Beckhoff SSC 官方源码栈与 EtherCAT 主站现场联调仍须在产品硬件上实测确认。本文档严格区分宿主已验证范围与待实机验证范围。
 
 ECAT 提供统一的传输管理器、目标注册与访问控制、双向数据传输，以及基于 `.efw` 的固件升级能力。FoE 是默认内置入口；集成者也可以关闭内置入口并接入自己的通信方式。设备协议栈、板级存储驱动与本地分区配置由集成者提供。
 
@@ -54,7 +54,7 @@ flowchart TD
 ./ecat-efw --version
 ```
 
-`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`inspect` 输出详细校验信息，`info` 简洁显示包内版本、项目/硬件 ID、升级目标、签名状态、Key ID、固件大小和 CRC 结果。带 `--public-key` 时还会验证签名；否则只报告签名存在但未验证。命令按文件内容识别，不依赖扩展名。EFW 格式未记录打包日期；`--version` 显示 CLI 版本和构建日期。包校验不等同于目标设备兼容性或可启动性验证。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部命令和参数。
+`pack` 将已有 `.bin` 封装为 `.efw`，不会编译固件；`-t` 支持 `1..4`（`MCU`/`FPGA`/`SII`/`EEPROM`）与 `5..65535`（唯一大写四位十六进制 `T0005`～`TFFFF` 或对应正整数）。`inspect` 输出详细校验信息，`info` 简洁显示包内版本、项目/硬件 ID、升级目标、签名状态、Key ID、固件大小和 CRC 结果。带 `--public-key` 时还会验证签名；否则只报告签名存在但未验证。命令按文件内容识别，不依赖扩展名。EFW 格式未记录打包日期；`--version` 显示 CLI 版本和构建日期。包校验不等同于目标设备兼容性或可启动性验证。默认拒绝覆盖已有输出。运行 `./ecat-efw --help` 查看全部命令和参数。
 
 ### 可选签名
 
@@ -109,20 +109,21 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgra
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
 ```
 
-默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一架构](docs/architecture/transport-independent-upgrade.md)和[文件流接入](examples/file_stream/README.md)。目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)与[可注册固件目标设计](docs/architecture/custom-firmware-targets.md)。固件与数据目标统一由 `ecat_target_registry_t` 管理，支持 `1～65535` 非零目标 ID（`1～4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5～65535` 规范名为 `T0005`～`TFFFF`），注册槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制；ACL 和签名验证须按设备配置启用。
+默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一传输架构](docs/architecture/unified-transfer-architecture.md)和[文件流接入](examples/file_stream/README.md)。目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)与[可注册固件目标设计](docs/architecture/custom-firmware-targets.md)。固件与数据目标统一由 `ecat_target_registry_t` 管理，支持 `1..65535` 非零目标 ID（`1..4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 规范名为 `T0005`～`TFFFF`），注册槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制；ACL 和签名验证须按设备配置启用。
 
-此次架构调整移除了旧升级管理器及其兼容入口，使用旧接口的工程需要迁移到 `ecat_transfer_t` 并重新编译。固件核心的内部事件不再作为应用传输入口。
+此次架构收敛已移除旧升级管理器、兼容入口与双套四元目标数组，使用旧接口的工程须迁移至 `ecat_transfer_t` + `ecat_target_registry_t` 并全量重新编译。固件核心的内部事件不再作为应用传输入口。
 
 ## 验证状态
 
-| 范围 | 已验证 | 尚未验证 |
+| 范围 | 已验证（宿主机自动化） | 尚未验证（待目标实机） |
 | --- | --- | --- |
-| 升级核心与 `.efw` | 宿主单元测试；存储使用模拟驱动 | 目标 MCU 上的时序、Flash 行为与断电恢复 |
-| SOES 接入 | 固定上游源码文件与硬件端口桩的宿主测试 | 完整协议栈部署、真实板卡与主站联调 |
-| Beckhoff SSC | 同步适配器 Mock 契约测试；异步门控测试 | 真实 SSC 集成及完整异步升级路径 |
-| Windows CLI | Windows x64 工作流构建与打包 CLI 测试 | 可执行文件签名与目标环境覆盖 |
+| 统一传输与单一目标注册表 | 同步/异步双向导入导出、`1..65535` 稀疏目标、ACL 权限、独占会话租约与 ABI 防混链测试 | 目标 32 位 MCU 外设中断/DMA 驱动与跨实例物理存储互斥 |
+| 固件升级核心、`.efw` 与验签 | 同步/异步全路径模拟存储驱动测试；Monocypher 4.0.3 Ed25519ph 真实签名互操作测试 | 目标 MCU Flash 擦写时序、安全启动、防回滚掉电事务与断电恢复 |
+| SOES 接入 | 固定上游四文件源码基线与宿主硬件端口桩集成测试 | 完整协议栈部署、真实 ESC 从站芯片与主站现场联调 |
+| Beckhoff SSC 接入 | 同步适配器、单包 BUSY/重试门控及异步固件升级全链路宿主契约桩测试 | 商业 Beckhoff SSC 官方源码接入与 TwinCAT 实机时序联调 |
+| `ecat-efw` CLI 工具 | macOS/Linux Python 全套回归及 Windows x64 独立可执行包测试 | 可执行文件代码签名与更多目标主机环境覆盖 |
 
-宿主测试通过不等于硬件或完整协议栈验证。SOES 测试基线、文件哈希和限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)。
+宿主测试通过不等于硬件或商业协议栈实机验证。SOES 测试基线、文件哈希和限制见 [SOES 接入分析](docs/architecture/soes-integration-options.md)。
 
 ## 安全边界
 
@@ -136,13 +137,13 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-onl
 ## 规范与反馈
 
 - [ECAT Wiki：快速开始、架构、移植与故障排查](https://github.com/lckandyou-cmyk/ecat/wiki)
-- [EFW 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
-- [旧 EFW v1 格式说明（历史）](docs/spec/efw-format-v0.1.md)
-- [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)
+- [EFW v2 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
+- [多通道双向传输与目标区块指南](docs/multichannel-bidirectional-framework.md)
 - [统一传输架构说明](docs/architecture/unified-transfer-architecture.md)
 - [可注册固件目标设计](docs/architecture/custom-firmware-targets.md)
+- [可选 Monocypher 设备端验签适配器](examples/crypto/README.md)
 - [SOES 接入分析](docs/architecture/soes-integration-options.md)
-- [SSC 异步阶段说明](docs/architecture/ssc-async-stage1.md)
+- 历史与阶段记录：[旧 EFW v1 格式说明](docs/spec/efw-format-v0.1.md) · [传输解耦迁移记录](docs/architecture/transport-independent-upgrade.md) · [SSC 异步第一阶段说明](docs/architecture/ssc-async-stage1.md)
 
 请通过 [Bug 报告模板](.github/ISSUE_TEMPLATE/bug_report.md)或[功能需求模板](.github/ISSUE_TEMPLATE/feature_request.md)提交反馈，并注明仓库版本、MCU/板卡、协议栈版本、主站、编译器和复现步骤。请勿公开密码、密钥、凭据或专有固件。
 
