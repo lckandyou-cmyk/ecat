@@ -114,7 +114,7 @@ typedef struct {
     uint32_t                pending_data_packet; /**< 本轮 DATA 包号 */
     bool                    has_staged_wrq;     /**< 是否存在已通过只读预检但尚未确认接受的 WRQ */
     char                    staged_filename[FOE_FN_MAX + 1]; /**< 暂存的 WRQ 文件名 */
-    char                    synced_filenames[ECAT_FOE_SOES_MAX_FILES][FOE_FN_MAX + 1]; /**< 实例私有文件名同步缓冲 */
+    char                    synced_filenames[ECAT_FOE_SOES_MAX_FILES][FOE_FN_MAX + 1]; /**< 实例私有文件名同步缓冲 (adapter 生命周期须覆盖其绑定的 foe_cfg->files[] 使用期) */
     uint16_t                staged_target_id;   /**< 暂存的目标 ID */
     uint32_t                original_n_files;   /**< 从站初始配置的真实文件条目数 */
     ecat_foe_soes_file_map_t file_map[ECAT_FOE_SOES_MAX_FILES]; /**< 显式目标 ID 到 files[] 索引映射表 */

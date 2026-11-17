@@ -1407,11 +1407,9 @@ static void test_real_soes_pre_hook_validation_suite(void)
         assert(core.req_target_id == 1);
         mock_master_read_outbox();
         printf("  [PASS] 维度 2B (密码时序): 动态同步后正确密码顺利通过原生校验并回复 ACK(0)，核心新会话正式激活\n");
-    }
 
-    /* 3. 维度 3: 静态名称缓冲区稳定性 (Name Buffer Stability) */
-    {
-        /* 验证后续 DATA 报文覆写 MBX[0] 缓冲区后，files[0].name 指向的字符串未被破坏 */
+        /* 3. 维度 3: 实例私有名称缓冲区稳定性 (Name Buffer Stability)
+         * 验证后续 DATA 报文覆写 MBX[0] 缓冲区后，adapter 生命周期内 files[0].name 指向的字符串完好无损 */
         assert(s_foe_files[0].name != NULL);
         assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
 
@@ -1420,7 +1418,7 @@ static void test_real_soes_pre_hook_validation_suite(void)
 
         /* 验证 files[0].name 依然完好无损 */
         assert(strcmp(s_foe_files[0].name, "SERVO_DRV_MCU_V1.0.0.0.efw") == 0);
-        printf("  [PASS] 维度 3 (名称缓冲): 静态名称缓冲生命周期稳定，MBX 覆写后文件名完好无损\n");
+        printf("  [PASS] 维度 3 (名称缓冲): 实例名称缓冲生命周期稳定，MBX 覆写后文件名完好无损\n");
     }
 
     /* 4. 维度 4: 拒绝响应 (Rejection Responses) */
