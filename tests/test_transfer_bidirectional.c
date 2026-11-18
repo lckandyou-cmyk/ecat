@@ -1012,6 +1012,10 @@ int main(void)
     exp_req.target_id = 14U;
     assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(manager.driver_initialized == false);
+    uint8_t lifecycle_export_buf[1024];
+    size_t lifecycle_export_read = 0U;
+    assert(ecat_transfer_read(&manager, &channel_uart, exp_token, lifecycle_export_buf,
+                              sizeof(lifecycle_export_buf), &lifecycle_export_read) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(g_valid_state == 1);
     assert(g_driver_locked == 0);
@@ -1068,6 +1072,8 @@ int main(void)
     assert(g_read_open_called == true);
     assert(g_init_called == false); /* 导出流程绝不调用写生命周期的 io.init */
     assert(g_driver_locked == 1);
+    assert(ecat_transfer_read(&manager, &channel_uart, exp_token, lifecycle_export_buf,
+                              sizeof(lifecycle_export_buf), &lifecycle_export_read) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
     assert(g_read_close_called == true);
     assert(g_driver_locked == 0);
@@ -1100,7 +1106,7 @@ int main(void)
     g_fail_read = false;
     uint64_t next_token = 0;
     assert(ecat_transfer_begin(&manager, &channel_can, &exp_req, &next_token) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_transfer_finish(&manager, &channel_can, next_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&manager, &channel_can, next_token) == ECAT_TRANSFER_COMPLETE);
 
     /* 2.4 初始化失败不污染驱动状态与会话 */
     reset_mock_flags();
@@ -1109,7 +1115,7 @@ int main(void)
     assert(g_driver_locked == 0);
     g_fail_init = false;
     assert(ecat_transfer_begin(&manager, &channel_uart, &exp_req, &exp_token) == ECAT_TRANSFER_COMPLETE);
-    assert(ecat_transfer_finish(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transfer_cancel(&manager, &channel_uart, exp_token) == ECAT_TRANSFER_COMPLETE);
 
     /* 验证 Issue 3: 严格校验固件注册表容量与持续写入约束 */
     printf("--- 测试 Issue 3: 固件容量约束与注册表/核心对齐 ---\n");
@@ -2165,6 +2171,11 @@ int main(void)
     assert(async_xfer.driver_initialized == true);
 
     /* 10.5.8b: 异步 READ_CLOSE 立即完成，验证异步 read_close 被调用，同步 read_close 绝不被调用 */
+    uint8_t async_export_buf[64];
+    size_t async_export_read = 0U;
+    s_hw_stage_test.override_read_actual = -1;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_12_exp, async_export_buf,
+                              sizeof(async_export_buf), &async_export_read) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12_exp) == ECAT_TRANSFER_COMPLETE);
     assert(s_hw_stage_test.read_close_called == true);
     assert(g_read_close_called == false); /* 关键断言: 同步回调绝不被触发 */
@@ -2185,6 +2196,9 @@ int main(void)
 
     /* 10.5.8d: 异步 READ_CLOSE 返回 PENDING，通过 poll 推进至 COMPLETE */
     s_hw_stage_test.pending_read_close = true;
+    s_hw_stage_test.override_read_actual = -1;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_12_exp, async_export_buf,
+                              sizeof(async_export_buf), &async_export_read) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12_exp) == ECAT_TRANSFER_PENDING);
     assert(s_hw_stage_test.read_close_called == true);
     assert(ecat_transfer_is_pending(&async_xfer) == true);
@@ -2217,6 +2231,9 @@ int main(void)
     memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
     assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12_exp, &tok_12_exp) == ECAT_TRANSFER_COMPLETE);
     s_hw_stage_test.pending_read_close = true;
+    s_hw_stage_test.override_read_actual = -1;
+    assert(ecat_transfer_read(&async_xfer, &client_owner1, tok_12_exp, async_export_buf,
+                              sizeof(async_export_buf), &async_export_read) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&async_xfer, &client_owner1, tok_12_exp) == ECAT_TRANSFER_PENDING);
     s_hw_stage_test.fail_read_close = true;
     assert(ecat_transfer_poll(&async_xfer, &client_owner1, tok_12_exp) == ECAT_TRANSFER_FAILED);
@@ -2718,6 +2735,11 @@ int main(void)
         uint64_t tok89 = 0U;
         assert(ecat_transfer_begin(&test_mgr, &client_owner1, &exp_req, &tok89) == ECAT_TRANSFER_COMPLETE);
         assert(test_mgr.active == true);
+
+        uint8_t export_buf[64];
+        size_t bytes_read = 0U;
+        assert(ecat_transfer_read(&test_mgr, &client_owner1, tok89, export_buf,
+                                  sizeof(export_buf), &bytes_read) == ECAT_TRANSFER_COMPLETE);
 
         /* 触发 finish，由于 fail_read_close == true，立即失败 */
         ecat_transfer_result_t fres = ecat_transfer_finish(&test_mgr, &client_owner1, tok89);

@@ -931,6 +931,10 @@ ecat_transfer_result_t ecat_transfer_finish(
         return ECAT_TRANSFER_BUSY;
     }
 
+    if (t->direction == ECAT_TRANSFER_DIR_EXPORT && t->current_offset < t->total_size) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
     if (t->is_async) {
         if (t->direction == ECAT_TRANSFER_DIR_EXPORT) {
             /* EXPORT 模式: 无论 DATA 还是 FIRMWARE 目标，导出均为只读，统一异步安全关闭 */

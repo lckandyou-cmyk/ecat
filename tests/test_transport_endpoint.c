@@ -194,6 +194,15 @@ int main(void)
     uint32_t opened_size = 0;
     assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, &opened_size) == ECAT_TRANSFER_COMPLETE);
     assert(opened_size == TEST_FLASH_SIZE);
+    uint8_t sync_export_buf[TEST_FLASH_SIZE];
+    size_t sync_read = 0U;
+    uint64_t sync_export_token = ep_uart.current_token;
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, sync_export_buf, 1U, &sync_read) == ECAT_TRANSFER_CONTINUE);
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ep_uart.current_token == sync_export_token);
+    assert(s_read_opened && !s_cb_completed && s_cb_aborted_count == 0);
+    assert(ecat_transport_endpoint_read_chunk(&ep_uart, sync_export_buf, sizeof(sync_export_buf), &sync_read)
+           == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     s_size_requires_open = false;
 
@@ -519,6 +528,16 @@ int main(void)
     assert(ecat_transport_endpoint_poll(&ep_uart) == ECAT_TRANSFER_INVALID);
     assert(ecat_transport_endpoint_is_active(&ep_uart) == true);
     assert(s_cb_aborted_count == 0);
+
+    uint64_t async_export_token = ep_uart.current_token;
+    assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_INVALID);
+    assert(ep_uart.current_token == async_export_token);
+    assert(s_read_opened && !s_cb_completed && s_cb_aborted_count == 0);
+    ecat_transfer_result_t read_result;
+    do {
+        read_result = ecat_transport_endpoint_read_chunk(&ep_uart, exp_buf, sizeof(exp_buf), &actual_exp);
+    } while (read_result == ECAT_TRANSFER_CONTINUE);
+    assert(read_result == ECAT_TRANSFER_COMPLETE);
 
     assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_COMPLETE);
     assert(!ecat_transport_endpoint_is_active(&ep_uart));

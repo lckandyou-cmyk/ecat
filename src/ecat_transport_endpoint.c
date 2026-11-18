@@ -356,7 +356,7 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_export(
         return res;
     }
 
-    if (res == ECAT_TRANSFER_BUSY) {
+    if (res == ECAT_TRANSFER_BUSY || res == ECAT_TRANSFER_INVALID) {
         /* 保留原导出终结状态与令牌 */
         return res;
     }

@@ -248,7 +248,8 @@ ecat_transfer_result_t ecat_transfer_write(
  * 【异步提交与生命周期契约】：
  * - 若底层异步驱动 finalize/closing 耗时，返回 ECAT_TRANSFER_PENDING，需调用 poll 推进提交；
  * - 真正完成时返回 ECAT_TRANSFER_COMPLETE 并彻底释放独占会话租约；
- * - 若当前仍有分块 I/O 处于 PENDING，返回 ECAT_TRANSFER_BUSY。
+ * - 若当前仍有分块 I/O 处于 PENDING，返回 ECAT_TRANSFER_BUSY；
+ * - 导出仍有未读数据时返回 ECAT_TRANSFER_INVALID，保留会话供继续读取或取消。
  *
  * @param t 管理器上下文指针
  * @param owner 调用方唯一标识

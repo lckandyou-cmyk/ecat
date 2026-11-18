@@ -190,19 +190,24 @@ int ecat_foe_soes_on_wrq(ecat_foe_soes_adapter_t *adapter, const char *filename,
     if (adapter == NULL || adapter->core == NULL || filename == NULL || !soes_has_transport(adapter)) {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
-    s_active_adapter = adapter;
     uint16_t tid = 0;
     uint32_t ver = 0;
     int vrc = ecat_foe_core_validate_wrq(adapter->core, filename, filename_len, &tid, &ver);
     if (vrc != 0) {
-        ecat_foe_transport_abort(&adapter->transport);
+        soes_abort_core(adapter);
         return vrc;
     }
     if (soes_target_is_async(adapter, tid)) {
-        ecat_foe_transport_abort(&adapter->transport);
+        soes_abort_core(adapter);
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
-    return ecat_foe_transport_begin(&adapter->transport, filename, filename_len);
+    int result = ecat_foe_transport_begin(&adapter->transport, filename, filename_len);
+    if (result == 0) {
+        s_active_adapter = adapter;
+    } else if (s_active_adapter == adapter && !ecat_foe_transport_owns(&adapter->transport)) {
+        s_active_adapter = NULL;
+    }
+    return result;
 }
 
 uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t length)

@@ -643,7 +643,7 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     TEST_ASSERT(ecat_foe_transport_begin(&foe, "bad", 3) != 0, "own bad WRQ closes old session");
     TEST_ASSERT_EQ_INT(mcu.count_abort, 1, "old FoE session cleaned");
     ecat_foe_soes_adapter_t adapter;
-    ecat_foe_soes_init(&adapter, &core, 512U);
+    ecat_foe_soes_init(&adapter, &core, ECAT_FOE_EFW_HEADER_MIN_LEN);
     TEST_ASSERT_EQ_INT(ecat_foe_soes_bind_transfer(&adapter, &transfer), 0, "SOES binds shared manager");
     TEST_ASSERT_EQ_INT(ecat_transfer_begin(&transfer, &other, &request, &other_token), ECAT_TRANSFER_COMPLETE, "other owns before SOES");
     TEST_ASSERT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)) != 0, "SOES WRQ rejected while other owns");
@@ -653,7 +653,18 @@ static void test_foe_transport_shares_upgrade_ownership(void)
     TEST_ASSERT(ecat_upgrade_session_owns_mgr(&transfer.session, &transfer, &other, other_token), "SOES state hook preserves other owner");
     TEST_ASSERT_EQ_INT(ecat_transfer_cancel(&transfer, &other, other_token), ECAT_TRANSFER_COMPLETE, "other releases");
     TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)), 0, "SOES acquires shared core");
-    TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw, len), 0, "SOES short callback explicitly commits");
+    ecat_foe_soes_adapter_t rejected_adapter;
+    ecat_foe_soes_init(&rejected_adapter, &core, 512U);
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_bind_transfer(&rejected_adapter, &transfer), 0, "second SOES adapter binds");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&rejected_adapter, "", 0), ECAT_FOE_ERRCODE_ILLEGAL,
+                       "invalid WRQ on second adapter is rejected");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw, ECAT_FOE_EFW_HEADER_MIN_LEN), 0,
+                       "invalid WRQ preserves the original DATA route");
+    TEST_ASSERT(ecat_foe_soes_on_wrq(&rejected_adapter, name, strlen(name)) != 0,
+                "valid WRQ on second adapter cannot steal the lease");
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_write_cb(NULL, efw + ECAT_FOE_EFW_HEADER_MIN_LEN,
+                                             len - ECAT_FOE_EFW_HEADER_MIN_LEN), 0,
+                       "busy WRQ preserves the original route through commit");
     TEST_ASSERT_EQ_INT(mcu.count_finalize, 2, "SOES committed through manager");
 
 }

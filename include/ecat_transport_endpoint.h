@@ -215,6 +215,7 @@ ecat_transfer_result_t ecat_transport_endpoint_read_chunk(
 
 /**
  * @brief 完成导出回读会话
+ * @note 仍有未读数据时返回 ECAT_TRANSFER_INVALID，保留会话供继续读取或取消。
  * @param ep 端点句柄
  * @return ECAT_TRANSFER_COMPLETE 导出完成，ECAT_TRANSFER_PENDING 异步关闭中
  */
