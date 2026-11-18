@@ -522,7 +522,10 @@ static int pump_end(ecat_foe_core_async_t *s)
         memset(c->residual_buf + c->residual_len, 0xFF, unit - c->residual_len);
         memcpy(s->operation_storage, c->residual_buf, unit);
         c->residual_len = 0U;
-        return start_aligned_write(s, s->operation_storage, unit);
+        int wr = start_aligned_write(s, s->operation_storage, unit);
+        if (wr != 0) {
+            return wr;
+        }
     }
     if (ecat_foe_crc32_final(&c->stream_crc) != c->hdr.payload_crc32) {
         c->last_error = ECAT_FOE_CORE_ERR_STREAM_CRC_MISMATCH;
@@ -532,12 +535,15 @@ static int pump_end(ecat_foe_core_async_t *s)
         ecat_foe_crc32_init(&s->readback_crc);
         s->readback_remaining = c->hdr.payload_length;
     }
-    if (s->readback_remaining != 0U) {
+    while (s->readback_remaining != 0U) {
         uint32_t n = s->readback_remaining < sizeof(s->readback)
             ? s->readback_remaining : (uint32_t)sizeof(s->readback);
         s->readback_chunk = n;
-        return begin_operation(s, ECAT_FOE_TARGET_OP_READ, s->readback_offset,
-                               0U, NULL, n, s->readback, NULL);
+        int rr = begin_operation(s, ECAT_FOE_TARGET_OP_READ, s->readback_offset,
+                                 0U, NULL, n, s->readback, NULL);
+        if (rr != 0) {
+            return rr;
+        }
     }
     if (ecat_foe_crc32_final(&s->readback_crc) != c->hdr.payload_crc32) {
         c->last_error = ECAT_FOE_CORE_ERR_READBACK_CRC_MISMATCH;
@@ -634,7 +640,8 @@ static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s)
     if (r < 0) return fail_session(s, c->last_error);
     if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
     if (s->runner.pending) return ECAT_UPGRADE_ASYNC_PENDING;
-    if (s->state == ECAT_FOE_CORE_ASYNC_ENDING) return pump(s);
+    if (c->state == ECAT_FOE_STATE_SUCCESS) return ECAT_UPGRADE_ASYNC_COMPLETE;
+    if (s->state == ECAT_FOE_CORE_ASYNC_ENDING) return ECAT_UPGRADE_ASYNC_PENDING;
     return s->packet_complete ? ECAT_UPGRADE_ASYNC_COMPLETE : ECAT_UPGRADE_ASYNC_PENDING;
 }
 

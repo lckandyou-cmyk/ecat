@@ -27,6 +27,7 @@ typedef struct {
     uint16_t expected_target_id;
     bool resource_acquired;
     bool safe_session_abort;
+    uint32_t pending_read_mask;
 } async_flash_t;
 
 typedef struct {
@@ -134,7 +135,14 @@ static ecat_foe_target_async_result_t flash_start(void *ctx,
         }
         return ECAT_FOE_TARGET_ASYNC_FAILED;
     }
-    if (f->immediate) return flash_poll(ctx, op);
+    if (f->immediate) {
+        if (op->kind == ECAT_FOE_TARGET_OP_READ &&
+            (op->offset / 64U) < 32U &&
+            (f->pending_read_mask & (1U << (op->offset / 64U))) != 0U) {
+            return ECAT_FOE_TARGET_ASYNC_PENDING;
+        }
+        return flash_poll(ctx, op);
+    }
     return ECAT_FOE_TARGET_ASYNC_PENDING;
 }
 
@@ -1214,6 +1222,111 @@ int main(void)
             CHECK(!ecat_foe_core_upgrade_incomplete(&high_core));
             CHECK(!ecat_foe_core_target_upgrade_incomplete(&high_core, 65535U));
             CHECK(ecat_foe_core_deinit(&high_core) == 0);
+        }
+
+        /*
+         * 11. 多回读块 (>64B) + 尾部非对齐残余字节的同步完成与混合 PENDING/COMPLETE 推进：
+         *     - 全同步完成驱动 (immediate=true) 在 >64B 载荷下不应产生伪 PENDING 或自递归；
+         *     - 混合模式 (chunk0 同步完成、chunk1 PENDING、chunk2..3 同步完成) 应在 1 次 poll 内闭环。
+         */
+        {
+            ecat_target_registry_t imm_reg;
+            ecat_foe_core_t imm_core;
+            ecat_foe_core_async_t imm_sess;
+            ecat_transfer_t imm_xfer;
+            ecat_foe_ssc_adapter_t imm_ssc;
+            ecat_foe_ssc_async_t imm_gate;
+            ecat_foe_core_cfg_t imm_cfg = {0};
+            uint8_t imm_staging[512];
+            uint8_t imm_gate_pkt[512];
+            uint8_t imm_pkt[512];
+            uint8_t imm_op[256];
+            uint8_t imm_efw[ECAT_FOE_EFW_HEADER_MIN_LEN + 253U];
+            uint8_t imm_payload[253];
+            ecat_target_desc_t imm_desc = {0};
+            const char imm_name[] = "SERVO_DRV_MCU_V1.0.0.0.efw";
+
+            for (size_t i = 0; i < sizeof(imm_payload); i++) {
+                imm_payload[i] = (uint8_t)((i * 7U + 3U) & 0xFFU);
+            }
+
+            memset(&flash, 0, sizeof(flash));
+            flash.immediate = true;
+            flash.safe_session_abort = true;
+
+            CHECK(ecat_target_registry_init(&imm_reg) == 0);
+            imm_desc.target_id = ECAT_FOE_TARGET_MCU;
+            memcpy(imm_desc.name, "mcu_fw", sizeof("mcu_fw"));
+            imm_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
+            imm_desc.permissions = ECAT_PERM_WRITE;
+            imm_desc.max_size = sizeof(flash.flash);
+            imm_desc.write_unit = 4U;
+            imm_desc.enabled = true;
+            imm_desc.asynchronous = true;
+            imm_desc.async_safe_session_abort = true;
+            imm_desc.driver.fw_async_ops = &flash_ops;
+            imm_desc.driver.fw_async_user_ctx = &flash;
+            CHECK(ecat_target_registry_add(&imm_reg, &imm_desc) == 0);
+
+            imm_cfg.project_id = 0x10010001U;
+            imm_cfg.project_name = "SERVO_DRV";
+            imm_cfg.hardware_id = 1U;
+            imm_cfg.local_hw_ver = 1U;
+            imm_cfg.max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN;
+            imm_cfg.registry = &imm_reg;
+            CHECK(ecat_foe_core_init(&imm_core, &imm_cfg) == 0);
+            CHECK(ecat_foe_core_async_init(&imm_sess, &imm_core, imm_pkt,
+                  sizeof(imm_pkt), imm_op, sizeof(imm_op)) == 0);
+            CHECK(setup_managed_ssc_async(&imm_core, &imm_sess, &imm_ssc, &imm_gate,
+                  imm_gate_pkt, sizeof(imm_gate_pkt)) == 0);
+
+            size_t imm_len = make_efw(imm_efw, imm_payload, sizeof(imm_payload));
+
+            /* (a) SSC 最后一帧 bDataFollowing=false：253B 载荷（尾残余 1B + 4 个回读块）单次直接返回 0U 完成 */
+            CHECK(ecat_foe_ssc_on_write(&imm_ssc, imm_name,
+                  (uint16_t)(sizeof(imm_name) - 1U), 0U) == 0U);
+            size_t ssc_pos = 0U;
+            uint32_t ssc_tick = 10U;
+            while (imm_len - ssc_pos > 128U) {
+                CHECK(ecat_foe_ssc_on_data_following(&imm_ssc, imm_efw + ssc_pos,
+                      128U, true, ssc_tick++) == 0U);
+                ssc_pos += 128U;
+            }
+            CHECK(ecat_foe_ssc_on_data_following(&imm_ssc, imm_efw + ssc_pos,
+                  (uint16_t)(imm_len - ssc_pos), false, ssc_tick) == 0U);
+            CHECK(!imm_gate.pending && imm_core.state == ECAT_FOE_STATE_SUCCESS);
+            CHECK(flash.valid && memcmp(flash.flash, imm_payload, sizeof(imm_payload)) == 0);
+
+            /* (b) ecat_transfer 路径：全同步驱动 finish 单次直接返回 ECAT_TRANSFER_COMPLETE，零额外 poll */
+            CHECK(setup_async_transfer(&imm_xfer, &imm_core, &imm_sess,
+                  imm_staging, sizeof(imm_staging)) == 0);
+            memset(&flash, 0, sizeof(flash));
+            flash.immediate = true;
+            flash.safe_session_abort = true;
+            int owner_id = 88;
+            uint64_t imm_tok = 0;
+            ecat_transfer_request_t imm_req = {
+                1U, ECAT_FOE_TARGET_MCU, ECAT_TRANSFER_DIR_IMPORT, (uint32_t)imm_len, 0x01000000U
+            };
+            CHECK(ecat_transfer_begin(&imm_xfer, &owner_id, &imm_req, &imm_tok) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&imm_xfer, &owner_id, imm_tok, imm_efw, imm_len) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_finish(&imm_xfer, &owner_id, imm_tok) == ECAT_TRANSFER_COMPLETE);
+            CHECK(imm_core.state == ECAT_FOE_STATE_SUCCESS);
+            CHECK(flash.valid && memcmp(flash.flash, imm_payload, sizeof(imm_payload)) == 0);
+
+            /* (c) 混合回读：chunk0 立即完成、chunk1 返回 PENDING、chunk2..3 与 FINALIZE 立即完成 -> 仅需 1 次 poll */
+            memset(&flash, 0, sizeof(flash));
+            flash.immediate = true;
+            flash.safe_session_abort = true;
+            flash.pending_read_mask = (1U << 1);
+            CHECK(ecat_transfer_begin(&imm_xfer, &owner_id, &imm_req, &imm_tok) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_write(&imm_xfer, &owner_id, imm_tok, imm_efw, imm_len) == ECAT_TRANSFER_COMPLETE);
+            CHECK(ecat_transfer_finish(&imm_xfer, &owner_id, imm_tok) == ECAT_TRANSFER_PENDING);
+            CHECK(ecat_transfer_poll(&imm_xfer, &owner_id, imm_tok) == ECAT_TRANSFER_COMPLETE);
+            CHECK(imm_core.state == ECAT_FOE_STATE_SUCCESS);
+            CHECK(flash.valid && memcmp(flash.flash, imm_payload, sizeof(imm_payload)) == 0);
+
+            CHECK(ecat_foe_core_deinit(&imm_core) == 0);
         }
     }
 
