@@ -45,9 +45,8 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
         adapter->file_map[i].target_id = (uint16_t)(i + 1U);
         adapter->file_map[i].file_idx = (uint16_t)i;
     }
-    if (s_active_adapter == NULL || s_active_adapter == adapter ||
-        !ecat_foe_transport_owns(&s_active_adapter->transport)) {
-        s_active_adapter = adapter;
+    if (s_active_adapter == adapter) {
+        s_active_adapter = NULL;
     }
 }
 
@@ -86,6 +85,9 @@ static bool soes_target_is_async(const ecat_foe_soes_adapter_t *adapter, uint16_
 
 static void soes_abort_core(ecat_foe_soes_adapter_t *adapter)
 {
+    if (s_active_adapter == adapter) {
+        s_active_adapter = NULL;
+    }
     if (soes_has_transport(adapter))
         ecat_foe_transport_abort(&adapter->transport);
 }
@@ -225,7 +227,15 @@ uint32_t ecat_foe_soes_write_cb(foe_file_cfg_t *self, uint8_t *data, size_t leng
     if (ecat_foe_transport_start(&adapter->transport, data, length, more_data) != ECAT_UPGRADE_ASYNC_COMPLETE) {
         ecat_foe_transport_abort(&adapter->transport);
         adapter->write_callback_failed = true;
+        if (s_active_adapter == adapter) {
+            s_active_adapter = NULL;
+        }
         return 1U;
+    }
+    if (!more_data) {
+        if (s_active_adapter == adapter) {
+            s_active_adapter = NULL;
+        }
     }
     return 0U;
 }
@@ -483,15 +493,10 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     memcpy(adapter->synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
     foe_cfg->files[file_idx].name = adapter->synced_filenames[file_idx];
 
-    /* 暂存该合规 WRQ，等待原生 SOES 校验密码与 BOOT 状态接受后再行激活会话；
-     * 若另一实例当前正持有活跃传输，暂存阶段不提前抢占其回调指针 */
+    /* 暂存该合规 WRQ，等待原生 SOES 校验密码与 BOOT 状态接受后再行激活会话 */
     adapter->has_staged_wrq = true;
     memcpy(adapter->staged_filename, safe_name, (size_t)name_len + 1);
     adapter->staged_target_id = tid;
-    if (s_active_adapter == NULL || s_active_adapter == adapter ||
-        !ecat_foe_transport_owns(&s_active_adapter->transport)) {
-        s_active_adapter = adapter;
-    }
 
     return 0;
 }
