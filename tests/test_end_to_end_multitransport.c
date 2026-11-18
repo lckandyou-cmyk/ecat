@@ -1297,6 +1297,71 @@ int main(void)
     ecat_foe_ssc_on_abort(&ssc_adp, 0U);
     assert(ecat_transfer_is_active(&mgr) == false);
 
+    /* D3.8: 多实例 SOES 适配器活跃会话隔离 (防 init / 异实例被拒 WRQ 篡改 s_active_adapter) */
+    printf("--- 测试 D3.8: 多实例 SOES 适配器活跃会话与 DATA 回调路由隔离验证 ---\n");
+    {
+        ecat_foe_soes_adapter_t peer_soes;
+        ecat_target_registry_t peer_reg;
+        ecat_foe_core_t peer_core;
+        ecat_transfer_t peer_xfer;
+        assert(ecat_target_registry_init(&peer_reg) == 0);
+        assert(ecat_target_registry_add(&peer_reg, &mcu_desc) == 0);
+        ecat_foe_core_cfg_t peer_cfg = core_cfg;
+        peer_cfg.registry = &peer_reg;
+        assert(ecat_foe_core_init(&peer_core, &peer_cfg) == 0);
+        assert(ecat_transfer_init(&peer_xfer, &peer_reg, &peer_core) == 0);
+
+        uint8_t mbx_a_ctrl[2] = {0, 0}, mbx_b_ctrl[2] = {0, 0};
+        uint8_t mbx_a_bufs[2 * 128], mbx_b_bufs[2 * 128];
+        memset(mbx_a_bufs, 0, sizeof(mbx_a_bufs));
+        memset(mbx_b_bufs, 0, sizeof(mbx_b_bufs));
+        assert(ecat_foe_soes_set_mbx_context(&soes_adapter, mbx_a_ctrl, mbx_a_bufs, 2, 128) == 0);
+
+        foe_file_cfg_t files_a[1] = {{ .name = "DRIVE_SERVO_MCU.efw", .max_data = 2048, .write_function = ecat_foe_soes_write_cb }};
+        foe_cfg_t fcfg_a = { .n_files = 1, .buffer_size = 128, .files = files_a };
+
+        /* 1. 主适配器 soes_adapter 开启合法 WRQ 会话 */
+        assert(ecat_foe_soes_on_wrq(&soes_adapter, soes_mcu_fn, strlen(soes_mcu_fn)) == 0);
+        assert(ecat_transfer_is_active(&mgr) == true);
+
+        /* 2. 中途初始化空闲实例 peer_soes，并模拟 peer_soes 收到一条最终被原生栈以 ERR 拒绝的暂存 WRQ */
+        ecat_foe_soes_init(&peer_soes, &peer_core, 128U);
+        assert(ecat_foe_soes_bind_transfer(&peer_soes, &peer_xfer) == 0);
+        assert(ecat_foe_soes_set_mbx_context(&peer_soes, mbx_b_ctrl, mbx_b_bufs, 2, 128) == 0);
+        foe_file_cfg_t files_b[1] = {{ .name = "DRIVE_SERVO_MCU.efw", .max_data = 2048, .write_function = ecat_foe_soes_write_cb }};
+        foe_cfg_t fcfg_b = { .n_files = 1, .buffer_size = 128, .files = files_b };
+
+        size_t wrq_nlen = strlen(soes_mcu_fn);
+        mbx_b_bufs[0] = (uint8_t)(6U + wrq_nlen);
+        mbx_b_bufs[1] = 0U;
+        mbx_b_bufs[5] = 0x04U; /* FoE */
+        mbx_b_bufs[6] = 0x02U; /* WRQ */
+        memcpy(mbx_b_bufs + 12U, soes_mcu_fn, wrq_nlen);
+        assert(ecat_foe_soes_pre_process_hook(&peer_soes, &fcfg_b, mbx_b_bufs, 128U) == 0);
+        /* 模拟原生 SOES 在输出槽 1 回复 FOE_OP_ERR (如非 BOOT 态 0x8008) */
+        mbx_b_ctrl[1] = MBXstate_outreq;
+        mbx_b_bufs[128 + 0] = 6U;
+        mbx_b_bufs[128 + 5] = 0x04U;
+        mbx_b_bufs[128 + 6] = 0x05U; /* ERR */
+        mbx_b_bufs[128 + 8] = 0x08U;
+        mbx_b_bufs[128 + 9] = 0x80U;
+        assert(ecat_foe_soes_post_process_hook(&peer_soes, &fcfg_b, mbx_b_bufs + 128U, 128U) == 0);
+        assert(ecat_transfer_is_active(&peer_xfer) == false);
+
+        /* 3. 主适配器 soes_adapter 随后正常接收 FOE_OP_DATA 并写完整个 180 字节固件 */
+        mbx_a_bufs[0] = 122U;
+        mbx_a_bufs[1] = 0U;
+        mbx_a_bufs[5] = 0x04U;
+        mbx_a_bufs[6] = 0x03U; /* DATA */
+        mbx_a_bufs[8] = 1U;
+        assert(ecat_foe_soes_pre_process_hook(&soes_adapter, &fcfg_a, mbx_a_bufs, 128U) == 0);
+        assert(ecat_foe_soes_write_cb(&files_a[0], fw_buf, 128U) == 0U);
+        assert(ecat_foe_soes_pre_process_hook(&soes_adapter, &fcfg_a, mbx_a_bufs, 128U) == 0);
+        assert(ecat_foe_soes_write_cb(&files_a[0], fw_buf + 128U, fw_len - 128U) == 0U);
+        assert(core.state == ECAT_FOE_STATE_SUCCESS);
+        assert(ecat_transfer_is_active(&mgr) == false);
+    }
+
     printf(">>> 端到端多通道多目标双向传输测试全部通过！<<<\n");
     return 0;
 }

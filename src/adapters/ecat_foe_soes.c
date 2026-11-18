@@ -45,7 +45,10 @@ void ecat_foe_soes_init(ecat_foe_soes_adapter_t *adapter, ecat_foe_core_t *core,
         adapter->file_map[i].target_id = (uint16_t)(i + 1U);
         adapter->file_map[i].file_idx = (uint16_t)i;
     }
-    s_active_adapter = adapter;
+    if (s_active_adapter == NULL || s_active_adapter == adapter ||
+        !ecat_foe_transport_owns(&s_active_adapter->transport)) {
+        s_active_adapter = adapter;
+    }
 }
 
 static inline bool soes_has_transport(const ecat_foe_soes_adapter_t *adapter)
@@ -393,6 +396,8 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->pending_data_response = true;
         adapter->pending_data_packet = (uint32_t)mbx_buf[8] | ((uint32_t)mbx_buf[9] << 8) |
                                        ((uint32_t)mbx_buf[10] << 16) | ((uint32_t)mbx_buf[11] << 24);
+        /* 显式将回调路由绑定至当前正在处理 DATA 帧的适配器实例 */
+        s_active_adapter = adapter;
     }
     if (opcode == ECAT_FOE_OP_ERR) {
         adapter->pending_other_foe = false;
@@ -478,11 +483,15 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
     memcpy(adapter->synced_filenames[file_idx], safe_name, (size_t)name_len + 1);
     foe_cfg->files[file_idx].name = adapter->synced_filenames[file_idx];
 
-    /* 暂存该合规 WRQ，等待原生 SOES 校验密码与 BOOT 状态接受后再行激活会话 */
+    /* 暂存该合规 WRQ，等待原生 SOES 校验密码与 BOOT 状态接受后再行激活会话；
+     * 若另一实例当前正持有活跃传输，暂存阶段不提前抢占其回调指针 */
     adapter->has_staged_wrq = true;
     memcpy(adapter->staged_filename, safe_name, (size_t)name_len + 1);
     adapter->staged_target_id = tid;
-    s_active_adapter = adapter;
+    if (s_active_adapter == NULL || s_active_adapter == adapter ||
+        !ecat_foe_transport_owns(&s_active_adapter->transport)) {
+        s_active_adapter = adapter;
+    }
 
     return 0;
 }
