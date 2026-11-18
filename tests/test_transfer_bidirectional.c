@@ -3919,6 +3919,144 @@ int main(void)
         printf("  [PASS] 跨层缓冲别名逐字节校验与 CRC 验证 (4 拓扑 × 2 路径 + 失败安全) 全部通过\n");
     }
 
+    /* 10.19: driver_invalidated 状态跨会话复位与固件边界失败核心错误码保留验证 */
+    printf("--- 测试 10.19: driver_invalidated 跨会话复位与固件边界失败核心错误码保留 ---\n");
+    {
+        /* 10.19.1: 异步 DATA 目标 cancel 后再启动新会话 (PENDING INIT)，driver_invalidated 必须复位为 false */
+        memset(&s_hw_stage_test, 0, sizeof(s_hw_stage_test));
+        s_hw_stage_test.valid = true;
+        assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_COMPLETE);
+        assert(async_xfer.driver_invalidated == true);
+        assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+        assert(async_xfer.driver_invalidated == false);
+
+        s_hw_stage_test.pending_init = true;
+        assert(ecat_transfer_begin(&async_xfer, &client_owner1, &req_12, &tok_12) == ECAT_TRANSFER_PENDING);
+        assert(async_xfer.stage == ECAT_TRANSFER_STAGE_INIT);
+        assert(async_xfer.driver_invalidated == false);
+        assert(ecat_transfer_cancel(&async_xfer, &client_owner1, tok_12) == ECAT_TRANSFER_COMPLETE);
+
+        /* 10.19.2: 固件核心执行 invalidate 后调用 cancel/abort，core.driver_invalidated 必须复位为 false，
+         *          但持久未完成位图 ecat_foe_core_upgrade_incomplete 依然严格保留 */
+        ecat_target_registry_t diag_reg;
+        ecat_foe_core_t diag_core;
+        ecat_foe_core_async_t diag_sess;
+        ecat_transfer_t diag_mgr;
+        uint8_t diag_pkt[256];
+        uint8_t diag_op[256];
+        uint8_t diag_staging[256];
+        assert(ecat_target_registry_init(&diag_reg) == 0);
+
+        memset(&s_fw_test_flash, 0, sizeof(s_fw_test_flash));
+        ecat_target_desc_t async_fw_d = {
+            .target_id = 1U,
+            .name = "async_mcu",
+            .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = sizeof(s_fw_test_flash.flash),
+            .write_unit = 4U,
+            .enabled = true,
+            .asynchronous = true,
+            .async_safe_session_abort = true
+        };
+        async_fw_d.driver.fw_async_ops = &s_fw_flash_ops;
+        async_fw_d.driver.fw_async_user_ctx = &s_fw_test_flash;
+        assert(ecat_target_registry_add(&diag_reg, &async_fw_d) == 0);
+
+        reset_mock_flags();
+        ecat_target_desc_t sync_fw_d = {
+            .target_id = 2U,
+            .name = "sync_dsp",
+            .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_WRITE,
+            .max_size = MOCK_PARAM_SIZE,
+            .write_unit = 4U,
+            .enabled = true,
+            .asynchronous = false
+        };
+        sync_fw_d.driver.io = param_desc.driver.io;
+        assert(ecat_target_registry_add(&diag_reg, &sync_fw_d) == 0);
+
+        ecat_foe_core_cfg_t diag_cfg = {
+            .project_name = "DRIVE_SERVO",
+            .project_id = 0x10010001U,
+            .hardware_id = 1U,
+            .local_hw_ver = 1U,
+            .max_header_size = ECAT_FOE_EFW_HEADER_MIN_LEN,
+            .registry = &diag_reg
+        };
+        assert(ecat_foe_core_init(&diag_core, &diag_cfg) == 0);
+        assert(ecat_transfer_init(&diag_mgr, &diag_reg, &diag_core) == 0);
+        assert(ecat_transfer_set_staging_buffer(&diag_mgr, diag_staging, sizeof(diag_staging)) == 0);
+        assert(ecat_foe_core_async_init(&diag_sess, &diag_core, diag_pkt, sizeof(diag_pkt),
+                                        diag_op, sizeof(diag_op)) == 0);
+        assert(ecat_transfer_init_async_firmware(&diag_mgr, &diag_sess) == 0);
+
+        uint8_t p16[16] = {0xAAU, 0x55U};
+        uint8_t efw_t1[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
+        uint8_t efw_t2[ECAT_FOE_EFW_HEADER_MIN_LEN + 16U];
+        size_t len_t1 = make_test_efw(efw_t1, p16, sizeof(p16), 1U);
+        size_t len_t2 = make_test_efw(efw_t2, p16, sizeof(p16), 2U);
+
+        uint64_t dtok = 0;
+        ecat_transfer_request_t req_t2_exact = {
+            .transport_id = 1U, .target_id = 2U, .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = (uint32_t)len_t2, .fw_version = 0x01000000U
+        };
+        assert(ecat_transfer_begin(&diag_mgr, &client_owner1, &req_t2_exact, &dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, efw_t2, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+        assert(diag_core.driver_invalidated == true);
+        assert(ecat_foe_core_target_upgrade_incomplete(&diag_core, 2U) == true);
+        assert(ecat_transfer_cancel(&diag_mgr, &client_owner1, dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(diag_core.driver_invalidated == false);
+        assert(ecat_foe_core_target_upgrade_incomplete(&diag_core, 2U) == true);
+
+        /* 10.19.3: 同步固件 expected_size 少收触发 finish 失败 -> 保留 ERROR 状态与 UNDER_RECEIVE */
+        reset_mock_flags();
+        assert(ecat_transfer_begin(&diag_mgr, &client_owner1, &req_t2_exact, &dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, efw_t2, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_finish(&diag_mgr, &client_owner1, dtok) == ECAT_TRANSFER_FAILED);
+        assert(ecat_transfer_get_last_error(&diag_mgr) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+        assert(diag_core.state == ECAT_FOE_STATE_ERROR);
+        assert(ecat_foe_core_get_last_error(&diag_core) == ECAT_FOE_CORE_ERR_UNDER_RECEIVE);
+
+        /* 10.19.4: 异步固件 expected_size 少收触发 finish 失败 -> 保留 ERROR 状态与 UNDER_RECEIVE */
+        ecat_transfer_request_t req_t1_exact = {
+            .transport_id = 1U, .target_id = 1U, .direction = ECAT_TRANSFER_DIR_IMPORT,
+            .expected_size = (uint32_t)len_t1, .fw_version = 0x01000000U
+        };
+        s_fw_test_flash.abort_calls = 0;
+        assert(ecat_transfer_begin(&diag_mgr, &client_owner1, &req_t1_exact, &dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, efw_t1, ECAT_FOE_EFW_HEADER_MIN_LEN) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_finish(&diag_mgr, &client_owner1, dtok) == ECAT_TRANSFER_FAILED);
+        assert(ecat_transfer_get_last_error(&diag_mgr) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+        assert(s_fw_test_flash.abort_calls == 1);
+        assert(diag_core.state == ECAT_FOE_STATE_ERROR);
+        assert(ecat_foe_core_get_last_error(&diag_core) == ECAT_FOE_CORE_ERR_UNDER_RECEIVE);
+
+        /* 10.19.5: 固件 write 超出声明 expected_size -> 保留 OVER_RECEIVE (映射 FoE DISKFULL 0x8003) */
+        assert(ecat_transfer_begin(&diag_mgr, &client_owner1, &req_t1_exact, &dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, efw_t1, len_t1) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, p16, 4U) == ECAT_TRANSFER_FAILED);
+        assert(ecat_transfer_get_last_error(&diag_mgr) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+        assert(diag_core.state == ECAT_FOE_STATE_ERROR);
+        assert(ecat_foe_core_get_last_error(&diag_core) == ECAT_FOE_CORE_ERR_OVER_RECEIVE);
+        assert(ecat_foe_core_err_to_foe(ecat_foe_core_get_last_error(&diag_core), false, false) == ECAT_FOE_ERRCODE_DISKFULL);
+
+        /* 10.19.6: 异步固件单次 write 超出 staging_capacity -> 保留 ERROR 状态与 INVALID_ARG */
+        uint8_t tiny_staging[64];
+        assert(ecat_transfer_set_staging_buffer(&diag_mgr, tiny_staging, sizeof(tiny_staging)) == 0);
+        assert(ecat_transfer_begin(&diag_mgr, &client_owner1, &req_t1_exact, &dtok) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_write(&diag_mgr, &client_owner1, dtok, efw_t1, 100U) == ECAT_TRANSFER_FAILED);
+        assert(ecat_transfer_get_last_error(&diag_mgr) == ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED);
+        assert(diag_core.state == ECAT_FOE_STATE_ERROR);
+        assert(ecat_foe_core_get_last_error(&diag_core) == ECAT_FOE_CORE_ERR_INVALID_ARG);
+
+        ecat_foe_core_on_abort(&diag_core);
+        assert(ecat_foe_core_deinit(&diag_core) == 0);
+        printf("  [PASS] driver_invalidated 跨会话复位与固件边界失败核心错误码保留全部通过\n");
+    }
+
     printf(">>> 双向数据传输引擎全功能单元测试全部通过！<<<\n");
     return 0;
 }

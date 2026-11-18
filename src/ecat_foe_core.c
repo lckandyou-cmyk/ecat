@@ -209,6 +209,7 @@ static void core_reset_session(ecat_foe_core_t *core)
     core->session_active = false;
     core->driver_abort_called = false;
     core->driver_finalized = false;
+    core->driver_invalidated = false;
 
     core->req_target_id = 0;
     core->req_fw_version = 0;

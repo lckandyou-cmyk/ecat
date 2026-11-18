@@ -112,6 +112,7 @@ static inline const ecat_upgrade_session_t *get_transfer_session_const(const eca
 static void release_session(ecat_transfer_t *t, const void *owner, uint64_t token)
 {
     if (t != NULL) {
+        t->driver_invalidated = false;
         ecat_upgrade_session_t *s = get_transfer_session(t);
         if (s != NULL) {
             (void)ecat_upgrade_session_release_mgr(s, t, owner, token);
@@ -163,6 +164,9 @@ static void transfer_abort_firmware(ecat_transfer_t *t)
 /* Preserve firmware diagnostics after cleanup, as required by protocol hooks. */
 static void transfer_fail_firmware_core(ecat_transfer_t *t)
 {
+    if (t == NULL || t->core == NULL) {
+        return;
+    }
     ecat_foe_core_err_t error = t->core->last_error;
     if (error == ECAT_FOE_CORE_OK) error = ECAT_FOE_CORE_ERR_INVALID_ARG;
     ecat_foe_core_on_abort(t->core);
@@ -282,6 +286,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     t->erased_watermark = 0U;
     t->active = true;
     t->driver_initialized = false;
+    t->driver_invalidated = false;
     t->last_error = ECAT_TRANSFER_ERR_NONE;
     t->is_async = target->asynchronous;
     t->pending = false;
@@ -512,6 +517,7 @@ ecat_transfer_result_t ecat_transfer_begin(
                         release_session(t, owner, acquired_token);
                         return ECAT_TRANSFER_FAILED;
                     }
+                    t->driver_invalidated = true;
                 }
             }
         }
@@ -681,7 +687,12 @@ ecat_transfer_result_t ecat_transfer_write(
             t->current_offset > fw_cap ||
             length > (size_t)(fw_cap - t->current_offset)) {
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-            transfer_abort_firmware(t);
+            t->core->last_error = (length <= (size_t)UINT32_MAX &&
+                                   t->current_offset <= limit &&
+                                   length <= (size_t)(limit - t->current_offset))
+                ? ECAT_FOE_CORE_ERR_OVER_RECEIVE
+                : ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+            transfer_fail_firmware_core(t);
             t->active = false;
             release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
@@ -690,7 +701,8 @@ ecat_transfer_result_t ecat_transfer_write(
         if (t->is_async && t->fw_async_ops != NULL) {
             if (t->staging_buf == NULL || length > t->staging_capacity) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                transfer_abort_firmware(t);
+                t->core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
+                transfer_fail_firmware_core(t);
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -960,8 +972,16 @@ ecat_transfer_result_t ecat_transfer_finish(
             /* 异步固件导入核验 expected_size */
             if (t->total_size > 0U && t->current_offset != t->total_size) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                transfer_abort_firmware(t);
+                if (t->core != NULL) {
+                    t->core->last_error = (t->current_offset < t->total_size)
+                        ? ECAT_FOE_CORE_ERR_UNDER_RECEIVE
+                        : ECAT_FOE_CORE_ERR_OVER_RECEIVE;
+                    transfer_fail_firmware_core(t);
+                } else {
+                    transfer_abort_firmware(t);
+                }
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -976,6 +996,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 } else if (res == ECAT_UPGRADE_ASYNC_COMPLETE) {
                     t->core_started = false;
                     t->driver_initialized = false;
+                    t->driver_invalidated = false;
                     t->active = false;
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_COMPLETE;
@@ -983,6 +1004,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                     transfer_fail_firmware_core(t);
                     t->driver_initialized = false;
+                    t->driver_invalidated = false;
                     t->active = false;
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
@@ -994,6 +1016,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 transfer_abort_data(t);
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1009,6 +1032,7 @@ ecat_transfer_result_t ecat_transfer_finish(
             } else if (res == ECAT_ASYNC_OP_COMPLETE) {
                 /* 异步 FINALIZE 已经完成，绝不重复调用同步 io.finalize */
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_COMPLETE;
@@ -1016,6 +1040,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_FINALIZE;
                 transfer_abort_data(t);
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1034,10 +1059,14 @@ ecat_transfer_result_t ecat_transfer_finish(
             if (t->total_size > 0U && t->current_offset != t->total_size) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 if (t->core != NULL) {
-                    ecat_foe_core_on_abort(t->core);
+                    t->core->last_error = (t->current_offset < t->total_size)
+                        ? ECAT_FOE_CORE_ERR_UNDER_RECEIVE
+                        : ECAT_FOE_CORE_ERR_OVER_RECEIVE;
+                    transfer_fail_firmware_core(t);
                 }
                 t->core_started = false;
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1046,6 +1075,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 transfer_fail_firmware_core(t);
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1059,6 +1089,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                 }
                 t->core_started = false;
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
@@ -1072,6 +1103,7 @@ ecat_transfer_result_t ecat_transfer_finish(
                     }
                     t->core_started = false;
                     t->driver_initialized = false;
+                    t->driver_invalidated = false;
                     t->active = false;
                     release_session(t, owner, token);
                     return ECAT_TRANSFER_FAILED;
@@ -1082,6 +1114,7 @@ ecat_transfer_result_t ecat_transfer_finish(
 
     t->core_started = false;
     t->driver_initialized = false;
+    t->driver_invalidated = false;
     t->active = false;
     release_session(t, owner, token);
     return ECAT_TRANSFER_COMPLETE;
@@ -1106,6 +1139,7 @@ ecat_transfer_result_t ecat_transfer_cancel(
 
     t->core_started = false;
     t->driver_initialized = false;
+    t->driver_invalidated = false;
     t->active = false;
     release_session(t, owner, token);
     return ECAT_TRANSFER_COMPLETE;
@@ -1327,6 +1361,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                 t->pending = false;
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 t->driver_initialized = false;
+                t->driver_invalidated = false;
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_COMPLETE;
@@ -1354,6 +1389,7 @@ ecat_transfer_result_t ecat_transfer_poll(
             }
             transfer_abort_data(t);
             t->driver_initialized = false;
+            t->driver_invalidated = false;
             t->active = false;
             release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
