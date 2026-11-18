@@ -11,10 +11,18 @@ int main(void)
     uint32_t end = 0U;
     ctx.max_size = 8192U;
     ctx.sector_size = 4096U;
+    uint8_t dummy_buf[32] = {0};
     CHECK(ops->init(&ctx) == 0);
     CHECK(ops->erase_to(1U, &end, &ctx) != 0);
+    CHECK(ops->write(0U, dummy_buf, 16U, &ctx) != 0);
+    CHECK(ops->finalize(&ctx) != 0);
     CHECK(ops->invalidate(&ctx) == 0);
     CHECK(ops->erase_to(1U, &end, &ctx) == 0 && end == 4096U);
+    CHECK(ops->write(0U, dummy_buf, 16U, &ctx) == 0);
+    CHECK(ops->write(4090U, dummy_buf, 16U, &ctx) != 0);
+    CHECK(ops->write(UINT32_MAX - 5U, dummy_buf, 16U, &ctx) != 0);
+    CHECK(ops->write(8190U, dummy_buf, 16U, &ctx) != 0);
+    CHECK(ops->finalize(&ctx) == 0);
     ctx.max_size = UINT32_MAX;
     ctx.erased_watermark = UINT32_MAX - 10U;
     ctx.sector_size = 16U;

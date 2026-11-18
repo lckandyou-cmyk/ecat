@@ -268,6 +268,20 @@ int main(void)
     assert(found_high->driver.fw_async_user_ctx == &dummy_async_ctx);
     assert(found_high->async_safe_session_abort == true);
 
+    /* 7. 完全无后端驱动的异步写固件拦截与 ACL/权限非法位严格防御 */
+    ecat_target_desc_t no_backend_fw = fw_async_desc;
+    no_backend_fw.target_id = 999U;
+    strncpy(no_backend_fw.name, "fw_no_backend", sizeof(no_backend_fw.name));
+    no_backend_fw.driver.fw_async_ops = NULL;
+    no_backend_fw.driver.async_ops = NULL;
+    memset(&no_backend_fw.driver.io, 0, sizeof(no_backend_fw.driver.io));
+    assert(ecat_target_registry_add(&reg, &no_backend_fw) == -5);
+
+    assert(ecat_target_registry_add_acl(&reg, 1U, 1U, 0x80U) == -1);
+    assert(ecat_target_registry_add_acl(&reg, 1U, 1U, (uint8_t)(ECAT_PERM_READ | 0x80U)) == -1);
+    assert(ecat_target_registry_check_permission(&reg, 1U, 1U, 0x80U) == false);
+    assert(ecat_target_registry_check_permission(&reg, 1U, 1U, (uint8_t)(ECAT_PERM_READ | 0x80U)) == false);
+
     printf(">>> 目标注册表与权限控制单元测试全部通过！<<<\n");
     return 0;
 }

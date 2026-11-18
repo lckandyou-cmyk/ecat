@@ -179,6 +179,8 @@ int main(void)
     assert(ecat_transport_endpoint_init(NULL, 101, "custom_uart", &mgr, NULL) == -1);
     assert(ecat_transport_endpoint_init(&ep_uart, 101, "custom_uart", &mgr, NULL) == 0);
     assert(ecat_transport_endpoint_init(&ep_can, 102, "custom_can", &mgr, NULL) == 0);
+    /* 超过或等于 16 字节且无 NUL 终止符的端点名称必须严格拒绝 (-1) */
+    assert(ecat_transport_endpoint_init(&ep_uart, 103, "0123456789abcdef", &mgr, NULL) == -1);
 
     ecat_transport_callbacks_t cbs = {
         .on_session_start = on_start,

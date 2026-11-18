@@ -13,7 +13,8 @@ int ecat_transport_endpoint_init(
     ecat_transfer_t *mgr,
     void *user_ctx)
 {
-    if (ep == NULL || mgr == NULL || name == NULL || name[0] == '\0') {
+    if (ep == NULL || mgr == NULL || name == NULL || name[0] == '\0' ||
+        memchr(name, '\0', ECAT_TRANSPORT_NAME_MAX_LEN) == NULL) {
         return -1;
     }
 

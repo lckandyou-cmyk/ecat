@@ -70,7 +70,7 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
 
     /* 检查读写权限对应的驱动基本有效性 */
     if ((desc->permissions & ECAT_PERM_WRITE) != 0U) {
-        bool async_fw_write = (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous);
+        bool async_fw_write = (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous && desc->driver.fw_async_ops != NULL);
         bool async_data_write = (desc->asynchronous && desc->driver.async_ops != NULL);
         if (!async_fw_write && !async_data_write) {
             if (desc->driver.io.write == NULL || desc->driver.io.erase_to == NULL) {
@@ -135,7 +135,7 @@ const ecat_target_desc_t *ecat_target_registry_find_by_name(
 int ecat_target_registry_add_acl(ecat_target_registry_t *reg,
     uint16_t transport_id, uint16_t target_id, uint8_t allowed_perms)
 {
-    if (reg == NULL || allowed_perms == 0U) {
+    if (reg == NULL || allowed_perms == 0U || (allowed_perms & ~ECAT_PERM_RW) != 0U) {
         return -1;
     }
 
@@ -173,7 +173,8 @@ bool ecat_target_registry_check_permission(
     uint16_t target_id,
     uint8_t required_perm)
 {
-    if (reg == NULL || target_id == 0U || required_perm == 0U) {
+    if (reg == NULL || target_id == 0U || required_perm == 0U ||
+        (required_perm & ~ECAT_PERM_RW) != 0U) {
         return false;
     }
 

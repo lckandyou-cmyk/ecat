@@ -93,7 +93,13 @@ static int template_drv_erase_to(uint32_t need_end, uint32_t *erased_end, void *
 static int template_drv_write(uint32_t offset, const uint8_t *data, uint32_t len, void *user_ctx)
 {
     ecat_foe_driver_template_ctx_t *ctx = (ecat_foe_driver_template_ctx_t *)user_ctx;
-    if (ctx == (void *)0 || data == (void *)0 || !ctx->is_initialized) {
+    if (ctx == (void *)0 || data == (void *)0 || !ctx->is_initialized || !ctx->is_invalidated) {
+        return -1;
+    }
+
+    if (len > UINT32_MAX - offset ||
+        offset + len > ctx->max_size ||
+        offset + len > ctx->erased_watermark) {
         return -1;
     }
 
@@ -129,7 +135,7 @@ static int template_drv_read(uint32_t offset, uint8_t *buf, uint32_t len, void *
 static int template_drv_finalize(void *user_ctx)
 {
     ecat_foe_driver_template_ctx_t *ctx = (ecat_foe_driver_template_ctx_t *)user_ctx;
-    if (ctx == (void *)0 || !ctx->is_initialized) {
+    if (ctx == (void *)0 || !ctx->is_initialized || !ctx->is_invalidated) {
         return -1;
     }
 
