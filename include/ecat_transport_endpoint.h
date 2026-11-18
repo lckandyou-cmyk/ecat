@@ -101,7 +101,7 @@ void ecat_transport_endpoint_set_callbacks(
  * - 若底层为异步耗时初始化，返回 ECAT_TRANSFER_PENDING，此时会话处于 pending 状态，必须通过
  *   ecat_transport_endpoint_poll 推进，就绪时单次触发 on_session_start 并返回 ECAT_TRANSFER_COMPLETE；
  * - 在 pending 期间调用 write_chunk / finish_import 将被返回 ECAT_TRANSFER_BUSY 拦截保护；
- * - 若管理器已被其他通道占用返回 ECAT_TRANSFER_BUSY；权限不足返回 ECAT_TRANSFER_DENIED。
+ * - 若当前端点已持有会话或管理器已被其他通道占用，返回 ECAT_TRANSFER_BUSY 并保留原会话；权限不足返回 ECAT_TRANSFER_DENIED。
  *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID
@@ -156,6 +156,8 @@ ecat_transfer_result_t ecat_transport_endpoint_finish_import(
  * - 异步只读打开（READ_OPEN）挂起时返回 ECAT_TRANSFER_PENDING，需通过 poll 推进直到
  *   ECAT_TRANSFER_COMPLETE 后单次派发 on_session_start 回调；
  * - 在 pending 期间调用 read_chunk / finish_export 返回 ECAT_TRANSFER_BUSY 拦截。
+ *
+ * 同一端点已有会话时返回 ECAT_TRANSFER_BUSY，保留原会话。
  *
  * @param ep 端点句柄
  * @param target_id 目标区块 ID

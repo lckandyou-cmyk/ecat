@@ -842,6 +842,25 @@ static void test_soes_state_transition_aborts_active_session(void)
     an = ECAT_STATE_INIT;
     ecat_foe_soes_post_state_hook(&adapter, &as, &an);
     TEST_ASSERT_EQ_INT(an, ECAT_STATE_INIT, "成功后允许迁移");
+
+    const char *name = "SERVO_DRV_MCU_V1.0.0.0.efw";
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&adapter.transport, name, strlen(name)), 0,
+                       "bridge can start a new session after commit");
+    TEST_ASSERT(ecat_foe_soes_write_cb(NULL, efw, n) != 0,
+                "bridge commit cleared the previous SOES callback route");
+    TEST_ASSERT(ecat_foe_transport_owns(&adapter.transport),
+                "unrouted callback leaves the bridge session active");
+    ecat_foe_transport_abort(&adapter.transport);
+
+    TEST_ASSERT_EQ_INT(ecat_foe_soes_on_wrq(&adapter, name, strlen(name)), 0, "SOES restores its route");
+    ecat_foe_transport_abort(&adapter.transport);
+    TEST_ASSERT_EQ_INT(ecat_foe_transport_begin(&adapter.transport, name, strlen(name)), 0,
+                       "bridge can start a new session after abort");
+    TEST_ASSERT(ecat_foe_soes_write_cb(NULL, efw, n) != 0,
+                "bridge abort cleared the previous SOES callback route");
+    TEST_ASSERT(ecat_foe_transport_owns(&adapter.transport),
+                "unrouted callback leaves the bridge session active");
+    ecat_foe_transport_abort(&adapter.transport);
 }
 
 static void test_soes_invalid_boot_exit_aborts_active_session(void)

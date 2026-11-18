@@ -10,6 +10,8 @@ extern "C" {
 typedef struct {
     ecat_transfer_t *transfer;    /**< 权威统一双向传输管理器 (统一核心模式) */
     uint64_t token;
+    void (*on_session_closed)(void *ctx); /**< Internal adapter notification after release. */
+    void *session_closed_ctx;
     bool pending;
     bool begin_pending;           /**< 标记当前正在进行 begin 异步等待 */
     bool finish_after_write;

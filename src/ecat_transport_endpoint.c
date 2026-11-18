@@ -54,9 +54,8 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_import(
         return ECAT_TRANSFER_INVALID;
     }
 
-    /* 若之前有残留未完成会话，先安全取消 */
     if (ep->current_token != 0U) {
-        ecat_transport_endpoint_abort(ep);
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_request_t req;
@@ -217,7 +216,7 @@ ecat_transfer_result_t ecat_transport_endpoint_begin_export(
     }
 
     if (ep->current_token != 0U) {
-        ecat_transport_endpoint_abort(ep);
+        return ECAT_TRANSFER_BUSY;
     }
 
     ecat_transfer_request_t req;

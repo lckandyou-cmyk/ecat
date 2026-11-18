@@ -198,6 +198,11 @@ int main(void)
     size_t sync_read = 0U;
     uint64_t sync_export_token = ep_uart.current_token;
     assert(ecat_transport_endpoint_read_chunk(&ep_uart, sync_export_buf, 1U, &sync_read) == ECAT_TRANSFER_CONTINUE);
+    uint32_t replacement_size = 123U;
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 0U, &replacement_size) == ECAT_TRANSFER_BUSY);
+    assert(replacement_size == 123U);
+    assert(ep_uart.current_token == sync_export_token);
+    assert(ecat_transfer_get_bytes_transferred(&mgr) == 1U);
     assert(ecat_transport_endpoint_finish_export(&ep_uart) == ECAT_TRANSFER_INVALID);
     assert(ep_uart.current_token == sync_export_token);
     assert(s_read_opened && !s_cb_completed && s_cb_aborted_count == 0);
@@ -318,9 +323,17 @@ int main(void)
     /* 4.2 写入路径可重试契约: 参数错误后更正参数可继续写入 */
     assert(ecat_transport_endpoint_begin_import(&ep_uart, 1U, 16, 0) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_write_chunk(&ep_uart, NULL, 1) == ECAT_TRANSFER_INVALID);
-    /* 重试写入合法数据 */
+    /* 重试写入合法数据，重复 begin 保留已经写入的数据与会话。 */
     uint8_t retry_buf[16] = {0xAA};
-    assert(ecat_transport_endpoint_write_chunk(&ep_uart, retry_buf, 16) == ECAT_TRANSFER_COMPLETE);
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, retry_buf, 8U) == ECAT_TRANSFER_COMPLETE);
+    uint64_t import_token = ep_uart.current_token;
+    int abort_count = s_cb_aborted_count;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 0U, 1U, 0U) == ECAT_TRANSFER_BUSY);
+    assert(ecat_transport_endpoint_begin_export(&ep_uart, 1U, NULL) == ECAT_TRANSFER_BUSY);
+    assert(ep_uart.current_token == import_token);
+    assert(ecat_transfer_get_bytes_transferred(&mgr) == 8U);
+    assert(s_cb_aborted_count == abort_count);
+    assert(ecat_transport_endpoint_write_chunk(&ep_uart, retry_buf + 8U, 8U) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transport_endpoint_finish_import(&ep_uart) == ECAT_TRANSFER_COMPLETE);
 
     /* 4.3 回读导出路径空指针错误后调用 abort 必须释放底层传输会话 */
@@ -505,6 +518,12 @@ int main(void)
     assert(ep_uart.state == ECAT_TRANSPORT_STATE_EXPORTING);
     assert(s_cb_started == false);
     assert(exp_total == 0U);
+
+    uint64_t pending_export_token = ep_uart.current_token;
+    assert(ecat_transport_endpoint_begin_import(&ep_uart, 1U, 16U, 0U) == ECAT_TRANSFER_BUSY);
+    assert(ep_uart.current_token == pending_export_token);
+    assert(ep_uart.begin_pending && ecat_transport_endpoint_is_pending(&ep_uart));
+    assert(s_cb_aborted_count == 0);
 
     /* 在 begin_pending 期间调用 read_chunk / finish_export: 必须返回 BUSY */
     uint8_t exp_buf[64];

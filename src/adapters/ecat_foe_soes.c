@@ -55,13 +55,25 @@ static inline bool soes_has_transport(const ecat_foe_soes_adapter_t *adapter)
     return (adapter != NULL && adapter->transport.transfer != NULL);
 }
 
+static void soes_clear_route(void *ctx)
+{
+    if (s_active_adapter == ctx) {
+        s_active_adapter = NULL;
+    }
+}
+
 int ecat_foe_soes_bind_transfer(ecat_foe_soes_adapter_t *adapter, ecat_transfer_t *transfer)
 {
     if (adapter == NULL || transfer == NULL || transfer->core == NULL || adapter->core != transfer->core ||
         soes_has_transport(adapter) || adapter->has_staged_wrq) {
         return -1;
     }
-    return ecat_foe_transport_init_transfer(&adapter->transport, transfer);
+    int result = ecat_foe_transport_init_transfer(&adapter->transport, transfer);
+    if (result == 0) {
+        adapter->transport.on_session_closed = soes_clear_route;
+        adapter->transport.session_closed_ctx = adapter;
+    }
+    return result;
 }
 
 static bool soes_target_is_async(const ecat_foe_soes_adapter_t *adapter, uint16_t target_id)
@@ -85,9 +97,7 @@ static bool soes_target_is_async(const ecat_foe_soes_adapter_t *adapter, uint16_
 
 static void soes_abort_core(ecat_foe_soes_adapter_t *adapter)
 {
-    if (s_active_adapter == adapter) {
-        s_active_adapter = NULL;
-    }
+    soes_clear_route(adapter);
     if (soes_has_transport(adapter))
         ecat_foe_transport_abort(&adapter->transport);
 }
@@ -572,6 +582,9 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
             bool ack = false;
             unsigned claimed = 0;
             adapter->pending_data_response = false;
+            if (!ecat_foe_transport_owns(&adapter->transport)) {
+                soes_clear_route(adapter);
+            }
             for (uint8_t i = 1; i < adapter->mbx_ctx.num_buffers; i++) {
                 if (adapter->mbx_ctx.pre_states[i] == MBXstate_idle &&
                     adapter->mbx_ctx.mbx_control_states[i] == MBXstate_outreq) {

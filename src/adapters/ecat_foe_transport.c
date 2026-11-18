@@ -59,6 +59,19 @@ bool ecat_foe_transport_owns(const ecat_foe_transport_t *t)
     return ecat_upgrade_session_owns_mgr(sess, mgr, t, t->token);
 }
 
+static void notify_session_closed(ecat_foe_transport_t *t)
+{
+    if (t->on_session_closed != NULL) {
+        t->on_session_closed(t->session_closed_ctx);
+    }
+}
+
+static void mark_committed(ecat_foe_transport_t *t)
+{
+    t->committed = true;
+    notify_session_closed(t);
+}
+
 void ecat_foe_transport_abort(void *ctx)
 {
     ecat_foe_transport_t *t = (ecat_foe_transport_t *)ctx;
@@ -79,6 +92,7 @@ void ecat_foe_transport_abort(void *ctx)
     t->has_staged_packet = false;
     t->staged_length = 0U;
     t->staged_more_data = false;
+    notify_session_closed(t);
 }
 
 int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t length)
@@ -183,7 +197,7 @@ ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *d
                 t->pending = true;
                 return ECAT_UPGRADE_ASYNC_PENDING;
             } else if (fres == ECAT_TRANSFER_COMPLETE) {
-                t->committed = true;
+                mark_committed(t);
                 return ECAT_UPGRADE_ASYNC_COMPLETE;
             } else {
                 ecat_foe_transport_abort(t);
@@ -241,14 +255,14 @@ ecat_upgrade_async_result_t ecat_foe_transport_poll(void *ctx)
                 t->pending = true;
                 return ECAT_UPGRADE_ASYNC_PENDING;
             } else if (fres == ECAT_TRANSFER_COMPLETE) {
-                t->committed = true;
+                mark_committed(t);
                 return ECAT_UPGRADE_ASYNC_COMPLETE;
             } else {
                 ecat_foe_transport_abort(t);
                 return ECAT_UPGRADE_ASYNC_FAILED;
             }
         }
-        if (t->finishing) t->committed = true;
+        if (t->finishing) mark_committed(t);
         return ECAT_UPGRADE_ASYNC_COMPLETE;
     } else {
         ecat_foe_transport_abort(t);
