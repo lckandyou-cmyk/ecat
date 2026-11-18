@@ -1,3 +1,4 @@
+#include "../src/ecat_upgrade_session_internal.h"
 #include "../src/ecat_foe_core_internal.h"
 /**
  * @file test_transfer_bidirectional.c
@@ -1232,12 +1233,29 @@ int main(void)
     uint64_t dummy_t = 0;
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &too_large_req, &dummy_t) == ECAT_TRANSFER_FAILED);
 
+    assert(core.state == ECAT_FOE_STATE_ERROR);
+    assert(ecat_foe_core_get_last_error(&core) == ECAT_FOE_CORE_ERR_UNDER_RECEIVE);
+
     /* 3.5 合法 16 字节有效负载端到端导入成功 */
     uint64_t valid_token = 0;
     assert(ecat_transfer_begin(&fw_manager, &channel_uart, &trunc_req, &valid_token) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_write(&fw_manager, &channel_uart, valid_token, s_valid_16_efw, sizeof(s_valid_16_efw)) == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_finish(&fw_manager, &channel_uart, valid_token) == ECAT_TRANSFER_COMPLETE);
     assert(core.written_offset == 16U);
+
+    ecat_transfer_request_t data_read_request = {
+        .transport_id = 1U,
+        .target_id = 2U,
+        .direction = ECAT_TRANSFER_DIR_EXPORT
+    };
+    uint64_t data_read_token = 0U;
+    assert(ecat_transfer_begin(&fw_manager, &channel_uart, &data_read_request,
+                               &data_read_token) == ECAT_TRANSFER_COMPLETE);
+    assert(core.state == ECAT_FOE_STATE_SUCCESS);
+    assert(core.written_offset == 16U);
+    assert(ecat_transfer_begin(&fw_manager, &channel_can, &trunc_req, &valid_token) == ECAT_TRANSFER_BUSY);
+    assert(core.state == ECAT_FOE_STATE_SUCCESS);
+    assert(ecat_transfer_cancel(&fw_manager, &channel_uart, data_read_token) == ECAT_TRANSFER_COMPLETE);
 
     /* 3.6 单一权威注册表下驱动回调与对齐参数完整性校验: 缺失关键回调或非法 write_unit 必须在 begin 前拦截 */
     uint64_t bad_drv_tok = 0;

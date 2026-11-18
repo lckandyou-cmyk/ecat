@@ -1,4 +1,4 @@
-#include "ecat_upgrade_session.h"
+#include "ecat_upgrade_session_internal.h"
 #include <stddef.h>
 
 ecat_upgrade_session_result_t ecat_upgrade_session_acquire_mgr(

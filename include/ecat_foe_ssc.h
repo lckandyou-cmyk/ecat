@@ -48,7 +48,7 @@ typedef struct {
     ecat_foe_ssc_async_t *async_gate;      /**< 可选：异步 DATA/BUSY 门控 */
     uint32_t         max_packet_size;     /**< SSC 邮箱配置的单包最大容量 (若已知) */
     uint32_t         expected_password;    /**< 允许的 FoE 密码，默认 0 */
-    bool             session_active;      /**< 当前会话是否处于激活状态 */
+    bool             session_active;      /**< SSC 仍在处理本次 FoE 交换（含等待重传以回复错误） */
     bool             async_final_acked;   /**< 异步末包已完成并向 SSC 确认 */
 } ecat_foe_ssc_adapter_t;
 

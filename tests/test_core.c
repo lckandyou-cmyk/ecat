@@ -1,3 +1,4 @@
+#include "../src/ecat_upgrade_session_internal.h"
 #include "test_core_helpers.h"
 /**
  * @file test_core.c

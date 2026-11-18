@@ -1,4 +1,4 @@
-#include "ecat_foe_target_async.h"
+#include "../src/ecat_foe_target_async_internal.h"
 
 #include <stdio.h>
 #include <string.h>

@@ -1,3 +1,4 @@
+#include "ecat_upgrade_session_internal.h"
 #include "ecat_foe_core_internal.h"
 /**
  * @file ecat_transfer.c
@@ -220,9 +221,6 @@ ecat_transfer_result_t ecat_transfer_begin(
             t->core->state == ECAT_FOE_STATE_DATA ||
             t->core->session_active) {
             return ECAT_TRANSFER_BUSY;
-        }
-        if (t->core->state == ECAT_FOE_STATE_SUCCESS || t->core->state == ECAT_FOE_STATE_ERROR) {
-            ecat_foe_core_on_abort(t->core);
         }
     }
 

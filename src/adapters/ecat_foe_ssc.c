@@ -143,7 +143,6 @@ uint16_t ecat_foe_ssc_on_write(ecat_foe_ssc_adapter_t *adapter, const char *pNam
 
     if (adapter->async_gate != NULL && adapter->session_active) {
         ecat_foe_ssc_async_abort_session(adapter->async_gate);
-        ssc_abort_core(adapter);
         adapter->session_active = false;
     } else if (adapter->async_gate != NULL &&
                (adapter->async_gate->pending || adapter->async_gate->completed)) {
@@ -255,8 +254,10 @@ uint16_t ecat_foe_ssc_on_data_following(ecat_foe_ssc_adapter_t *adapter,
     if (result != 0U) {
         adapter->session_active = false;
         adapter->async_final_acked = false;
-        ecat_foe_ssc_async_abort(adapter->async_gate);
-        if (adapter->core != NULL) {
+        if (adapter->async_gate->pending) {
+            ecat_foe_ssc_async_abort_session(adapter->async_gate);
+        } else {
+            ecat_foe_ssc_async_abort(adapter->async_gate);
             ssc_abort_core(adapter);
         }
         return result;
@@ -283,12 +284,9 @@ uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
     }
     uint16_t result = ecat_foe_ssc_async_poll(adapter->async_gate, now_ticks);
     if (result == adapter->async_gate->operation_error_foe_code &&
-        adapter->async_gate->completed && adapter->async_gate->operation_failed &&
-        adapter->core != NULL) {
-        /* Timeout and driver failures happen in the main loop, outside DATA
-         * callback routing. Close verifier/core state here; preserve the gate's
-         * completed packet so SSC's retransmission receives the configured error. */
-        ssc_abort_core(adapter);
+        adapter->async_gate->completed && adapter->async_gate->operation_failed) {
+        /* The gate has cancelled the transfer. Keep the protocol exchange open
+         * until the master retries and receives the configured error. */
         adapter->session_active = true;
         adapter->async_final_acked = false;
     }
@@ -341,8 +339,9 @@ void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
         (adapter->session_active || adapter->async_gate->pending ||
          adapter->async_gate->completed)) {
         ecat_foe_ssc_async_abort_session(adapter->async_gate);
+    } else {
+        ssc_abort_core(adapter);
     }
-    ssc_abort_core(adapter);
     adapter->session_active = false;
     adapter->async_final_acked = false;
 }

@@ -1,4 +1,4 @@
-#include "ecat_upgrade_session.h"
+#include "../src/ecat_upgrade_session_internal.h"
 #include <stdint.h>
 #include <stdio.h>
 

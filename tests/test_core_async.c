@@ -1,3 +1,5 @@
+#include "../src/ecat_foe_target_async_internal.h"
+#include "../src/ecat_upgrade_session_internal.h"
 #include "test_core_helpers.h"
 #include "ecat_foe_core_async.h"
 #include "ecat_foe_ssc.h"

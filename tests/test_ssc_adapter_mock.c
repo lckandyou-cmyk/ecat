@@ -9,6 +9,7 @@
  * 绝不能将本 Mock 测试称作真实 SSC 验证！
  */
 
+#include "../src/ecat_upgrade_session_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

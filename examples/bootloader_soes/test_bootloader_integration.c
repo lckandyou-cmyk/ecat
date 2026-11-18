@@ -18,6 +18,7 @@
 #error "bootloader integration tests require assertions"
 #endif
 
+#include "../../src/ecat_upgrade_session_internal.h"
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
